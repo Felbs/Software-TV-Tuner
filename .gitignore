@@ -1,0 +1,12 @@
+build/
+*.o
+*.so
+*.so.*
+__pycache__/
+*.pyc
+.conda/
+*.cs16
+*.cf32
+*.ts
+results/*.json
+!results/.gitkeep
