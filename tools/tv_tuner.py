@@ -567,9 +567,14 @@ def ffprobe_programs(timeout_sec: float = 12.0) -> list[dict]:
 
 def scan_one_rf(rf: int, dwell_sec: float = 12.0,
                  viterbi: str = "stock",
-                 log_fh=None) -> dict:
+                 log_fh=None,
+                 retries: int = 0) -> dict:
     """Tune one RF, wait for convergence, probe programs. Returns a result
-    dict. Always cleans up its tv_live process before returning."""
+    dict. Always cleans up its tv_live process before returning.
+
+    `retries` lets weak-signal candidates have multiple shots at the
+    probabilistic equalizer cold-start convergence. Each retry kills the
+    tv_live process, waits ~3s for the SDR to release, then re-spawns."""
     # Clean live.ts so convergence/probe see only this RF's bytes.
     try:
         LIVE_TS.unlink()
@@ -628,6 +633,24 @@ def scan_one_rf(rf: int, dwell_sec: float = 12.0,
         time.sleep(3)
 
 
+def scan_one_rf_with_retry(rf: int, dwell_sec: float = 12.0,
+                            viterbi: str = "stock", log_fh=None,
+                            retries: int = 0) -> dict:
+    """Try scan_one_rf up to (1 + retries) times. Returns the first
+    successful lock, otherwise the last failed result. Used for
+    marginal-signal channels where the equalizer's probabilistic cold
+    start often misses the first attempt."""
+    last = None
+    for attempt in range(retries + 1):
+        res = scan_one_rf(rf, dwell_sec=dwell_sec, viterbi=viterbi,
+                           log_fh=log_fh)
+        last = res
+        if res.get("lock"):
+            res["lock_attempt"] = attempt + 1
+            return res
+    return last or {"rf": rf, "lock": False, "reason": "all retries failed"}
+
+
 def lookup_callsign(rf: int) -> tuple[str, str] | None:
     """Best-effort callsign + network from the bundled DC stations table.
     Returns None if RF isn't in the table — scan still works, you just
@@ -662,6 +685,7 @@ def run_power_sweep(freqs_hz: list[int], log_fh=None) -> list[dict]:
 def run_scan(region: dict | None = None,
              dwell_sec: float = 8.0,
              save: bool = True,
+             include_weak: bool = False,
              # Thresholds tuned by tools/scan_lab/harness.py for max-margin F1=1.0
              # against HDHomeRun ground truth on the DC fixture set
              # (winning_recipe.json). Worst-case slack on must-detect channels:
@@ -669,7 +693,16 @@ def run_scan(region: dict | None = None,
              pilot_snr_threshold_db: float = 30.0,
              pilot_sharpness_threshold_db: float = 26.25,
              vsb_asymmetry_threshold_db: float = 2.4,
-             rms_threshold_db: float = 4.0) -> dict:
+             rms_threshold_db: float = 4.0,
+             # `weak_*` thresholds activate only with --thorough / include_weak.
+             # They catch the marginal HDHomeRun-class carriers that sit
+             # below the strict gate's noise floor (e.g. RF22 MPT at sharpness
+             # 9.8 dB, far-station rebroadcasts). Phase 2 is NOT run on these
+             # — they are recorded as known carrier locations the user can
+             # manually try to tune from the picker.
+             weak_pilot_snr_db: float = 18.0,
+             weak_pilot_sharpness_db: float = 8.0,
+             weak_vsb_asymmetry_db: float = 1.0) -> dict:
     """Two-phase scan over the channels of `region`.
 
       Phase 1: fast SoapySDR sweep + per-channel FFT analysis in a
@@ -728,6 +761,7 @@ def run_scan(region: dict | None = None,
         results = []
         intl_carriers = []
         atsc3_carriers = []
+        weak_atsc1_carriers = []
         hot_atsc = []
         for (atsc_rf, freq, label), s in zip(all_freqs, sweep_out):
             rms = s.get("rms_dbfs", float("-inf"))
@@ -735,16 +769,23 @@ def run_scan(region: dict | None = None,
             pilot_sharp = s.get("pilot_sharpness_db", float("-inf"))
             vsb_asym = s.get("vsb_asymmetry_db", float("-inf"))
             atsc3_score = s.get("atsc3_db", float("-inf"))
-            # All three ATSC 1.0 fingerprints must be present:
-            # 1. pilot bin clearly above noise (pilot SNR)
-            # 2. that peak is sharp like a CW carrier (sharpness)
-            # 3. data sideband above pilot is louder than vestigial side
+            # Strict ATSC 1.0 gate: all three fingerprints present.
             atsc1_carrier = (pilot_snr >= pilot_snr_threshold_db
                              and pilot_sharp >= pilot_sharpness_threshold_db
                              and vsb_asym >= vsb_asymmetry_threshold_db)
+            # Weak ATSC 1.0 gate (only checked in include_weak mode):
+            # all three relaxed thresholds present. Catches carriers that
+            # HDHomeRun's hardware front-end can resolve but our software
+            # detection's strict gate filters as borderline. We mark these
+            # as "weak" candidate frequencies for the user to optionally
+            # try tuning manually — phase 2 is NOT run on them.
+            weak_atsc1 = (not atsc1_carrier
+                          and pilot_snr >= weak_pilot_snr_db
+                          and pilot_sharp >= weak_pilot_sharpness_db
+                          and vsb_asym >= weak_vsb_asymmetry_db)
             # ATSC 3.0 broadcasts only on UHF (RF ≥ 14). The VHF-Lo "OFDM"
             # hits we saw on RF 3-6 are RFI / ham band leak, not 3.0.
-            atsc3_carrier = (not atsc1_carrier
+            atsc3_carrier = (not atsc1_carrier and not weak_atsc1
                              and atsc3_score >= 10.0
                              and rms >= rms_threshold
                              and atsc_rf is not None and atsc_rf >= 14)
@@ -759,6 +800,15 @@ def run_scan(region: dict | None = None,
                        "hot": atsc1_carrier}
                 if atsc1_carrier:
                     hot_atsc.append((atsc_rf, rec))
+                elif weak_atsc1 and include_weak:
+                    rec["lock"] = False
+                    rec["weak"] = True
+                    rec["reason"] = (f"weak ATSC 1.0 carrier (SNR "
+                                     f"{pilot_snr:+.0f}, sharp "
+                                     f"{pilot_sharp:+.0f}, VSB "
+                                     f"{vsb_asym:+.0f} dB) — manually "
+                                     f"try tuning from picker")
+                    weak_atsc1_carriers.append(rec)
                 elif atsc3_carrier:
                     rec["lock"] = False
                     rec["reason"] = (f"ATSC 3.0 / NextGen TV detected — "
@@ -831,6 +881,7 @@ def run_scan(region: dict | None = None,
             "channels": results,
             "intl_carriers": intl_carriers,
             "atsc3_carriers": atsc3_carriers,
+            "weak_atsc1_carriers": weak_atsc1_carriers,
             "noise_floor_dbfs": median,
         }
         n_lock = sum(1 for r in results if r.get("lock"))
@@ -843,6 +894,16 @@ def run_scan(region: dict | None = None,
                   f"This region uses {region['standard']}; Software TV "
                   f"Tuner can detect them but not decode (we're ATSC "
                   f"1.0 / 8-VSB only).")
+        if weak_atsc1_carriers:
+            print(f"[scan] also {len(weak_atsc1_carriers)} weak ATSC 1.0 "
+                  f"carrier(s) detected at marginal signal:")
+            for c in weak_atsc1_carriers:
+                print(f"         RF {c['rf']:>2} ({c['freq_mhz']:5.1f} MHz)  "
+                      f"SNR {c['pilot_snr_db']:+.0f} / sharp "
+                      f"{c['pilot_sharpness_db']:+.0f} / VSB "
+                      f"{c['vsb_asymmetry_db']:+.0f} dB")
+            print("       (try tuning from the picker — may need a "
+                  "stronger antenna to actually decode)")
         if intl_carriers and decodable:
             print(f"[scan] also {len(intl_carriers)} non-ATSC carrier(s) "
                   "detected (cannot decode).")
@@ -1351,6 +1412,32 @@ def expand_channels_from_scan(scan: dict) -> list[dict]:
                 "now_title": now_title,
                 "now_remaining_sec": now_remaining,
             })
+    # Append weak ATSC carriers — channels where phase-1 detected a real
+    # ATSC carrier but at marginal signal. Phase 2 was skipped, so these
+    # have no PSIP / program info; user can attempt to tune from the
+    # picker. Labeled with the static fcc_dc_stations table when known.
+    for w in scan.get("weak_atsc1_carriers", []) or []:
+        rf = w["rf"]
+        info = lookup(rf)
+        callsign = (info.get("callsign", "") if info else "") or f"RF{rf}"
+        virt = (info.get("virtual", "") if info else "") or f"{rf}.1"
+        network = (info.get("network", "") if info else "") or "(weak signal)"
+        rows.append({
+            "rf": rf,
+            "virtual": virt,
+            "callsign": callsign,
+            "network": network,
+            "city": "",
+            "program": 1,
+            "is_sub": False,
+            "label": f"{callsign} {network}".strip(),
+            "quality": "weak — manual tune",
+            "service_name": "",
+            "now_title": "",
+            "now_remaining_sec": 0,
+            "weak": True,
+        })
+
     # Sort by virtual major.minor when available so 4.1, 4.2, 4.3, 4.4
     # group naturally above 5.1, 7.1, etc.
     def sort_key(r):
@@ -1385,7 +1472,10 @@ def print_scan_table(scan: dict) -> list[dict]:
         major = r["virtual"].split(".")[0] if "." in r["virtual"] else None
         if last_major is not None and major != last_major:
             print(f"       {'─' * 65}")
-        marker = "└▸" if r["is_sub"] else "★ "
+        if r.get("weak"):
+            marker = "≈ "  # weak signal marker
+        else:
+            marker = "└▸" if r["is_sub"] else "★ "
         q = r.get("quality", "") or ""
         if has_now:
             now = r.get("now_title") or ""
@@ -2207,6 +2297,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--scan-dwell", type=float, default=8.0,
                    help="Seconds to wait per hot channel during phase 2 "
                         "(longer = more reliable lock on weak signals)")
+    p.add_argument("--thorough", action="store_true",
+                   help="Also report weak ATSC carriers at HDHomeRun-class "
+                        "marginal sensitivity. These won't pass the strict "
+                        "lock test (won't auto-play), but the picker will "
+                        "list them so you can manually try tuning each one.")
     p.add_argument("--region", default=None,
                    help=f"Region key (skips the interactive picker). "
                         f"Options: {', '.join(r['key'] for r in REGIONS)}")
@@ -2252,7 +2347,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
         else:
             region = prompt_region()
-        run_scan(region=region, dwell_sec=args.scan_dwell)
+        run_scan(region=region, dwell_sec=args.scan_dwell,
+                 include_weak=args.thorough)
         return 0
 
     # Resolve stream URL: NAME from config, else literal URL, else None
