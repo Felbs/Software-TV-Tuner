@@ -337,28 +337,175 @@ def measure_convergence(min_size: int = 5_000_000) -> int:
 # repack; 52-69 went to cellular in 2009.
 SCAN_RF_RANGE = list(range(2, 7)) + list(range(7, 14)) + list(range(14, 37))
 
-# International TV-band centre frequencies in Hz, for the carrier-presence
-# pre-sweep. These regions use DVB-T/T2, ISDB-T, or DTMB — magic-tv-decoder
-# can't decode those (we're 8-VSB only), but reporting "carrier present at
-# 506 MHz" still helps an international user verify their antenna + SDR
-# are actually receiving TV signals.
-def _make_intl_channels():
+def rf_to_freq_mhz(rf: int) -> float:
+    """North American ATSC RF→MHz center-frequency table."""
+    if 2 <= rf <= 4:
+        return 57.0 + (rf - 2) * 6.0
+    if 5 <= rf <= 6:
+        return 79.0 + (rf - 5) * 6.0
+    if 7 <= rf <= 13:
+        return 177.0 + (rf - 7) * 6.0
+    if 14 <= rf <= 36:
+        return 473.0 + (rf - 14) * 6.0
+    if 37 <= rf <= 50:  # used by some markets (e.g. South Korea)
+        return 473.0 + (rf - 14) * 6.0
+    return 0.0
+
+
+# Region-specific TV channel allocations. Each entry's `channels` is a list
+# of (atsc_rf_or_None, center_freq_hz, label) tuples.
+#   atsc_rf      = ATSC RF channel number for decodable broadcasts; None
+#                  for non-ATSC regions where we only sniff carriers.
+#   center_freq  = RF tuning frequency in Hz.
+#   label        = human-readable channel identifier ("RF34", "UHF21", ...).
+#
+# Only ATSC 1.0 regions (NA, South Korea, Mexico) are *decodable* — we're
+# 8-VSB only. Everywhere else we report carrier presence ("yes, RF energy
+# here, looks like a real TV broadcast") but cannot turn those bytes into
+# a watchable picture without a different decoder.
+
+def _atsc(rfs):
+    return [(rf, int(rf_to_freq_mhz(rf) * 1_000_000), f"RF{rf}")
+            for rf in rfs]
+
+def _dvbt_8mhz_uhf(start_ch, end_ch):
+    """DVB-T/T2 UHF Band IV/V. Ch 21 = 470-478 MHz, center 474; 8 MHz step."""
+    return [(None, int((474 + (n - 21) * 8) * 1_000_000), f"UHF{n}")
+            for n in range(start_ch, end_ch + 1)]
+
+def _dvbt_7mhz_vhf(start_ch, end_ch):
+    """DVB-T VHF Band III. Ch 5 = 174-181 MHz, center 177.5; 7 MHz step."""
+    return [(None, int((177.5 + (n - 5) * 7) * 1_000_000), f"VHF{n}")
+            for n in range(start_ch, end_ch + 1)]
+
+def _au_7mhz_uhf(start_ch, end_ch):
+    """Australia / NZ DVB-T UHF, 7 MHz step. Ch 28 = 526 MHz lower edge."""
+    return [(None, int((529.5 + (n - 28) * 7) * 1_000_000), f"AU-UHF{n}")
+            for n in range(start_ch, end_ch + 1)]
+
+def _isdbt(start_ch, end_ch, prefix="ISDB"):
+    """ISDB-T (Japan) / ISDB-Tb (Brazil): 6 MHz step.
+    Ch 13 lower edge = 470 MHz, center ≈ 473 MHz (1/7 MHz offset for OFDM
+    alignment ignored — irrelevant for carrier-presence sniff)."""
+    return [(None, int((473 + (n - 13) * 6) * 1_000_000), f"{prefix}-{n}")
+            for n in range(start_ch, end_ch + 1)]
+
+def _dtmb_8mhz(start_mhz, end_mhz):
+    """China DTMB UHF: 8 MHz step, full UHF range."""
     out = []
-    # EU/UK DVB-T (8 MHz UHF channels 21-48, 470-694 MHz).
-    out.extend([(471_250_000 + (n - 21) * 8_000_000, f"DVB-T UHF{n}")
-                for n in range(21, 49)])
-    # EU DVB-T VHF Band III (7 MHz, channels 5-12, 174-230 MHz).
-    out.extend([(177_500_000 + (n - 5) * 7_000_000, f"DVB-T VHF{n}")
-                for n in range(5, 13)])
-    # Australia DVB-T (7 MHz UHF 28-51, 526-694 MHz).
-    out.extend([(529_500_000 + (n - 28) * 7_000_000, f"AU UHF{n}")
-                for n in range(28, 52)])
-    # Japan / Brazil ISDB-T (6 MHz UHF, channels 13-62, 470-770 MHz pre-repack).
-    out.extend([(473_142_857 + (n - 13) * 6_000_000, f"ISDB UHF{n}")
-                for n in range(13, 63)])
+    f = start_mhz + 4
+    n = 1
+    while f <= end_mhz:
+        out.append((None, int(f * 1_000_000), f"DTMB-{n}"))
+        f += 8
+        n += 1
     return out
 
-INTL_FREQS = _make_intl_channels()
+
+def _build_regions():
+    regions = [
+        {
+            "key": "na", "decodable": True,
+            "name": "North America (US / Canada / Mexico)",
+            "standard": "ATSC 1.0 (8-VSB, 6 MHz)",
+            "channels": _atsc(range(2, 37)),
+        },
+        {
+            "key": "kr", "decodable": True,
+            "name": "South Korea",
+            "standard": "ATSC 1.0 (8-VSB, 6 MHz)",
+            "channels": _atsc(range(14, 51)),
+        },
+        {
+            "key": "eu", "decodable": False,
+            "name": "Europe (UK / Ireland / Western Europe)",
+            "standard": "DVB-T / DVB-T2 (COFDM, 7 MHz VHF + 8 MHz UHF)",
+            "channels": _dvbt_7mhz_vhf(5, 12) + _dvbt_8mhz_uhf(21, 48),
+        },
+        {
+            "key": "au", "decodable": False,
+            "name": "Australia / New Zealand",
+            "standard": "DVB-T (COFDM, 7 MHz)",
+            "channels": _dvbt_7mhz_vhf(6, 12) + _au_7mhz_uhf(28, 51),
+        },
+        {
+            "key": "jp", "decodable": False,
+            "name": "Japan",
+            "standard": "ISDB-T (6 MHz)",
+            "channels": _isdbt(13, 52, "JP-UHF"),
+        },
+        {
+            "key": "sa", "decodable": False,
+            "name": "South America (Brazil / Argentina / Chile / Peru / etc.)",
+            "standard": "ISDB-Tb (6 MHz)",
+            "channels": _isdbt(14, 50, "SA-UHF"),
+        },
+        {
+            "key": "cn", "decodable": False,
+            "name": "China / Hong Kong",
+            "standard": "DTMB (8 MHz)",
+            "channels": _dtmb_8mhz(470, 862),
+        },
+        {
+            "key": "intl_dvb", "decodable": False,
+            "name": "India / Africa / Middle East / Russia / former CIS / North Korea",
+            "standard": "DVB-T2 (8 MHz UHF)",
+            "channels": _dvbt_8mhz_uhf(21, 48),
+        },
+    ]
+    # Worldwide: union of every band, deduped by center frequency.
+    seen = set()
+    ww = []
+    for r in regions:
+        for ch in r["channels"]:
+            if ch[1] not in seen:
+                seen.add(ch[1])
+                ww.append(ch)
+    ww.sort(key=lambda x: x[1])
+    regions.append({
+        "key": "ww", "decodable": "atsc_only",
+        "name": "Worldwide (every band — slowest, ~3 min phase 1)",
+        "standard": "mixed (will decode ATSC carriers, sniff others)",
+        "channels": ww,
+    })
+    return regions
+
+
+REGIONS = _build_regions()
+
+
+def prompt_region() -> dict:
+    """Ask the user to pick a region before scanning. Returns the region
+    dict; the scan then tunes only that region's allocated frequencies."""
+    print()
+    print("─" * 60)
+    print("  What region are you in?")
+    print("─" * 60)
+    print()
+    for i, r in enumerate(REGIONS, 1):
+        if r["decodable"] is True:
+            mark = "✓ can decode + watch"
+        elif r["decodable"] == "atsc_only":
+            mark = "✓ decodes ATSC; others detect-only"
+        else:
+            mark = "✗ detect-only (we're ATSC 1.0; this region uses a "\
+                   "different standard)"
+        print(f"  {i}) {r['name']}")
+        print(f"      {r['standard']}")
+        print(f"      {mark}")
+        print()
+    while True:
+        try:
+            ans = input(f"Pick a region [1-{len(REGIONS)}]: ").strip()
+        except EOFError:
+            raise SystemExit("no input")
+        try:
+            n = int(ans)
+            if 1 <= n <= len(REGIONS):
+                return REGIONS[n - 1]
+        except ValueError:
+            pass
+        print("  invalid")
 
 
 # ── Channel scanner ──────────────────────────────────────────────
@@ -481,19 +628,6 @@ def scan_one_rf(rf: int, dwell_sec: float = 12.0,
         time.sleep(3)
 
 
-def rf_to_freq_mhz(rf: int) -> float:
-    """North American ATSC RF→MHz table (post-2009 repack lower-edge)."""
-    if 2 <= rf <= 4:
-        return 57.0 + (rf - 2) * 6.0
-    if 5 <= rf <= 6:
-        return 79.0 + (rf - 5) * 6.0
-    if 7 <= rf <= 13:
-        return 177.0 + (rf - 7) * 6.0
-    if 14 <= rf <= 36:
-        return 473.0 + (rf - 14) * 6.0
-    return 0.0
-
-
 def lookup_callsign(rf: int) -> tuple[str, str] | None:
     """Best-effort callsign + network from the bundled DC stations table.
     Returns None if RF isn't in the table — scan still works, you just
@@ -525,75 +659,72 @@ def run_power_sweep(freqs_hz: list[int], log_fh=None) -> list[dict]:
     return json.loads(out.decode("utf-8"))
 
 
-def run_scan(rf_list: list[int] | None = None,
-             dwell_sec: float = 12.0,
-             include_intl: bool = False,
-             save: bool = True) -> dict:
-    """Two-phase scan:
+def run_scan(region: dict | None = None,
+             dwell_sec: float = 8.0,
+             save: bool = True,
+             threshold_db: float = 4.0) -> dict:
+    """Two-phase scan over the channels of `region` (default North America).
+
       Phase 1: fast SoapySDR power-sniff sweep across all candidate
-        frequencies in a single SDR session (~30s for 35 channels).
-        Computes a noise-floor estimate from the median, marks any
-        channel above floor + 8 dB as 'hot'.
+        frequencies in a single SDR session (~0.5s/freq). Computes a
+        noise-floor estimate from the median; channels above floor +
+        threshold_db are 'hot'.
       Phase 2: spawn tv_live for the slow lock-test only on hot ATSC
-        channels.
-      International (DVB-T/ISDB-T/DTMB) frequencies, if --international,
-        get power-sniffed only — we report 'carrier present, can't
-        decode' since we're 8-VSB only.
+        channels (and only for decodable regions). Non-ATSC carriers
+        are reported as 'detected, can't decode'.
     """
-    if rf_list is None:
-        rf_list = SCAN_RF_RANGE
+    if region is None:
+        region = REGIONS[0]  # default: North America
     log_dir = HERE / "data" / "tv_live"
     log_dir.mkdir(parents=True, exist_ok=True)
     scan_log = log_dir / "tv_tuner.scan.log"
     log_fh = open(scan_log, "a", encoding="utf-8")
     try:
-        # Phase 1: fast power sniff.
-        atsc_freqs = [(rf, int(rf_to_freq_mhz(rf) * 1_000_000))
-                      for rf in rf_list]
-        intl_freqs = INTL_FREQS if include_intl else []
-        all_freqs = ([("atsc", rf, f) for rf, f in atsc_freqs] +
-                     [("intl", label, f) for f, label in intl_freqs])
+        all_freqs = region["channels"]
         if not all_freqs:
             print("[scan] no candidate frequencies", file=sys.stderr)
             return {"scanned_at": datetime.now().isoformat(timespec="seconds"),
                     "channels": []}
         n = len(all_freqs)
+        print(f"[scan] region: {region['name']}")
+        print(f"[scan] standard: {region['standard']}")
         print(f"[scan] phase 1 — power sniff across {n} frequencies "
               f"(~{n * 0.5:.0f}s)...")
         try:
-            sweep_in = [f for _, _, f in all_freqs]
+            sweep_in = [f for _atsc_rf, f, _label in all_freqs]
             sweep_out = run_power_sweep(sweep_in, log_fh=log_fh)
         except Exception as e:
-            print(f"[scan] phase-1 sweep failed ({e}); "
-                  "falling back to slow per-RF dwell.", file=sys.stderr)
-            sweep_out = [{"rms_dbfs": 0.0} for _ in all_freqs]
+            print(f"[scan] phase-1 sweep failed ({e}); aborting.",
+                  file=sys.stderr)
+            return {"scanned_at": datetime.now().isoformat(timespec="seconds"),
+                    "channels": [], "error": str(e)}
         time.sleep(3)  # let SDR fully release before phase 2
 
-        # Hot threshold: median + 8 dB. ATSC carriers typically sit
-        # 10–25 dB above noise; this catches them while skipping
-        # channels that are merely-noise.
+        # Hot threshold: median + threshold_db. Real ATSC carriers sit
+        # 5-25 dB above noise; +4 dB catches weak VHF-Hi while skipping
+        # most fully-empty channels.
         rms_values = [r["rms_dbfs"] for r in sweep_out
                       if r["rms_dbfs"] > -150]
         if rms_values:
             median = sorted(rms_values)[len(rms_values) // 2]
         else:
             median = -50.0
-        threshold = median + 8.0
+        threshold = median + threshold_db
         print(f"[scan] noise floor ≈ {median:+.1f} dBFS; "
-              f"hot threshold = {threshold:+.1f} dBFS")
+              f"hot threshold = {threshold:+.1f} dBFS "
+              f"(median + {threshold_db:.0f} dB)")
 
         results = []
         intl_carriers = []
         hot_atsc = []
-        for (kind, label, freq), s in zip(all_freqs, sweep_out):
+        for (atsc_rf, freq, label), s in zip(all_freqs, sweep_out):
             rms = s.get("rms_dbfs", float("-inf"))
             hot = rms >= threshold
-            if kind == "atsc":
-                rf = label
-                rec = {"rf": rf, "freq_mhz": freq / 1e6,
-                       "rms_dbfs": rms, "hot": hot}
+            if atsc_rf is not None:
+                rec = {"rf": atsc_rf, "freq_mhz": freq / 1e6,
+                       "label": label, "rms_dbfs": rms, "hot": hot}
                 if hot:
-                    hot_atsc.append((rf, rec))
+                    hot_atsc.append((atsc_rf, rec))
                 else:
                     rec["lock"] = False
                     rec["reason"] = f"no carrier ({rms:+.1f} dBFS)"
@@ -603,50 +734,68 @@ def run_scan(rf_list: list[int] | None = None,
                     intl_carriers.append({
                         "label": label, "freq_mhz": freq / 1e6,
                         "rms_dbfs": rms,
-                        "note": "carrier present (DVB-T/ISDB-T/DTMB — "
-                                "magic-tv-decoder can't decode)",
+                        "note": (f"carrier present at {freq/1e6:.1f} MHz "
+                                 f"({region['standard']} likely) — "
+                                 f"this region uses a non-ATSC standard "
+                                 f"and cannot be decoded by Software TV "
+                                 f"Tuner"),
                     })
 
         # Phase 2: full lock test on hot ATSC channels only.
-        print(f"[scan] phase 2 — full lock test on {len(hot_atsc)} "
-              f"hot ATSC channel(s) (~{len(hot_atsc) * (dwell_sec + 5):.0f}s)...")
-        for rf, rec in hot_atsc:
-            print(f"  RF {rf:>2} ({rec['freq_mhz']:5.1f} MHz, "
-                  f"{rec['rms_dbfs']:+5.1f} dBFS) … ",
-                  end="", flush=True)
-            res = scan_one_rf(rf, dwell_sec=dwell_sec, log_fh=log_fh)
-            # Merge phase-1 power info into phase-2 result.
-            res["rms_dbfs"] = rec["rms_dbfs"]
-            res["hot"] = True
-            if res.get("lock"):
-                cs = lookup_callsign(rf)
-                if cs:
-                    res["callsign"], res["network_hint"] = cs
-                n_progs = len(res.get("programs") or [])
-                pat = res.get("pat_count", 0)
-                cs_label = res.get("callsign") or "?"
-                print(f"LOCKED  {cs_label:<6} {n_progs} programs, PAT={pat}")
-            else:
-                print(res.get("reason", "no lock"))
-            # Replace the phase-1-only placeholder.
-            for i, existing in enumerate(results):
-                if existing.get("rf") == rf:
-                    results[i] = res
-                    break
+        decodable = region.get("decodable") in (True, "atsc_only")
+        if decodable and hot_atsc:
+            print(f"[scan] phase 2 — full lock test on {len(hot_atsc)} "
+                  f"hot ATSC channel(s) (~{len(hot_atsc) * (dwell_sec + 5):.0f}s)...")
+            for rf, rec in hot_atsc:
+                print(f"  RF {rf:>2} ({rec['freq_mhz']:5.1f} MHz, "
+                      f"{rec['rms_dbfs']:+5.1f} dBFS) … ",
+                      end="", flush=True)
+                res = scan_one_rf(rf, dwell_sec=dwell_sec, log_fh=log_fh)
+                res["rms_dbfs"] = rec["rms_dbfs"]
+                res["hot"] = True
+                if res.get("lock"):
+                    cs = lookup_callsign(rf)
+                    if cs:
+                        res["callsign"], res["network_hint"] = cs
+                    n_progs = len(res.get("programs") or [])
+                    pat = res.get("pat_count", 0)
+                    cs_label = res.get("callsign") or "?"
+                    print(f"LOCKED  {cs_label:<6} {n_progs} programs, PAT={pat}")
+                else:
+                    print(res.get("reason", "no lock"))
+                for i, existing in enumerate(results):
+                    if existing.get("rf") == rf:
+                        results[i] = res
+                        break
+        else:
+            if hot_atsc:
+                # Non-decodable region but somehow includes ATSC entries
+                # (shouldn't happen unless region table was edited).
+                pass
 
         scan = {
             "scanned_at": datetime.now().isoformat(timespec="seconds"),
+            "region": region["key"],
+            "region_name": region["name"],
+            "standard": region["standard"],
+            "decodable": region["decodable"],
             "channels": results,
             "intl_carriers": intl_carriers,
             "noise_floor_dbfs": median,
         }
         n_lock = sum(1 for r in results if r.get("lock"))
         n_hot = sum(1 for r in results if r.get("hot"))
-        print(f"[scan] done — {n_lock} of {n_hot} hot ATSC channels locked "
-              f"({len(results)} candidates total).")
-        if intl_carriers:
-            print(f"[scan] {len(intl_carriers)} non-ATSC carrier(s) "
-                  "detected (DVB-T / ISDB-T / DTMB — cannot decode).")
+        if decodable:
+            print(f"[scan] done — {n_lock} of {n_hot} hot ATSC channels locked "
+                  f"({len(results)} candidates total).")
+        else:
+            print(f"[scan] done — {len(intl_carriers)} carrier(s) detected. "
+                  f"This region uses {region['standard']}; Software TV "
+                  f"Tuner can detect them but not decode (we're ATSC "
+                  f"1.0 / 8-VSB only).")
+        if intl_carriers and decodable:
+            print(f"[scan] also {len(intl_carriers)} non-ATSC carrier(s) "
+                  "detected (cannot decode).")
         if save:
             SCAN_PATH.parent.mkdir(parents=True, exist_ok=True)
             SCAN_PATH.write_text(json.dumps(scan, indent=2), encoding="utf-8")
@@ -1212,12 +1361,15 @@ def maybe_first_run_scan(cfg: dict) -> dict | None:
         return scan
     print()
     print("  No channel scan found at", SCAN_PATH)
-    print("  A scan tunes each RF channel for ~12 seconds and saves which")
-    print("  ones receive at your antenna. It takes about 6 minutes total.")
+    print("  A scan tunes the SDR across every TV-allocated frequency,")
+    print("  finds which ones receive at your antenna, and remembers them.")
+    print("  Phase 1 sniff is ~30s; phase 2 lock-test runs only on the few")
+    print("  channels that actually have carriers — usually ~2 min total.")
     print()
     if not prompt_yn("Run a scan now?", default=True):
         return None
-    return run_scan()
+    region = prompt_region()
+    return run_scan(region=region)
 
 
 def interactive_pick(cfg: dict):
@@ -1244,7 +1396,8 @@ def interactive_pick(cfg: dict):
         if ans in ("q", "quit", "exit"):
             raise SystemExit(0)
         if ans in ("r", "rescan", "re-scan"):
-            new_scan = run_scan()
+            region = prompt_region()
+            new_scan = run_scan(region=region)
             rows = print_scan_table(new_scan) or rows
             print("  r) Re-scan       q) Quit")
             continue
@@ -2004,11 +2157,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--scan-dwell", type=float, default=8.0,
                    help="Seconds to wait per hot channel during phase 2 "
                         "(longer = more reliable lock on weak signals)")
-    p.add_argument("--international", action="store_true",
-                   help="Also power-sniff DVB-T/T2, ISDB-T, and DTMB "
-                        "frequency bands. Reports carrier presence; "
-                        "note that magic-tv-decoder cannot DECODE these "
-                        "(it's ATSC-1.0 / 8-VSB only).")
+    p.add_argument("--region", default=None,
+                   help=f"Region key (skips the interactive picker). "
+                        f"Options: {', '.join(r['key'] for r in REGIONS)}")
     p.add_argument("--dry-run", action="store_true",
                    help="Print the planned subprocess commands and exit "
                         "(does not start tv_live, ffmpeg, or ffplay)")
@@ -2041,7 +2192,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.scan:
-        run_scan(dwell_sec=args.scan_dwell, include_intl=args.international)
+        if args.region:
+            region = next((r for r in REGIONS if r["key"] == args.region),
+                          None)
+            if region is None:
+                print(f"[tv_tuner] unknown region '{args.region}'. "
+                      f"Options: {', '.join(r['key'] for r in REGIONS)}",
+                      file=sys.stderr)
+                return 2
+        else:
+            region = prompt_region()
+        run_scan(region=region, dwell_sec=args.scan_dwell)
         return 0
 
     # Resolve stream URL: NAME from config, else literal URL, else None
