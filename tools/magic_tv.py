@@ -339,8 +339,10 @@ def build_ffmpeg_cmd(play: bool, record_path: Path | None,
         # results, and favor inter-prediction. Visible glitches/pixelation
         # are preferable to the decoder freezing waiting for clean data.
         "-ec", "favor_inter+deblock+guess_mvs",
-        "-analyzeduration", "10000000",
-        "-probesize", "10000000",
+        # Short probe so audio comes up within 2-3s of stream start
+        # instead of staring at silent video for 10s before AAC commits.
+        "-analyzeduration", "2000000",
+        "-probesize", "3000000",
         "-thread_queue_size", "4096",
         "-f", "mpegts",
         "-i", "pipe:0",
