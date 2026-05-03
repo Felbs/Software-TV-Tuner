@@ -47,7 +47,11 @@ LIVE_TS = HERE / "data" / "tv_live" / "live.ts"
 CONFIG_PATH = HERE / "magic_tv_config.json"
 RECORD_DIR = HERE / "recordings"
 
-PYTHON_EXE = r"C:\Users\user\radioconda\python.exe"
+# tv_live needs the radioconda Python (for gr-atscplus + soapy). Override
+# with $RADIOCONDA_PY if your install lives somewhere other than the
+# default radioconda location under the user profile.
+PYTHON_EXE = os.environ.get("RADIOCONDA_PY") or str(
+    Path(os.path.expanduser("~")) / "radioconda" / "python.exe")
 FFMPEG = r"C:\ffmpeg\bin\ffmpeg.exe"
 FFPLAY = r"C:\ffmpeg\bin\ffplay.exe"
 MAGIC_PLAYER = HERE / "magic_player.py"   # bundled with the repo
@@ -319,10 +323,11 @@ def build_ffmpeg_cmd(play: bool, record_path: Path | None,
                      program: int = 1) -> list[str]:
     """Build the central ffmpeg command line.
 
-    ffmpeg reads MPEG-TS from stdin and re-encodes once (libx264 ultrafast
-    + aac). It then fans out via the tee muxer to whichever sinks the
-    user picked. If only local playback is requested we skip tee and
-    emit a single mpegts pipe:1 to keep the command simple.
+    Always re-encodes — passthrough exposes raw 1080i interlace combing
+    and unconcealed mpeg2 macroblock breakage from TEI scrubs.
+      * Local play: high-quality h264_nvenc (cq 19, preset p5) + yadif
+        deinterlace + error concealment. Visually transparent re-encode.
+      * Record / stream: same encoder settings, fanned through tee.
     """
     cmd = [
         FFMPEG,
@@ -334,39 +339,36 @@ def build_ffmpeg_cmd(play: bool, record_path: Path | None,
         "-fflags", "+genpts+igndts+discardcorrupt+nobuffer",
         "-err_detect", "ignore_err",
         "-flags", "+output_corrupt",
-        # Error concealment in the *decoder*: when frames have missing
-        # macroblocks, guess motion vectors from neighbors, deblock the
-        # results, and favor inter-prediction. Visible glitches/pixelation
-        # are preferable to the decoder freezing waiting for clean data.
+        # Decoder-side error concealment: when frames have missing
+        # macroblocks, guess motion vectors from neighbors, deblock, and
+        # favor inter-prediction. Smooths the visible breakage from TEI
+        # scrubs that the FS-validator can't catch.
         "-ec", "favor_inter+deblock+guess_mvs",
-        # Short probe so audio comes up within 2-3s of stream start
-        # instead of staring at silent video for 10s before AAC commits.
         "-analyzeduration", "2000000",
         "-probesize", "3000000",
         "-thread_queue_size", "4096",
         "-f", "mpegts",
         "-i", "pipe:0",
         "-map", "0:v:0", "-map", "0:a:0?",
-        # The "fps" filter pads gaps with duplicates and drops only when
-        # input is too fast. Combined with -fps_mode cfr (newer name for
-        # -vsync cfr) it guarantees a steady 30 fps output stream even
-        # when the input video has dropouts. ffplay therefore always
-        # has fresh frames to display, instead of holding the last one.
-        "-vf", "fps=30",
-        # NVENC (NVIDIA hardware H.264 encoder). To revert to software
-        # encoding, swap this block back to libx264:
-        #   "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-        #   "-crf", "28",
-        "-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ull",
-        "-rc", "vbr", "-cq", "28", "-b:v", "0",
+        # yadif deinterlaces 1080i → 1080p (mode=0 keeps original frame
+        # rate; one frame out per input frame). Native ATSC HD is 60-
+        # field interlaced — without yadif, motion shows comb teeth.
+        "-vf", "yadif=mode=0:parity=auto",
+        # NVENC high-quality settings. p5 is the balanced preset; cq 19
+        # is visually transparent for 1080p; b-frames + spatial-aq +
+        # temporal-aq give dramatically better quality than the old p1
+        # ull preset at the same bitrate.
+        "-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq",
+        "-rc", "vbr", "-cq", "19", "-b:v", "0", "-maxrate", "20M",
+        "-bf", "3", "-spatial-aq", "1", "-temporal-aq", "1",
         "-pix_fmt", "yuv420p",
-        "-fps_mode", "cfr",
         # Shorter GOP so ffplay can resync after corruption within ~1s
         # instead of waiting up to 2s for the next keyframe.
         "-g", "30", "-keyint_min", "30", "-sc_threshold", "0",
-        # Re-encode AC3 to AAC. ffplay sometimes fails to play passthrough
-        # AC3 from a tee'd mpegts stream; AAC is universal.
-        "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
+        # AC3 surround → AAC stereo (ffplay's default audio device is
+        # almost always 2-channel; 5.1 AC3 passthrough usually plays as
+        # silence on stereo outputs).
+        "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
     ]
 
     sinks = []

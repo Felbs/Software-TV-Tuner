@@ -16,6 +16,7 @@
 #include "atsc_viterbi_soft_impl.h"
 #include "atsc_viterbi_mux.h"
 #include <gnuradio/io_signature.h>
+#include <cstring>
 
 namespace gr {
 namespace atscplus {
@@ -41,9 +42,6 @@ atsc_viterbi_soft_impl::atsc_viterbi_soft_impl()
      * inherent decoding delay of the individual viterbi decoders.
      * The net result is that this entire block has a pipeline latency
      * of 12 complete segments.
-     *
-     * If anybody cares, it is possible to do it with less delay, but
-     * this approach is at least somewhat understandable...
      */
 
     // the -4 is for the 4 sync symbols
@@ -82,7 +80,7 @@ int atsc_viterbi_soft_impl::work(int noutput_items,
 
     // The way the fs_checker works ensures we start getting packets
     // starting with a field sync, and out input multiple is set to
-    // 12, so we should always get a mod 12 numbered first packet
+    // NCODERS, so we should always get a mod-NCODERS first packet
     assert(noutput_items % NCODERS == 0);
 
     int dbwhere;
@@ -92,6 +90,18 @@ int atsc_viterbi_soft_impl::work(int noutput_items,
     unsigned char dibits[NCODERS][enco_which_max];
 
     unsigned char out_copy[OUTPUT_SIZE];
+    // ── TIER 9 BUGFIX ─────────────────────────────────────────────
+    // Zero-initialize out_copy. Stock gr-dtv's atsc_viterbi_decoder
+    // leaves this stack buffer uninitialized and relies on the
+    // read-modify-write loop below to fully populate every dibit
+    // position before the byte is read for memcpy. That's true on
+    // the synth path (where the buffer's prior contents happen to
+    // be benign), but on real RF in this build configuration the
+    // resulting UB caused 100% TEI on every cold start (Tier 1 exp
+    // 03; Tier 7 hypothesis 3; this tier confirmed). Forcing a
+    // memset gives well-defined behaviour and reliably works on
+    // both synth and real RF.
+    std::memset(out_copy, 0, sizeof(out_copy));
 
     std::vector<tag_t> tags;
     for (int i = 0; i < noutput_items; i += NCODERS) {

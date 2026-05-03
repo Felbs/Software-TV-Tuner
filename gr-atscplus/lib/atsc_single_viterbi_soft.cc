@@ -53,10 +53,13 @@ char atsc_single_viterbi_soft::decode(float input)
     // float best_state_metric = 100000;
     d_best_state_metric = 100000;
 
-    /* Precompute distances from input to each possible symbol */
-    float distances[8] = { (input + 7) * (input + 7), (input + 5) * (input + 5), (input + 3) * (input + 3),
-                           (input + 1) * (input + 1), (input - 1) * (input - 1), (input - 3) * (input - 3),
-                           (input - 5) * (input - 5), (input - 7) * (input - 7) };
+    // L1 (Manhattan) branch metric. Bit-equivalent to upstream
+    // gr::dtv::atsc_single_viterbi. L2 (squared Euclidean) is
+    // theoretically optimal for AWGN but did not lock as reliably
+    // on real RF here.
+    float distances[8] = { fabsf(input + 7), fabsf(input + 5), fabsf(input + 3),
+                           fabsf(input + 1), fabsf(input - 1), fabsf(input - 3),
+                           fabsf(input - 5), fabsf(input - 7) };
 
     /* We start by iterating over all possible states */
     for (unsigned int state = 0; state < 4; state++) {
