@@ -662,9 +662,13 @@ def run_power_sweep(freqs_hz: list[int], log_fh=None) -> list[dict]:
 def run_scan(region: dict | None = None,
              dwell_sec: float = 8.0,
              save: bool = True,
-             pilot_snr_threshold_db: float = 40.0,
-             pilot_sharpness_threshold_db: float = 25.0,
-             vsb_asymmetry_threshold_db: float = 3.0,
+             # Thresholds tuned by tools/scan_lab/harness.py for max-margin F1=1.0
+             # against HDHomeRun ground truth on the DC fixture set
+             # (winning_recipe.json). Worst-case slack on must-detect channels:
+             # 0.76 dB; ~5x the headroom of the prior hand-tuned 40/25/3.
+             pilot_snr_threshold_db: float = 30.0,
+             pilot_sharpness_threshold_db: float = 26.25,
+             vsb_asymmetry_threshold_db: float = 2.4,
              rms_threshold_db: float = 4.0) -> dict:
     """Two-phase scan over the channels of `region`.
 

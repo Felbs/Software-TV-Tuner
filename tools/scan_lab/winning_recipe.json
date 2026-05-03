@@ -1,0 +1,29 @@
+{
+  "detectors": ["pilot_snr", "pilot_sharpness", "vsb_asymmetry"],
+  "thresholds": {
+    "pilot_snr": 30.0,
+    "pilot_sharpness": 26.25,
+    "vsb_asymmetry": 2.4
+  },
+  "f1": 1.0,
+  "tp": 8,
+  "fn": 0,
+  "fp": 0,
+  "marginal_hits": 0,
+  "ms_per_channel": 4,
+  "min_margin_db": 0.76,
+  "fixture_set": "DC metro, HDHomeRun ground truth, 35 channels × 200 ms @ 8 MS/s",
+  "notes": [
+    "Achieves F1=1.0 (8 of 8 must-detect channels caught, 0 false positives) on the DC fixture set.",
+    "These thresholds were grid-searched to maximize the worst-case margin across must-detect channels (i.e., how much each detector score could drop before the decision flips).",
+    "Compared to the prior hand-tuned recipe (pilot_snr>=40, pilot_sharpness>=25, vsb_asymmetry>=3) which had min_margin=0.16 dB on RF35, this recipe gives min_margin=0.76 dB — ~5x more headroom for capture-to-capture variation.",
+    "The binding constraint is pilot_sharpness on the empty side (RF7 sharp=27.10 vs threshold 26.25 → 0.85 dB safety) and pilot_sharpness/vsb_asymmetry on the must-detect side. pilot_snr=30 is loose by design: pilot_sharpness already rejects the only empty channels with high pilot_snr (RF7, RF12, RF20, RF26).",
+    "All three features come from a single windowed FFT — net cost is ~3-4 ms/channel on a modern laptop. A 35-channel sweep takes <150 ms of CPU.",
+    "Marginal channels (RF22 WUSA Annapolis sister, RF25 WDVM Hagerstown @ 70mi) are NOT caught: their pilots are too weak (sharpness 9.8 and 4.7 respectively, far below the 26.25 ATSC range). Catching them would require admitting empties — impossible with this fixture set.",
+    "Detectors investigated and dropped/de-emphasized:",
+    "  - field_autocorr: unreliable; any narrowband tone gives coherence at any lag, and adjacent-channel leak degrades real ATSC scores. Real ATSC: -16..-28 dB. Empties: -3..-55 dB (range overlaps). Not a useful gate.",
+    "  - pn511_corr (original): broken — used the wrong PN511 sequence (didn't match canonical gr-atscplus atsc_pn511) and a naive baseband synthesis. Real ATSC scored 9-11 dB, empties 12-15 dB (inverted!).",
+    "  - pn511_corr (fixed): now uses the canonical 519-symbol field-sync prefix (4 segment-sync + 511 PN511) as a Hilbert-transformed reference, mixes pilot to DC, and FFT-correlates against a 30 ms window. Achieves F1=1.0 alone with threshold ~22.3 dB. Cost ~42 ms/channel — at the budget edge. Combined with pilot_snr it gives min_margin 1.51 dB (best in budget) but for the same F1=1.0 with much less CPU, the 3-feature pilot recipe wins.",
+    "Future experiments worth trying: (a) capture multiple 200 ms windows per channel and require N-of-M agreement to harden marginal-margin cases; (b) an actual symbol-rate (10.762 MS/s) capture path so PN511 correlation has full bandwidth and tighter discrimination; (c) iteratively refine the spectral_mask with a per-station learned envelope shape."
+  ]
+}

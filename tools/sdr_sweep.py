@@ -1,18 +1,30 @@
 """Fast SoapySDR carrier detector.
 
 Opens the SDR exactly once, tunes through a list of frequencies, captures
-a brief sample window at each, and reports two metrics per frequency:
+a brief sample window at each, and reports the metrics needed by the
+ATSC 1.0 detection recipe in tv_tuner.run_scan(). Thresholds for the
+recipe were tuned with tools/scan_lab/harness.py against a 35-channel
+HDHomeRun ground truth set; the winning recipe lives in
+tools/scan_lab/winning_recipe.json.
 
-  * rms_dbfs   — total power across the captured bandwidth (broadband)
-  * pilot_db   — for ATSC 1.0 mode only: SNR of the channel's pilot
-                  carrier (a narrow CW spike at lower_edge + 309 kHz).
-                  20-30 dB higher SNR than broadband RMS, so weak
-                  carriers HD-HomeRun-class hardware would catch are
-                  also caught here.
-  * atsc3_db   — flat-spectrum OFDM signature score. ATSC 3.0 broadcasts
-                  produce a flat power envelope across the channel
-                  rather than the asymmetric 8-VSB profile; this metric
-                  rises when the in-band power is uniformly distributed.
+Per-frequency metrics emitted:
+
+  * rms_dbfs            — total power across the captured bandwidth.
+  * pilot_snr_db        — pilot bin (channel center − 2.69 MHz) over
+                          out-of-band noise floor (median of bins
+                          beyond ±3.5 MHz).
+  * pilot_sharpness_db  — pilot peak vs the local ±100 kHz neighborhood
+                          mean. Distinguishes a narrow CW pilot from a
+                          broadband bump. *The single strongest ATSC 1.0
+                          discriminator at this site.*
+  * vsb_asymmetry_db    — power 0..3 MHz above pilot vs 0..3 MHz below
+                          (the data sideband is single-sided in 8-VSB,
+                          so real ATSC reads ≥ 3 dB; symmetric signals
+                          read ~0 dB).
+  * atsc3_db            — flat-spectrum OFDM signature: in-band excess
+                          present BUT no narrow pilot AND no VSB
+                          asymmetry. Heuristic only (we don't decode
+                          3.0).
 
 Mode (`--mode`):
   rms     — RMS only (works for any modulation; no per-band tuning).

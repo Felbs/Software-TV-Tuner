@@ -124,35 +124,65 @@ def sweep_combo(scores: dict[int, dict[str, float]],
                  marginal: set[int],
                  must_reject: set[int]) -> dict:
     """For an AND-combo of detectors, find the per-detector thresholds
-    that jointly maximize F1. Greedy 1D sweeps so it stays fast."""
-    # Start by picking the best individual threshold for each, then
-    # iterate one detector at a time refining on the joint decision.
-    chosen: dict[str, float] = {}
-    for d in detectors:
-        single = sweep_threshold(scores, d, thresholds_per[d],
-                                  must_detect, marginal, must_reject)
-        chosen[d] = single["threshold"]
-    # Refine 2 passes.
-    for _ in range(2):
+    that jointly maximize F1, then min-margin among ties.
+
+    Strategy: build N candidate per-detector seeds (the must-detect
+    scores themselves, since the optimal threshold for any AND member
+    must lie at or just below one of those scores). For each combo of
+    seeds we evaluate, then refine 1D-greedy. This finds cooperative
+    optima the original purely-greedy solver missed (e.g., when each
+    single-feature best F1 sets a threshold too high to admit a real
+    ATSC channel that a different feature can rescue).
+    """
+    # Seed candidates per detector: the actual must-detect scores plus
+    # the original threshold grid. The lowest must-detect score for a
+    # detector is always a viable threshold choice for that detector.
+    seeds = {d: sorted(set(thresholds_per.get(d, []) +
+                            [scores[rf][d] for rf in must_detect]))
+             for d in detectors}
+
+    # Per-detector start: the score of the must-detect channel that's
+    # tightest on this detector — i.e., the lowest must-detect score.
+    chosen: dict[str, float] = {d: min(scores[rf][d] for rf in must_detect)
+                                  for d in detectors}
+
+    def evaluate_thresholds(t: dict[str, float]) -> dict:
+        decisions = {rf: all(scores[rf][d] >= t[d] for d in detectors)
+                     for rf in scores}
+        return evaluate(decisions, must_detect, marginal, must_reject)
+
+    def joint_score(ev: dict, t: dict) -> tuple:
+        # Sort key: F1 (higher better), then min-margin (higher better).
+        # Min-margin is min over must-detect of min over features of
+        # (score - threshold).
+        if ev["tp"] != len(must_detect):
+            mm = -1e9  # missing must-detect channels: bad
+        else:
+            mm = min(min(scores[rf][d] - t[d] for d in detectors)
+                     for rf in must_detect)
+        return (ev["f1"], mm)
+
+    # Refine 3 passes: each pass walks every detector and picks the
+    # threshold (from its full seed grid) that maximizes joint_score
+    # given the others fixed.
+    best_overall = {**evaluate_thresholds(chosen), "thresholds": dict(chosen)}
+    best_key = joint_score(best_overall, chosen)
+    for _ in range(3):
+        improved = False
         for d in detectors:
-            best = {"f1": -1.0}
-            for thr in thresholds_per[d]:
+            for thr in seeds[d]:
                 test = dict(chosen)
                 test[d] = thr
-                decisions = {
-                    rf: all(scores[rf][d2] >= test[d2] for d2 in detectors)
-                    for rf in scores
-                }
-                ev = evaluate(decisions, must_detect, marginal, must_reject)
-                if ev["f1"] > best.get("f1", -1.0):
-                    best = {**ev, "thresholds": dict(test)}
-            chosen = best.get("thresholds", chosen)
-    decisions = {
-        rf: all(scores[rf][d] >= chosen[d] for d in detectors)
-        for rf in scores
-    }
-    ev = evaluate(decisions, must_detect, marginal, must_reject)
-    return {**ev, "detectors": detectors, "thresholds": chosen}
+                ev = evaluate_thresholds(test)
+                k = joint_score(ev, test)
+                if k > best_key:
+                    chosen = test
+                    best_overall = {**ev, "thresholds": dict(test)}
+                    best_key = k
+                    improved = True
+        if not improved:
+            break
+    return {**best_overall, "detectors": detectors}
 
 
 def main():
