@@ -18,9 +18,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
+
+# Add the SDRplay API DLL directory to the Windows DLL search path. The
+# SoapySDR plugin (sdrPlaySupport.dll) shipped with radioconda links
+# against sdrplay_api.dll which lives under Program Files; without this
+# load fails. Equivalent to what tv_tuner.py's env_with_sdrplay() does
+# when it spawns tv_live as a subprocess.
+SDRPLAY_API_DIR = r"C:\Program Files\SDRplay\API\x64"
+if sys.platform == "win32" and os.path.isdir(SDRPLAY_API_DIR):
+    try:
+        os.add_dll_directory(SDRPLAY_API_DIR)
+    except (AttributeError, OSError):
+        pass
+    os.environ["PATH"] = SDRPLAY_API_DIR + os.pathsep + os.environ.get("PATH", "")
 
 try:
     import SoapySDR
