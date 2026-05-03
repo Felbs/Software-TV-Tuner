@@ -349,22 +349,27 @@ def build_ffmpeg_cmd(play: bool, record_path: Path | None,
         "-thread_queue_size", "4096",
         "-f", "mpegts",
         "-i", "pipe:0",
-        "-map", "0:v:0", "-map", "0:a:0?",
-        # yadif deinterlaces 1080i → 1080p (mode=0 keeps original frame
-        # rate; one frame out per input frame). Native ATSC HD is 60-
-        # field interlaced — without yadif, motion shows comb teeth.
-        "-vf", "yadif=mode=0:parity=auto",
-        # NVENC high-quality settings. p5 is the balanced preset; cq 19
-        # is visually transparent for 1080p; b-frames + spatial-aq +
-        # temporal-aq give dramatically better quality than the old p1
-        # ull preset at the same bitrate.
-        "-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq",
-        "-rc", "vbr", "-cq", "19", "-b:v", "0", "-maxrate", "20M",
+        # Select the requested program (PMT). ATSC TS multiplexes subchannels
+        # — RF34 carries 4.1/4.2/4.3/4.4. Default program=1 → main channel
+        # (e.g. 4.1 NBC). `program` arg is the 1-based subchannel number.
+        "-map", f"0:p:{program}:v", "-map", f"0:p:{program}:a?",
+        # yadif mode=1 ("bob") emits one frame per input *field* — preserves
+        # the full 60-field-per-second temporal smoothness of 1080i. mode=0
+        # would halve temporal info to 30 fps. No-op on 720p60 progressive.
+        "-vf", "yadif=mode=1:parity=auto:deint=interlaced",
+        # NVENC: live-streaming tune (ll, not hq — hq wants two-pass which
+        # breaks on a stdin pipe). p7 gives best quality at the cost of
+        # GPU time; lookahead helps allocate bitrate in motion. No
+        # maxrate cap so bursts during high-motion scenes get the headroom
+        # they need.
+        "-c:v", "h264_nvenc", "-preset", "p7", "-tune", "ll",
+        "-rc", "vbr", "-cq", "19", "-b:v", "0",
+        "-rc-lookahead", "32",
         "-bf", "3", "-spatial-aq", "1", "-temporal-aq", "1",
         "-pix_fmt", "yuv420p",
         # Shorter GOP so ffplay can resync after corruption within ~1s
         # instead of waiting up to 2s for the next keyframe.
-        "-g", "30", "-keyint_min", "30", "-sc_threshold", "0",
+        "-g", "60", "-keyint_min", "60", "-sc_threshold", "0",
         # AC3 surround → AAC stereo (ffplay's default audio device is
         # almost always 2-channel; 5.1 AC3 passthrough usually plays as
         # silence on stereo outputs).
@@ -1381,6 +1386,18 @@ def run_pipeline(rf: int, callsign: str, play: bool,
                         recover_decoder=recover_decoder)
         else:
             # Legacy ffplay path: ffmpeg re-encode → optional tee fan-out.
+            # Now that live.ts is converged, translate the user's 1-based
+            # subchannel index to the actual ATSC program_id by probing
+            # the PMT — broadcasters number programs arbitrarily (RF34's
+            # 4.1 NBC isn't program_id=1).
+            actual_pid = probe_program_id(program)
+            if actual_pid is not None and actual_pid != program:
+                print(f"[magic_tv] subchannel {program} → program_id {actual_pid}")
+                cmd = build_ffmpeg_cmd(play=play, record_path=record_path,
+                                       stream_url=stream_url, program=actual_pid)
+            elif actual_pid is None:
+                print(f"[magic_tv] WARN: could not probe program list; "
+                      f"using --program {program} as program_id directly.")
             state.ffmpeg_proc = spawn_ffmpeg(cmd, ff_log_fh,
                                              want_stdout_pipe=play)
             print(f"[magic_tv] ffmpeg PID={state.ffmpeg_proc.pid}")
