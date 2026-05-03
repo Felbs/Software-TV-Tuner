@@ -182,7 +182,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rf", type=int, default=ATSC_DEFAULT_RF_CHANNEL,
                      help="RF channel number (default 34)")
-    ap.add_argument("--out", default=str(DATA_DIR / "tv_live" / "live_softvit.ts"))
+    ap.add_argument("--out", default=str(DATA_DIR / "tv_live" / "live.ts"))
     ap.add_argument("--rotate-gb", type=float, default=50.0)
     ap.add_argument("--seconds", type=float, default=0.0,
                      help="if >0, run for this many seconds then exit (test mode)")
