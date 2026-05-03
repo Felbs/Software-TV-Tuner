@@ -22,8 +22,8 @@ You need:
 
 ```powershell
 # 1. Clone the repo
-git clone https://github.com/Felbs/software-tv-tuner.git
-cd software-tv-tuner
+git clone https://github.com/Felbs/Software-TV-Tuner.git
+cd Software-TV-Tuner
 
 # 2. Build the C++ decoder OOT module
 #    Windows: VS 2022 BuildTools + NMake. Linux: bootstrap.sh.
