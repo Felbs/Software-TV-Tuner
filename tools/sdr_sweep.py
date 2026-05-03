@@ -156,18 +156,25 @@ def _analyze(samples: np.ndarray, sample_rate: int, mode: str) -> dict:
     nbhd_mean = float(np.mean(nbhd_nonzero)) if nbhd_nonzero.size else noise_floor
     pilot_sharpness_db = 10.0 * np.log10(pilot_peak / nbhd_mean + 1e-20)
 
-    # VSB asymmetry: ATSC has a vestigial sideband BELOW the pilot
-    # (suppressed) and a full data sideband ABOVE the pilot. The power
-    # ratio data/vestigial is 10-20 dB on real ATSC, ≈0 dB on noise.
-    bins_per_300k = max(1, int(round(0.3e6 / bin_hz)))
+    # VSB asymmetry: ATSC's data sideband extends ~5.7 MHz ABOVE the pilot
+    # and only ~0.3 MHz below (the vestigial portion). So if we integrate
+    # power across equal-width bands above and below the pilot, the lower
+    # band is mostly out-of-channel noise (only 0.3 MHz of it carries
+    # vestigial energy), while the upper band is fully in-channel data.
+    # Real ATSC: +8 to +15 dB. Noise / OFDM: ≈0 dB.
     bins_per_3m = max(1, int(round(3.0e6 / bin_hz)))
-    vsb_lo = max(0, pilot_center_bin - bins_per_300k)
-    vsb_hi = pilot_center_bin
-    data_lo = pilot_center_bin
-    data_hi = min(n_fft, pilot_center_bin + bins_per_3m)
-    vsb_pow = float(np.mean(psd[vsb_lo:vsb_hi])) if vsb_hi > vsb_lo else 1e-20
-    data_pow = float(np.mean(psd[data_lo:data_hi])) if data_hi > data_lo else 0.0
-    vsb_asymmetry_db = 10.0 * np.log10(data_pow / vsb_pow + 1e-20)
+    above_lo = pilot_center_bin
+    above_hi = min(n_fft, pilot_center_bin + bins_per_3m)
+    below_lo = max(0, pilot_center_bin - bins_per_3m)
+    below_hi = pilot_center_bin
+    above_pow = (float(np.mean(psd[above_lo:above_hi]))
+                 if above_hi > above_lo else 0.0)
+    below_pow = (float(np.mean(psd[below_lo:below_hi]))
+                 if below_hi > below_lo else 1e-20)
+    vsb_asymmetry_db = 10.0 * np.log10(above_pow / below_pow + 1e-20)
+    # `data_pow` is just the upper-half value, used elsewhere for in-band
+    # excess and ATSC 3.0 detection.
+    data_pow = above_pow
 
     pilot_snr_db = 10.0 * np.log10(pilot_peak / noise_floor + 1e-20)
     in_band_excess_db = 10.0 * np.log10(data_pow / noise_floor + 1e-20)
