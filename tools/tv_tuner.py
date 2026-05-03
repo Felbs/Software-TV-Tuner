@@ -662,9 +662,9 @@ def run_power_sweep(freqs_hz: list[int], log_fh=None) -> list[dict]:
 def run_scan(region: dict | None = None,
              dwell_sec: float = 12.0,
              save: bool = True,
-             pilot_snr_threshold_db: float = 20.0,
-             pilot_sharpness_threshold_db: float = 15.0,
-             vsb_asymmetry_threshold_db: float = 6.0,
+             pilot_snr_threshold_db: float = 25.0,
+             pilot_sharpness_threshold_db: float = 20.0,
+             vsb_asymmetry_threshold_db: float = 3.0,
              rms_threshold_db: float = 4.0) -> dict:
     """Two-phase scan over the channels of `region`.
 
@@ -738,9 +738,12 @@ def run_scan(region: dict | None = None,
             atsc1_carrier = (pilot_snr >= pilot_snr_threshold_db
                              and pilot_sharp >= pilot_sharpness_threshold_db
                              and vsb_asym >= vsb_asymmetry_threshold_db)
+            # ATSC 3.0 broadcasts only on UHF (RF ≥ 14). The VHF-Lo "OFDM"
+            # hits we saw on RF 3-6 are RFI / ham band leak, not 3.0.
             atsc3_carrier = (not atsc1_carrier
                              and atsc3_score >= 10.0
-                             and rms >= rms_threshold)
+                             and rms >= rms_threshold
+                             and atsc_rf is not None and atsc_rf >= 14)
             rms_carrier = rms >= rms_threshold
             if atsc_rf is not None:
                 rec = {"rf": atsc_rf, "freq_mhz": freq / 1e6,
