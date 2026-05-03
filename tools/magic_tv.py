@@ -193,17 +193,23 @@ def env_with_sdrplay() -> dict:
     return env
 
 
-def spawn_tv_live(rf: int, log_fh) -> subprocess.Popen:
-    """Start tv_live_rf34.py as a subprocess. Returns Popen handle."""
-    if not TV_LIVE_PY.exists():
-        raise FileNotFoundError(f"tv_live_rf34.py not found at {TV_LIVE_PY}")
+def spawn_tv_live(rf: int, log_fh, viterbi: str = "stock") -> subprocess.Popen:
+    """Start the SDR pipeline subprocess. Returns Popen handle.
+
+    `viterbi='soft'` switches to tv_live_rf34_softvit.py which uses the
+    fork's atsc_viterbi_soft block (Tier 9 fix). Default 'stock' is the
+    workhorse hard-decision Viterbi everything has been tested on.
+    """
+    script = (HERE / "tv_live_rf34_softvit.py") if viterbi == "soft" else TV_LIVE_PY
+    if not script.exists():
+        raise FileNotFoundError(f"tv_live script not found at {script}")
     if not Path(PYTHON_EXE).exists():
         raise FileNotFoundError(
             f"radioconda python not found at {PYTHON_EXE}. "
             "Install radioconda or update PYTHON_EXE in magic_tv.py.")
 
     return subprocess.Popen(
-        [PYTHON_EXE, "-u", str(TV_LIVE_PY), "--rf", str(rf)],
+        [PYTHON_EXE, "-u", str(script), "--rf", str(rf)],
         cwd=str(HERE),
         env=env_with_sdrplay(),
         stdout=log_fh,
@@ -1040,7 +1046,7 @@ def status_loop(state: PipelineState, stop_event: threading.Event,
 def run_pipeline(rf: int, callsign: str, play: bool,
                  stream_url: str | None, record_path: Path | None,
                  dry_run: bool = False, program: int = 1,
-                 player: str = "magic") -> int:
+                 player: str = "ffplay", viterbi: str = "stock") -> int:
     # The 'magic' player reads live.ts directly and decodes with decoupled
     # audio/video clocks, so audio keeps playing while video holds on a drift
     # event — what produced our best real-RF result. Recording / RTMP need
@@ -1179,7 +1185,7 @@ def run_pipeline(rf: int, callsign: str, play: bool,
         """Spawn tv_live, run the convergence-retry loop, return the live
         Popen on success or None if all retries exhaust."""
         for attempt in range(1, max_retries + 1):
-            tv = spawn_tv_live(rf, tv_log_fh)
+            tv = spawn_tv_live(rf, tv_log_fh, viterbi=viterbi)
             print(f"[magic_tv] tv_live PID={tv.pid} (attempt {attempt}); "
                   f"waiting {window_sec:.0f}s for convergence...")
             if not wait_for_live_ts(timeout_sec=15.0):
@@ -1272,7 +1278,7 @@ def run_pipeline(rf: int, callsign: str, play: bool,
         CONVERGENCE_WINDOW_SEC = 12.0
         MIN_GOOD_PAT = 5
         for attempt in range(1, MAX_RETRIES + 1):
-            state.tv_proc = spawn_tv_live(rf, tv_log_fh)
+            state.tv_proc = spawn_tv_live(rf, tv_log_fh, viterbi=viterbi)
             print(f"[magic_tv] tv_live PID={state.tv_proc.pid} "
                   f"(attempt {attempt}); waiting "
                   f"{CONVERGENCE_WINDOW_SEC:.0f}s for convergence...")
@@ -1400,12 +1406,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--program", type=int, default=1,
                    help="ATSC program/sub-channel number to play (1 = main, "
                         "2 = .2 sub, 3 = .3 sub, ...). Used with --rf.")
-    p.add_argument("--player", choices=["magic", "ffplay"], default="magic",
-                   help="Playback engine. 'magic' (default) uses our resilient "
-                        "magic_player.py — decoupled audio/video clocks, never "
-                        "freezes, holds last frame on drift. 'ffplay' is the "
-                        "older path with ffmpeg re-encode + ffplay (recording "
-                        "and RTMP streaming require this).")
+    p.add_argument("--player", choices=["magic", "ffplay"], default="ffplay",
+                   help="Playback engine. 'ffplay' (default) uses ffmpeg "
+                        "re-encode + ffplay — single window, simpler UX. "
+                        "'magic' uses our resilient magic_player.py with "
+                        "decoupled audio/video clocks and a diagnostic "
+                        "status overlay (held last frame on drift). "
+                        "Recording / RTMP streaming require 'ffplay'.")
+    p.add_argument("--viterbi", choices=["stock", "soft"], default="stock",
+                   help="Viterbi decoder variant. 'stock' (default) uses the "
+                        "hard-decision gr-dtv Viterbi. 'soft' uses the fork's "
+                        "atsc_viterbi_soft (Tier 9 fix landed) which can in "
+                        "theory recover marginal-SNR symbols but didn't show "
+                        "measurable real-RF gain on the test channel. Opt-in.")
     p.add_argument("--play", dest="play", action="store_true",
                    default=None,
                    help="Force local playback via ffplay")
@@ -1491,7 +1504,8 @@ def main(argv: list[str] | None = None) -> int:
                             record_path=record_path,
                             dry_run=args.dry_run,
                             program=args.program,
-                            player=args.player)
+                            player=args.player,
+                            viterbi=args.viterbi)
     else:
         # Pure interactive mode
         choice = interactive_pick(cfg)
@@ -1501,7 +1515,8 @@ def main(argv: list[str] | None = None) -> int:
                             record_path=choice["record_path"],
                             dry_run=False,
                             program=choice["program"],
-                            player=args.player)
+                            player=args.player,
+                            viterbi=args.viterbi)
 
 
 if __name__ == "__main__":
