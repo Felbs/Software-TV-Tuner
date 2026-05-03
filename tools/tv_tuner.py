@@ -660,18 +660,22 @@ def run_power_sweep(freqs_hz: list[int], log_fh=None) -> list[dict]:
 
 
 def run_scan(region: dict | None = None,
-             dwell_sec: float = 8.0,
+             dwell_sec: float = 12.0,
              save: bool = True,
-             threshold_db: float = 4.0) -> dict:
-    """Two-phase scan over the channels of `region` (default North America).
+             pilot_snr_threshold_db: float = 10.0,
+             rms_threshold_db: float = 4.0) -> dict:
+    """Two-phase scan over the channels of `region`.
 
-      Phase 1: fast SoapySDR power-sniff sweep across all candidate
-        frequencies in a single SDR session (~0.5s/freq). Computes a
-        noise-floor estimate from the median; channels above floor +
-        threshold_db are 'hot'.
-      Phase 2: spawn tv_live for the slow lock-test only on hot ATSC
-        channels (and only for decodable regions). Non-ATSC carriers
-        are reported as 'detected, can't decode'.
+      Phase 1: fast SoapySDR sweep + per-channel FFT analysis in a
+        single SDR session (~0.2s per frequency). For ATSC regions we
+        measure pilot-tone SNR (carrier vs flat noise floor in the
+        narrow pilot bin); a real ATSC 1.0 carrier produces 20-30 dB
+        pilot SNR even at HDHomeRun-marginal signal strength.
+        We also score the ATSC 3.0 / OFDM signature (in-band power
+        without a strong pilot — flagged but not lock-tested since
+        we don't have a 3.0 decoder).
+      Phase 2: spawn tv_live for the slow lock-test only on channels
+        with strong ATSC 1.0 pilot, in decodable regions.
     """
     if region is None:
         region = REGIONS[0]  # default: North America
@@ -700,37 +704,57 @@ def run_scan(region: dict | None = None,
                     "channels": [], "error": str(e)}
         time.sleep(3)  # let SDR fully release before phase 2
 
-        # Hot threshold: median + threshold_db. Real ATSC carriers sit
-        # 5-25 dB above noise; +4 dB catches weak VHF-Hi while skipping
-        # most fully-empty channels.
+        # Decision logic per channel:
+        #   ATSC region: pilot SNR ≥ 10 dB → real ATSC 1.0 carrier (lock-test).
+        #   Pilot SNR < 10 dB but in-band power is well above noise (>10 dB
+        #     ATSC 3.0 score) → suspected NextGen TV / OFDM (we can't decode).
+        #   Otherwise: dead channel.
+        # Non-ATSC region: fall back to RMS threshold for carrier presence.
         rms_values = [r["rms_dbfs"] for r in sweep_out
                       if r["rms_dbfs"] > -150]
         if rms_values:
             median = sorted(rms_values)[len(rms_values) // 2]
         else:
             median = -50.0
-        threshold = median + threshold_db
-        print(f"[scan] noise floor ≈ {median:+.1f} dBFS; "
-              f"hot threshold = {threshold:+.1f} dBFS "
-              f"(median + {threshold_db:.0f} dB)")
+        rms_threshold = median + rms_threshold_db
+        print(f"[scan] noise floor ≈ {median:+.1f} dBFS")
 
         results = []
         intl_carriers = []
+        atsc3_carriers = []
         hot_atsc = []
         for (atsc_rf, freq, label), s in zip(all_freqs, sweep_out):
             rms = s.get("rms_dbfs", float("-inf"))
-            hot = rms >= threshold
+            pilot_snr = s.get("pilot_snr_db", float("-inf"))
+            atsc3_score = s.get("atsc3_db", float("-inf"))
+            atsc1_carrier = pilot_snr >= pilot_snr_threshold_db
+            atsc3_carrier = (not atsc1_carrier
+                             and atsc3_score >= 10.0
+                             and rms >= rms_threshold)
+            rms_carrier = rms >= rms_threshold
             if atsc_rf is not None:
                 rec = {"rf": atsc_rf, "freq_mhz": freq / 1e6,
-                       "label": label, "rms_dbfs": rms, "hot": hot}
-                if hot:
+                       "label": label, "rms_dbfs": rms,
+                       "pilot_snr_db": pilot_snr,
+                       "atsc3_db": atsc3_score,
+                       "hot": atsc1_carrier}
+                if atsc1_carrier:
                     hot_atsc.append((atsc_rf, rec))
+                elif atsc3_carrier:
+                    rec["lock"] = False
+                    rec["reason"] = (f"ATSC 3.0 / NextGen TV detected "
+                                     f"({atsc3_score:+.1f} dB in-band, "
+                                     f"no 8-VSB pilot) — install a 3.0 "
+                                     f"decoder to watch")
+                    rec["atsc3"] = True
+                    atsc3_carriers.append(rec)
                 else:
                     rec["lock"] = False
-                    rec["reason"] = f"no carrier ({rms:+.1f} dBFS)"
+                    rec["reason"] = (f"no carrier (pilot SNR "
+                                     f"{pilot_snr:+.1f} dB)")
                 results.append(rec)
             else:
-                if hot:
+                if rms_carrier:
                     intl_carriers.append({
                         "label": label, "freq_mhz": freq / 1e6,
                         "rms_dbfs": rms,
@@ -745,10 +769,14 @@ def run_scan(region: dict | None = None,
         decodable = region.get("decodable") in (True, "atsc_only")
         if decodable and hot_atsc:
             print(f"[scan] phase 2 — full lock test on {len(hot_atsc)} "
-                  f"hot ATSC channel(s) (~{len(hot_atsc) * (dwell_sec + 5):.0f}s)...")
+                  f"ATSC 1.0 carrier(s) (~{len(hot_atsc) * (dwell_sec + 5):.0f}s)...")
+            if atsc3_carriers:
+                print(f"[scan]   (also {len(atsc3_carriers)} ATSC 3.0 / "
+                      f"NextGen TV carrier(s) detected — skipping phase 2; "
+                      f"need a 3.0 decoder to watch those)")
             for rf, rec in hot_atsc:
                 print(f"  RF {rf:>2} ({rec['freq_mhz']:5.1f} MHz, "
-                      f"{rec['rms_dbfs']:+5.1f} dBFS) … ",
+                      f"pilot SNR {rec['pilot_snr_db']:+5.1f} dB) … ",
                       end="", flush=True)
                 res = scan_one_rf(rf, dwell_sec=dwell_sec, log_fh=log_fh)
                 res["rms_dbfs"] = rec["rms_dbfs"]
@@ -781,6 +809,7 @@ def run_scan(region: dict | None = None,
             "decodable": region["decodable"],
             "channels": results,
             "intl_carriers": intl_carriers,
+            "atsc3_carriers": atsc3_carriers,
             "noise_floor_dbfs": median,
         }
         n_lock = sum(1 for r in results if r.get("lock"))
