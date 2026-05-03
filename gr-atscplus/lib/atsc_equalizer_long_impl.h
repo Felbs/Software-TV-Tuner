@@ -14,6 +14,7 @@
 #include "atsc_syminfo_impl.h"
 #include <gnuradio/dtv/atsc_consts.h>
 #include <gnuradio/atscplus/atsc_equalizer_long.h>
+#include <chrono>
 
 namespace gr {
 namespace atscplus {
@@ -53,6 +54,34 @@ private:
     static constexpr float DD_MAX_FS_MSE       = 6.0f;  // run DD any time field-sync MSE is finite
     static constexpr float DD_GATE_ABS_ERR     = 0.4f;  // strict: only confident decisions
     static constexpr float DD_LEAK             = 0.0f;  // leak disabled — was driving taps to 0
+
+    // Tier-16 (2026-05-02): hyperparameter sweep constants. Read from env at
+    // block construction. Defaults match the Tier-3+Tier-10 shipped values.
+    //   MAGIC_BETA      adaptN LMS step (default 5e-5)
+    //   MAGIC_LEAK      adaptN per-FS leakage (default 5e-4)
+    //   MAGIC_DIV_BAIL  anti-windup tap-norm threshold (default 10.0)
+    double d_magic_beta;
+    float  d_magic_leak;
+    float  d_magic_div_bail;
+
+    // Tier-20 (2026-05-02): per-FS-interval data-segment dev_rms instrumentation.
+    // Gated on ATSCPLUS_TIER20_LOG=1; default OFF.
+    // Tracks per-data-segment (post-equalizer) deviation RMS from the nearest
+    // 8-VSB rail after subtracting the post-pilot 1.25 mean offset, accumulated
+    // over the 312 data segments BETWEEN field syncs. On each FS-pass, dumps
+    // CSV-friendly stderr line with fs_pass_idx, wall_time_sec since
+    // block-construction, tap_norm, fs_mse, data_dev_rms (mean of 312),
+    // data_dev_max (max of 312), and the count of data segments observed.
+    bool d_tier20_log_enabled = false;
+    std::chrono::steady_clock::time_point d_tier20_t0;
+    int    d_tier20_fs_pass_idx       = 0;
+    int    d_tier20_data_seg_count    = 0;     // segments seen since last FS
+    double d_tier20_dev_rms_sum       = 0.0;   // sum of per-segment dev_rms
+    float  d_tier20_dev_rms_max       = 0.0f;  // max of per-segment dev_rms
+
+    // Helpers for Tier-20 — defined in .cc to keep header light.
+    void tier20_accumulate_data_seg(const float* y, int nsamples);
+    void tier20_emit_fs_line(float tap_norm);
 
     void filterN(const float* input_samples, float* output_samples, int nsamples);
     void adaptN(const float* input_samples,
