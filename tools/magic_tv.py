@@ -46,6 +46,7 @@ TV_LIVE_PY = HERE / "tv_live_rf34.py"
 LIVE_TS = HERE / "data" / "tv_live" / "live.ts"
 CONFIG_PATH = HERE / "magic_tv_config.json"
 RECORD_DIR = HERE / "recordings"
+SCAN_PATH = Path(os.path.expanduser("~")) / ".magic_tv" / "scan.json"
 
 # tv_live needs the radioconda Python (for gr-atscplus + soapy). Override
 # with $RADIOCONDA_PY if your install lives somewhere other than the
@@ -316,6 +317,189 @@ def measure_convergence(min_size: int = 5_000_000) -> int:
         if pid == 0x0000:
             pat_count += 1
     return pat_count
+
+
+# ── Channel scanner ──────────────────────────────────────────────
+# RF channels worth probing in a typical North American market post-repack.
+# VHF-Hi (7-13) and UHF (14-36). VHF-Lo (2-6) is mostly empty post-2009.
+# Scanning all 36 takes ~6 minutes wall clock at 12s dwell.
+SCAN_RF_RANGE = list(range(7, 14)) + list(range(14, 37))
+
+
+def kill_proc(proc, label: str = "proc"):
+    """Best-effort terminate a subprocess on Windows."""
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def ffprobe_programs(timeout_sec: float = 12.0) -> list[dict]:
+    """ffprobe live.ts for all programs in the multiplex. Returns list of
+    dicts with program_id, program_num, service_name, video_codec,
+    video_height, audio_codec. Empty list if probe fails."""
+    try:
+        result = subprocess.run(
+            [r"C:\ffmpeg\bin\ffprobe.exe",
+             "-v", "error", "-of", "json",
+             "-show_programs", "-show_streams",
+             "-analyzeduration", "5000000", "-probesize", "5000000",
+             "-f", "mpegts", "-i", str(LIVE_TS)],
+            capture_output=True, timeout=timeout_sec, text=True,
+        )
+        if result.returncode != 0:
+            return []
+        data = json.loads(result.stdout)
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+        return []
+    progs = []
+    for p in data.get("programs", []):
+        info = {
+            "program_id": p.get("program_id"),
+            "program_num": p.get("program_num"),
+            "service_name": (p.get("tags") or {}).get("service_name"),
+        }
+        for s in p.get("streams", []) or []:
+            ct = s.get("codec_type")
+            if ct == "video":
+                info["video_codec"] = s.get("codec_name")
+                info["video_height"] = s.get("height")
+            elif ct == "audio":
+                info["audio_codec"] = s.get("codec_name")
+        progs.append(info)
+    return progs
+
+
+def scan_one_rf(rf: int, dwell_sec: float = 12.0,
+                 viterbi: str = "stock",
+                 log_fh=None) -> dict:
+    """Tune one RF, wait for convergence, probe programs. Returns a result
+    dict. Always cleans up its tv_live process before returning."""
+    # Clean live.ts so convergence/probe see only this RF's bytes.
+    try:
+        LIVE_TS.unlink()
+    except (FileNotFoundError, PermissionError, OSError):
+        pass
+
+    fh = log_fh if log_fh is not None else subprocess.DEVNULL
+    proc = None
+    try:
+        proc = spawn_tv_live(rf, fh, viterbi=viterbi)
+    except Exception as e:
+        return {"rf": rf, "lock": False, "reason": f"spawn failed: {e}"}
+
+    try:
+        if not wait_for_live_ts(timeout_sec=15.0):
+            return {"rf": rf, "lock": False, "reason": "no live.ts growth"}
+        # Wait for the equalizer to converge.
+        deadline = time.time() + dwell_sec
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                return {"rf": rf, "lock": False, "reason": "tv_live died"}
+            time.sleep(0.5)
+        pat = measure_convergence()
+        if pat < 5:
+            return {"rf": rf, "lock": False, "pat_count": pat,
+                    "reason": "weak signal / no lock"}
+        progs = ffprobe_programs()
+        return {
+            "rf": rf,
+            "freq_mhz": rf_to_freq_mhz(rf),
+            "lock": True,
+            "pat_count": pat,
+            "programs": progs,
+        }
+    finally:
+        kill_proc(proc, "scan_tv_live")
+        # SDRplay driver needs ~3 s to fully release the device.
+        time.sleep(3)
+
+
+def rf_to_freq_mhz(rf: int) -> float:
+    """North American ATSC RF→MHz table (post-2009 repack lower-edge)."""
+    if 2 <= rf <= 4:
+        return 57.0 + (rf - 2) * 6.0
+    if 5 <= rf <= 6:
+        return 79.0 + (rf - 5) * 6.0
+    if 7 <= rf <= 13:
+        return 177.0 + (rf - 7) * 6.0
+    if 14 <= rf <= 36:
+        return 473.0 + (rf - 14) * 6.0
+    return 0.0
+
+
+def lookup_callsign(rf: int) -> tuple[str, str] | None:
+    """Best-effort callsign + network from the bundled DC stations table.
+    Returns None if RF isn't in the table — scan still works, you just
+    won't get a friendly label."""
+    _stations, lookup = _load_stations()
+    info = lookup(rf)
+    if info is None:
+        return None
+    return info.get("callsign", ""), info.get("network", "")
+
+
+def run_scan(rf_list: list[int] | None = None,
+             dwell_sec: float = 12.0,
+             save: bool = True) -> dict:
+    """Sweep RF channels, return scan result + optionally persist to
+    SCAN_PATH. Prints a one-line update per channel."""
+    if rf_list is None:
+        rf_list = SCAN_RF_RANGE
+    results = []
+    print(f"[scan] sweeping {len(rf_list)} RF channels "
+          f"(~{int(len(rf_list) * (dwell_sec + 5))}s)...")
+    log_dir = HERE / "data" / "tv_live"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    scan_log = log_dir / "magic_tv.scan.log"
+    with open(scan_log, "a", encoding="utf-8") as log_fh:
+        for rf in rf_list:
+            freq = rf_to_freq_mhz(rf)
+            print(f"  RF {rf:>2} ({freq:5.1f} MHz) … ", end="", flush=True)
+            res = scan_one_rf(rf, dwell_sec=dwell_sec, log_fh=log_fh)
+            if res.get("lock"):
+                cs = lookup_callsign(rf)
+                if cs:
+                    res["callsign"], res["network_hint"] = cs
+                n_progs = len(res.get("programs") or [])
+                pat = res.get("pat_count", 0)
+                label = res.get("callsign") or "?"
+                print(f"LOCKED  {label:<6} {n_progs} programs, "
+                      f"PAT={pat}")
+            else:
+                why = res.get("reason", "no lock")
+                print(f"{why}")
+            results.append(res)
+
+    scan = {
+        "scanned_at": datetime.now().isoformat(timespec="seconds"),
+        "channels": results,
+    }
+    n_lock = sum(1 for r in results if r.get("lock"))
+    print(f"[scan] done — {n_lock} of {len(results)} channels locked.")
+    if save:
+        SCAN_PATH.parent.mkdir(parents=True, exist_ok=True)
+        SCAN_PATH.write_text(json.dumps(scan, indent=2), encoding="utf-8")
+        print(f"[scan] saved to {SCAN_PATH}")
+    return scan
+
+
+def load_scan() -> dict | None:
+    if not SCAN_PATH.exists():
+        return None
+    try:
+        return json.loads(SCAN_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
 
 
 def build_ffmpeg_cmd(play: bool, record_path: Path | None,
@@ -716,18 +900,145 @@ def prompt_choice(msg: str, options: list[str], default: int = 1) -> int:
         print("  invalid choice")
 
 
+def expand_channels_from_scan(scan: dict) -> list[dict]:
+    """Build the picker rows from scan.json + the static stations table.
+
+    Strategy: only include RFs that actually locked. Cross-reference each
+    locked RF against fcc_dc_stations.py for callsign + sub-channel labels.
+    For each program reported by ffprobe, try to label it as virtual
+    {major}.{minor} using the static table; programs without a table entry
+    fall back to a generic "RF{N} prog{program_num}" label.
+
+    Each row is the picker entry for one (rf, program_id) tuple.
+    """
+    _stations, lookup = _load_stations()
+    rows = []
+    for ch in scan.get("channels", []):
+        if not ch.get("lock"):
+            continue
+        rf = ch["rf"]
+        info = lookup(rf)
+        progs = ch.get("programs") or []
+        for sub_idx, p in enumerate(progs, start=1):
+            program_id = p.get("program_id")
+            program_num = p.get("program_num")
+            video_h = p.get("video_height")
+            video_codec = p.get("video_codec")
+            audio_codec = p.get("audio_codec")
+            service_name = p.get("service_name") or ""
+
+            # Resolve a friendly virtual channel + label.
+            virt = ""
+            callsign = ""
+            network = service_name
+            if info is not None:
+                callsign = info.get("callsign", "") or ""
+                # Sub-index into the static table (1=main, 2=first sub, ...)
+                if sub_idx == 1:
+                    virt = info.get("virtual", "") or ""
+                    network = info.get("network", "") or network
+                else:
+                    subs = info.get("subs", []) or []
+                    if sub_idx - 2 < len(subs):
+                        virt, network = subs[sub_idx - 2]
+            if not virt:
+                # Synthesize a virtual label from program_num so the user
+                # has something readable for unmapped channels.
+                virt = f"{rf}.{program_num or sub_idx}"
+            quality_bits = []
+            if video_h:
+                quality_bits.append(f"{video_h}p" if video_h <= 720 else
+                                     f"{video_h}i")
+            if video_codec:
+                quality_bits.append(video_codec)
+            if audio_codec:
+                quality_bits.append(audio_codec)
+            quality = " ".join(quality_bits)
+
+            rows.append({
+                "rf": rf,
+                "virtual": virt,
+                "callsign": callsign or f"RF{rf}",
+                "network": network or "",
+                "city": "",
+                "program": program_id or sub_idx,
+                "is_sub": (sub_idx > 1),
+                "label": f"{callsign} {network}".strip(),
+                "quality": quality,
+                "service_name": service_name,
+            })
+    return sorted(rows, key=lambda r: (r["rf"], r["program"]))
+
+
+def print_scan_table(scan: dict) -> list[dict]:
+    """Pretty-print the scanned channel table grouped by RF, return picker
+    rows so caller can prompt by index."""
+    rows = expand_channels_from_scan(scan)
+    if not rows:
+        print("(scan.json contains no locked channels — try --scan again)")
+        return []
+    print()
+    print(f"  {'#':>3}  {'Channel':<8}  {'Callsign':<8}  "
+          f"{'Network':<14}  Quality")
+    print("  " + "-" * 60)
+    last_rf = None
+    for i, r in enumerate(rows, start=1):
+        if last_rf is not None and r["rf"] != last_rf:
+            print(f"       {'─' * 55}")
+        marker = "└▸" if r["is_sub"] else "★ "
+        q = r.get("quality", "") or ""
+        print(f"  {i:>3}  {marker} {r['virtual']:<5}  "
+              f"{r['callsign']:<8}  {r['network']:<14}  {q}")
+        last_rf = r["rf"]
+    print()
+    return rows
+
+
+def maybe_first_run_scan(cfg: dict) -> dict | None:
+    """If no scan.json exists, offer to run a scan now. Returns the
+    scan dict if one is available (either pre-existing or freshly run),
+    None if the user declines and there's nothing on disk."""
+    scan = load_scan()
+    if scan is not None:
+        return scan
+    print()
+    print("  No channel scan found at", SCAN_PATH)
+    print("  A scan tunes each RF channel for ~12 seconds and saves which")
+    print("  ones receive at your antenna. It takes about 6 minutes total.")
+    print()
+    if not prompt_yn("Run a scan now?", default=True):
+        return None
+    return run_scan()
+
+
 def interactive_pick(cfg: dict):
     """Returns dict {rf, program, callsign, play, stream_url, record_path}."""
     print(BANNER)
-    rows = print_channel_list()
+    scan = maybe_first_run_scan(cfg)
+    if scan is not None:
+        rows = print_scan_table(scan)
+        # Offer re-scan at the picker too.
+        print("  r) Re-scan       q) Quit")
+    else:
+        rows = print_channel_list()
+    if not rows:
+        # Fall back to the static table if a fresh scan produced nothing.
+        rows = print_channel_list()
     if not rows:
         raise SystemExit("no channels available")
 
     while True:
         try:
-            ans = input(f"Pick channel # [1-{len(rows)}]: ").strip()
+            ans = input(f"Pick channel # [1-{len(rows)}], r=re-scan, q=quit: ").strip().lower()
         except EOFError:
             raise SystemExit("no input")
+        if ans in ("q", "quit", "exit"):
+            raise SystemExit(0)
+        if ans in ("r", "rescan", "re-scan"):
+            new_scan = run_scan()
+            rows = print_scan_table(new_scan) or rows
+            print("  r) Re-scan       q) Quit")
+            continue
         try:
             n = int(ans)
             if 1 <= n <= len(rows):
@@ -1472,6 +1783,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "Z:\\SDR_Agent_v2)")
     p.add_argument("--list", action="store_true",
                    help="Print the channel table and exit")
+    p.add_argument("--scan", action="store_true",
+                   help="Sweep the SDR across all RF channels (~6 min), "
+                        "save the result to ~/.magic_tv/scan.json, then "
+                        "exit. Run this once after install.")
+    p.add_argument("--scan-dwell", type=float, default=12.0,
+                   help="Seconds to wait per channel during --scan "
+                        "(longer = more reliable lock detection)")
     p.add_argument("--dry-run", action="store_true",
                    help="Print the planned subprocess commands and exit "
                         "(does not start tv_live, ffmpeg, or ffplay)")
@@ -1501,6 +1819,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.list:
         print_channel_list()
+        return 0
+
+    if args.scan:
+        run_scan(dwell_sec=args.scan_dwell)
         return 0
 
     # Resolve stream URL: NAME from config, else literal URL, else None
