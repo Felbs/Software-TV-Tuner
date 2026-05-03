@@ -358,6 +358,51 @@ DD-LMS on every data segment, undoing the training. The fix was to
 just `filterN` (apply trained taps without further adaptation) on
 data segments — match what upstream gr-dtv does.
 
+## 7.5 Field-sync spacing validation — the bug that took 21 tiers
+
+The equalizer needs the field-sync checker upstream to tell it
+"segment N is a field sync, train your taps on the known PN511; the
+next 312 segments are data, just filter through them." Without that
+signal, training never starts.
+
+The field-sync checker works by sliding a 511-symbol window across
+every input segment, computing how many bits of the receive signal
+disagree with the canonical PN511 sequence. If the disagreement count
+falls below a threshold (we use 50 out of 511, or about 10% bit
+error), it declares a field-sync hit.
+
+The catch: at any random offset in the broadcast data stream, your
+chances of matching PN511 at 10% bit-error are *not* zero. Repeating
+content patterns (long runs of similar bytes, certain video block
+edges) can correlate with PN511 well enough to trip the threshold.
+With the canonical 313-segment field length, real field syncs arrive
+exactly 313 segments apart. Spurious correlations land at *random*
+spacings.
+
+When a spurious "field sync" is accepted, three bad things happen at
+once:
+1. The equalizer trains its taps on the spurious segment, which is
+   *not* the PN511 sequence — taps shift to a random direction.
+2. The segment counter resets to 0 mid-field, mis-numbering the
+   remaining real data segments.
+3. The Reed-Solomon block downstream is fed bytes that *look* valid
+   8-VSB but are out of frame. RS catches up about 1.2 seconds later
+   when the deinterleaver buffer is full of misaligned data; that's
+   when you visually see TEI=1 explode and playback freeze.
+
+The fix is a single guard: track segments-since-last-accepted-FS, and
+reject any candidate FS whose gap is below a tolerance (we use 280;
+real gap is exactly 313 in steady state). Once added, the recurring
+30-second drift on real RF — the bug that resisted 19 prior tiers of
+equalizer- and Viterbi-side speculation — disappears entirely.
+
+It's also (counterintuitively) *required* for cold-start lock on weak
+channels at the test site: during equalizer convergence the slicer is
+unreliable, which produces extra spurious-FS candidates, which prevent
+the equalizer from ever stabilizing. Rejecting the spurious ones lets
+convergence complete cleanly. This isn't a "nice optimization" — it's
+the difference between "TEI=100% forever" and "watching TV."
+
 ## 8. Trellis-coded modulation and Viterbi decoding
 
 ATSC encodes data with a **rate 2/3 trellis code**: every 2 input
@@ -522,6 +567,7 @@ A few common patterns we've seen in this project:
 | 0 PN511 hits | FPLL never locks. Check input SNR (gain settings, antenna polarization, raw IQ histogram for clipping) |
 | Many PN511 hits with `min_pn511_err > 30` | FPLL barely-tracking. Try tighter loop alpha or different AFC tau |
 | Many PN511 hits with `min_pn511_err = 0` but TEI=1 on data | Equalizer divergence. Check that your equalizer isn't running DD-LMS on data segments without first training on field syncs |
+| Plays for ~30 s, then collapses to TEI=100% with 1000s of distinct PIDs | FS-spacing slip: the FS checker is accepting spurious early candidates. Look at `[fs_check] rejected_early` count in stderr; expect a non-zero number on impaired channels |
 | 50%+ RS-clean but VLC won't play HD | Need 80%+ for HD. Try a stronger station or better antenna |
 | 100% RS-clean but VLC shows scrambled | RS decoded, but byte alignment between deinterleaver and RS frame is wrong. Check PN63 polarity |
 
