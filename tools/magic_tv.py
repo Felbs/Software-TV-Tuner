@@ -331,10 +331,18 @@ def measure_convergence(min_size: int = 5_000_000) -> int:
 
 
 # ── Channel scanner ──────────────────────────────────────────────
-# RF channels worth probing in a typical North American market post-repack.
-# VHF-Hi (7-13) and UHF (14-36). VHF-Lo (2-6) is mostly empty post-2009.
-# Scanning all 36 takes ~6 minutes wall clock at 12s dwell.
-SCAN_RF_RANGE = list(range(7, 14)) + list(range(14, 37))
+# RF channels currently licensed for ATSC 1.0 in North America:
+#   VHF-Lo  RF  2-6   (54-88 MHz)   rare post-digital, but used in a few markets
+#   VHF-Hi  RF  7-13  (174-216 MHz) several majors per market
+#   UHF     RF 14-36  (470-608 MHz) bulk of broadcasting
+# Channels 37-51 were reclaimed for T-Mobile's 600 MHz (5G band 71) in the
+# 2017 repack; channels 52-69 were reclaimed for cellular in 2009. Not
+# scanning either since they hold no TV. Scan dwells 12 s per channel by
+# default, ~7 min wall clock for the full sweep.
+# Note: this scanner finds ATSC 1.0 only. ATSC 3.0 (NextGen TV) lives in
+# the same UHF range but uses OFDM and our gr-atscplus only does 8-VSB,
+# so a 3.0 broadcast will show up here as "no lock".
+SCAN_RF_RANGE = list(range(2, 7)) + list(range(7, 14)) + list(range(14, 37))
 
 
 def kill_proc(proc, label: str = "proc"):
