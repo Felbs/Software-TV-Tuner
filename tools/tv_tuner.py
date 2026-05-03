@@ -1,11 +1,12 @@
-"""Magic TV — single-file CLI for tuning, playing, recording, and streaming
-ATSC 8-VSB TV via the project's SDRplay RSPdx + gr-atscplus pipeline.
+"""Software TV Tuner — single-file CLI for tuning, playing, recording,
+and streaming ATSC 8-VSB TV via the project's SDRplay RSPdx + gr-atscplus
+pipeline.
 
 Pipeline:
 
     [SDRplay RSPdx]
         v
-    tv_live_rf34.py --rf <RF>     (subprocess; writes data/tv_live/live.ts)
+    tv_live.py --rf <RF>     (subprocess; writes data/tv_live/live.ts)
         v
     Python tail thread            (188-byte aligned, 0x1FFF NULL heartbeat)
         v
@@ -16,9 +17,9 @@ Pipeline:
 
 Everything is stdlib + ffmpeg/ffplay subprocesses. No new pip installs.
 This file is read-only with respect to the rest of the project — it
-spawns tv_live_rf34.py and does not import or modify any decoder code.
+spawns tv_live.py and does not import or modify any decoder code.
 
-See magic_tv_README.md for usage.
+See tv_tuner_README.md for usage.
 """
 from __future__ import annotations
 
@@ -53,11 +54,11 @@ except Exception:
 
 # ── Paths / constants ────────────────────────────────────────────
 HERE = Path(__file__).resolve().parent
-TV_LIVE_PY = HERE / "tv_live_rf34.py"
+TV_LIVE_PY = HERE / "tv_live.py"
 LIVE_TS = HERE / "data" / "tv_live" / "live.ts"
-CONFIG_PATH = HERE / "magic_tv_config.json"
+CONFIG_PATH = HERE / "tv_tuner_config.json"
 RECORD_DIR = HERE / "recordings"
-SCAN_PATH = Path(os.path.expanduser("~")) / ".magic_tv" / "scan.json"
+SCAN_PATH = Path(os.path.expanduser("~")) / ".tv_tuner" / "scan.json"
 
 # tv_live needs the radioconda Python (for gr-atscplus + soapy). Override
 # with $RADIOCONDA_PY if your install lives somewhere other than the
@@ -66,7 +67,7 @@ PYTHON_EXE = os.environ.get("RADIOCONDA_PY") or str(
     Path(os.path.expanduser("~")) / "radioconda" / "python.exe")
 FFMPEG = r"C:\ffmpeg\bin\ffmpeg.exe"
 FFPLAY = r"C:\ffmpeg\bin\ffplay.exe"
-MAGIC_PLAYER = HERE / "magic_player.py"   # bundled with the repo
+TV_PLAYER = HERE / "tv_player.py"   # bundled with the repo
 SDRPLAY_API_DIR = r"C:\Program Files\SDRplay\API\x64"
 
 # A NULL transport-stream packet (PID 0x1FFF). VLC/ffmpeg ignore these
@@ -97,7 +98,7 @@ def _load_stations():
     try:
         from fcc_dc_stations import DC_DMA_STATIONS, lookup  # type: ignore
     except Exception as e:
-        print(f"[magic_tv] WARNING: failed to import fcc_dc_stations: {e}",
+        print(f"[tv_tuner] WARNING: failed to import fcc_dc_stations: {e}",
               file=sys.stderr)
         return [], (lambda rf: None)
     return DC_DMA_STATIONS, lookup
@@ -116,7 +117,7 @@ def load_config() -> dict:
             cfg["destinations"] = dict(DEFAULT_CONFIG["destinations"])
         return cfg
     except Exception as e:
-        print(f"[magic_tv] config parse failed ({e}); using defaults",
+        print(f"[tv_tuner] config parse failed ({e}); using defaults",
               file=sys.stderr)
         return dict(DEFAULT_CONFIG)
 
@@ -212,17 +213,17 @@ def env_with_sdrplay() -> dict:
 def spawn_tv_live(rf: int, log_fh, viterbi: str = "stock") -> subprocess.Popen:
     """Start the SDR pipeline subprocess. Returns Popen handle.
 
-    `viterbi='soft'` switches to tv_live_rf34_softvit.py which uses the
+    `viterbi='soft'` switches to tv_live_softvit.py which uses the
     fork's atsc_viterbi_soft block (Tier 9 fix). Default 'stock' is the
     workhorse hard-decision Viterbi everything has been tested on.
     """
-    script = (HERE / "tv_live_rf34_softvit.py") if viterbi == "soft" else TV_LIVE_PY
+    script = (HERE / "tv_live_softvit.py") if viterbi == "soft" else TV_LIVE_PY
     if not script.exists():
         raise FileNotFoundError(f"tv_live script not found at {script}")
     if not Path(PYTHON_EXE).exists():
         raise FileNotFoundError(
             f"radioconda python not found at {PYTHON_EXE}. "
-            "Install radioconda or update PYTHON_EXE in magic_tv.py.")
+            "Install radioconda or update PYTHON_EXE in tv_tuner.py.")
 
     return subprocess.Popen(
         [PYTHON_EXE, "-u", str(script), "--rf", str(rf)],
@@ -543,7 +544,7 @@ def run_scan(rf_list: list[int] | None = None,
         rf_list = SCAN_RF_RANGE
     log_dir = HERE / "data" / "tv_live"
     log_dir.mkdir(parents=True, exist_ok=True)
-    scan_log = log_dir / "magic_tv.scan.log"
+    scan_log = log_dir / "tv_tuner.scan.log"
     log_fh = open(scan_log, "a", encoding="utf-8")
     try:
         # Phase 1: fast power sniff.
@@ -875,7 +876,7 @@ class TailWorker:
         try:
             f = open(LIVE_TS, "rb")
         except OSError as e:
-            print(f"[magic_tv] cannot open live.ts: {e}", file=sys.stderr)
+            print(f"[tv_tuner] cannot open live.ts: {e}", file=sys.stderr)
             return
 
         try:
@@ -1022,7 +1023,7 @@ def kill_proc(p: subprocess.Popen | None, name: str = "") -> None:
                 try: p.wait(timeout=2)
                 except Exception: pass
     except Exception as e:
-        print(f"[magic_tv] error killing {name}: {e}", file=sys.stderr)
+        print(f"[tv_tuner] error killing {name}: {e}", file=sys.stderr)
 
 
 # ── Interactive prompts ──────────────────────────────────────────
@@ -1456,7 +1457,7 @@ def status_loop(state: PipelineState, stop_event: threading.Event,
         print(line, flush=True)
 
         if not tv_alive:
-            print("[magic_tv] tv_live exited — shutting down")
+            print("[tv_tuner] tv_live exited — shutting down")
             stop_event.set()
             break
 
@@ -1465,7 +1466,7 @@ def status_loop(state: PipelineState, stop_event: threading.Event,
         if (ffmpeg_freeze or ffmpeg_rec_freeze) and recover_ffmpeg \
                 and not in_cooldown:
             reason = "stdin blocked" if ffmpeg_freeze else "rec stalled"
-            print(f"[magic_tv] ffmpeg appears frozen ({reason}, "
+            print(f"[tv_tuner] ffmpeg appears frozen ({reason}, "
                   f"ts growing at {rate/1e6:.2f}MB/s but "
                   f"fwd/rec stalled) — recovering...")
             try:
@@ -1477,14 +1478,14 @@ def status_loop(state: PipelineState, stop_event: threading.Event,
                     fwd_frozen_since = 0.0
                     rec_frozen_since = 0.0
                     last_rec_t = now
-                    print(f"[magic_tv] ffmpeg recovered "
+                    print(f"[tv_tuner] ffmpeg recovered "
                           f"(event #{state.recovery_events})")
                 else:
-                    print("[magic_tv] ffmpeg recovery failed — shutting down")
+                    print("[tv_tuner] ffmpeg recovery failed — shutting down")
                     stop_event.set()
                     break
             except Exception as e:
-                print(f"[magic_tv] recovery error: {e} — shutting down")
+                print(f"[tv_tuner] recovery error: {e} — shutting down")
                 stop_event.set()
                 break
             continue
@@ -1503,10 +1504,10 @@ def status_loop(state: PipelineState, stop_event: threading.Event,
                 pat = -1
             if pat >= 0 and pat < DECODER_BAD_PAT:
                 decoder_bad_count += 1
-                print(f"[magic_tv] decoder quality low: PAT={pat} "
+                print(f"[tv_tuner] decoder quality low: PAT={pat} "
                       f"(strike {decoder_bad_count}/{DECODER_BAD_GRACE})")
                 if decoder_bad_count >= DECODER_BAD_GRACE:
-                    print("[magic_tv] decoder drifted — restarting tv_live "
+                    print("[tv_tuner] decoder drifted — restarting tv_live "
                           "for fresh lock...")
                     try:
                         if recover_decoder():
@@ -1520,14 +1521,14 @@ def status_loop(state: PipelineState, stop_event: threading.Event,
                             last_size = LIVE_TS.stat().st_size if LIVE_TS.exists() else 0
                             last_t = time.time()
                             last_decoder_check_t = time.time()
-                            print(f"[magic_tv] decoder restarted "
+                            print(f"[tv_tuner] decoder restarted "
                                   f"(event #{state.recovery_events})")
                         else:
-                            print("[magic_tv] decoder restart failed "
+                            print("[tv_tuner] decoder restart failed "
                                   "— continuing with degraded stream")
                             decoder_bad_count = 0
                     except Exception as e:
-                        print(f"[magic_tv] decoder restart error: {e}")
+                        print(f"[tv_tuner] decoder restart error: {e}")
                         decoder_bad_count = 0
                     continue
             else:
@@ -1545,7 +1546,7 @@ def status_loop(state: PipelineState, stop_event: threading.Event,
                 and not in_cooldown
                 and ff_alive
                 and (now - last_refresh_t) >= REFRESH_INTERVAL_SEC):
-            print(f"[magic_tv] periodic refresh ({REFRESH_INTERVAL_SEC:.0f}s) "
+            print(f"[tv_tuner] periodic refresh ({REFRESH_INTERVAL_SEC:.0f}s) "
                   "— respawning ffmpeg+ffplay for fresh playback window")
             try:
                 if recover_ffmpeg():
@@ -1556,29 +1557,29 @@ def status_loop(state: PipelineState, stop_event: threading.Event,
                     last_fwd_t = now
                     fwd_frozen_since = 0.0
             except Exception as e:
-                print(f"[magic_tv] refresh error: {e}")
+                print(f"[tv_tuner] refresh error: {e}")
             continue
 
         # Only treat ffmpeg death as fatal if we actually spawned an
-        # ffmpeg process. The magic_player playback path skips ffmpeg
+        # ffmpeg process. The tv_player playback path skips ffmpeg
         # entirely (player decodes live.ts directly), so state.ffmpeg_proc
         # will be None and ff_alive False legitimately.
         if state.ffmpeg_proc is not None and not ff_alive:
             # ffmpeg died but tv_live alive: try recovery.
             if recover_ffmpeg and not in_cooldown:
-                print("[magic_tv] ffmpeg exited unexpectedly — recovering...")
+                print("[tv_tuner] ffmpeg exited unexpectedly — recovering...")
                 try:
                     if recover_ffmpeg():
                         state.recovery_events += 1
                         state.last_recovery_t = now
                         last_fwd = state.tail.bytes_forwarded if state.tail else 0
                         last_fwd_t = now
-                        print(f"[magic_tv] ffmpeg recovered "
+                        print(f"[tv_tuner] ffmpeg recovered "
                               f"(event #{state.recovery_events})")
                         continue
                 except Exception as e:
-                    print(f"[magic_tv] recovery error: {e}")
-            print("[magic_tv] ffmpeg exited — shutting down")
+                    print(f"[tv_tuner] recovery error: {e}")
+            print("[tv_tuner] ffmpeg exited — shutting down")
             stop_event.set()
             break
 
@@ -1588,15 +1589,15 @@ def status_loop(state: PipelineState, stop_event: threading.Event,
         # break. For now, just respawn ffplay if it died unexpectedly.
         if state.ffplay_proc is not None and not play_alive \
                 and recover_ffplay and not in_cooldown:
-            print("[magic_tv] ffplay exited unexpectedly — recovering...")
+            print("[tv_tuner] ffplay exited unexpectedly — recovering...")
             try:
                 if recover_ffplay():
                     state.recovery_events += 1
                     state.last_recovery_t = now
-                    print(f"[magic_tv] ffplay recovered "
+                    print(f"[tv_tuner] ffplay recovered "
                           f"(event #{state.recovery_events})")
             except Exception as e:
-                print(f"[magic_tv] ffplay recovery error: {e}")
+                print(f"[tv_tuner] ffplay recovery error: {e}")
 
 
 # ── Pipeline orchestration ───────────────────────────────────────
@@ -1610,20 +1611,20 @@ def run_pipeline(rf: int, callsign: str, play: bool,
     # the ffmpeg+ffplay pipeline, so those flags force player='ffplay'.
     if record_path is not None or stream_url is not None:
         if player == "magic":
-            print("[magic_tv] --record/--stream require ffplay player path; "
+            print("[tv_tuner] --record/--stream require ffplay player path; "
                   "switching player from 'magic' to 'ffplay'.")
         player = "ffplay"
     if not (play or stream_url or record_path):
         # No outputs requested → still allow it if user is just locking
         # the tuner; emit warning.
-        print("[magic_tv] no outputs selected (no --play, --stream, --record)."
+        print("[tv_tuner] no outputs selected (no --play, --stream, --record)."
               " Pipeline will run with a /dev/null sink.")
 
     log_dir = HERE / "data" / "tv_live"
     log_dir.mkdir(parents=True, exist_ok=True)
-    tv_log = log_dir / "magic_tv.tv_live.log"
-    ff_log = log_dir / "magic_tv.ffmpeg.log"
-    play_log = log_dir / "magic_tv.ffplay.log"
+    tv_log = log_dir / "tv_tuner.tv_live.log"
+    ff_log = log_dir / "tv_tuner.ffmpeg.log"
+    play_log = log_dir / "tv_tuner.ffplay.log"
 
     cmd = build_ffmpeg_cmd(play=play, record_path=record_path,
                            stream_url=stream_url, program=program)
@@ -1656,7 +1657,7 @@ def run_pipeline(rf: int, callsign: str, play: bool,
     def shutdown(*_a):
         if stop_event.is_set():
             return
-        print("\n[magic_tv] shutting down...")
+        print("\n[tv_tuner] shutting down...")
         stop_event.set()
         # Order: tv_live first (drops SDR), then ffmpeg, then ffplay
         kill_proc(state.tv_proc, "tv_live")
@@ -1690,7 +1691,7 @@ def run_pipeline(rf: int, callsign: str, play: bool,
             new_ff = spawn_ffmpeg(cmd, ff_log_fh,
                                   want_stdout_pipe=play)
         except Exception as e:
-            print(f"[magic_tv] failed to respawn ffmpeg: {e}",
+            print(f"[tv_tuner] failed to respawn ffmpeg: {e}",
                   file=sys.stderr)
             return False
         state.ffmpeg_proc = new_ff
@@ -1704,13 +1705,13 @@ def run_pipeline(rf: int, callsign: str, play: bool,
         if play:
             try:
                 new_play = spawn_ffplay(
-                    f"Magic TV — {callsign} (RF{rf})", play_log_fh)
+                    f"Software TV Tuner — {callsign} (RF{rf})", play_log_fh)
                 state.ffplay_proc = new_play
                 state.relay_thread = spawn_relay(
                     new_ff.stdout, new_play.stdin,
                     stop_event, tag="ffmpeg→ffplay")
             except Exception as e:
-                print(f"[magic_tv] ffplay respawn failed: {e}",
+                print(f"[tv_tuner] ffplay respawn failed: {e}",
                       file=sys.stderr)
                 # Continue without local playback.
         return True
@@ -1726,13 +1727,13 @@ def run_pipeline(rf: int, callsign: str, play: bool,
         state.ffplay_proc = None
         try:
             new_play = spawn_ffplay(
-                f"Magic TV — {callsign} (RF{rf})", play_log_fh)
+                f"Software TV Tuner — {callsign} (RF{rf})", play_log_fh)
             state.ffplay_proc = new_play
             state.relay_thread = spawn_relay(
                 ff.stdout, new_play.stdin,
                 stop_event, tag="ffmpeg→ffplay")
         except Exception as e:
-            print(f"[magic_tv] ffplay respawn failed: {e}",
+            print(f"[tv_tuner] ffplay respawn failed: {e}",
                   file=sys.stderr)
             return False
         return True
@@ -1743,7 +1744,7 @@ def run_pipeline(rf: int, callsign: str, play: bool,
         Popen on success or None if all retries exhaust."""
         for attempt in range(1, max_retries + 1):
             tv = spawn_tv_live(rf, tv_log_fh, viterbi=viterbi)
-            print(f"[magic_tv] tv_live PID={tv.pid} (attempt {attempt}); "
+            print(f"[tv_tuner] tv_live PID={tv.pid} (attempt {attempt}); "
                   f"waiting {window_sec:.0f}s for convergence...")
             if not wait_for_live_ts(timeout_sec=15.0):
                 kill_proc(tv, "tv_live")
@@ -1757,12 +1758,12 @@ def run_pipeline(rf: int, callsign: str, play: bool,
                     break
                 time.sleep(0.5)
             pat = measure_convergence()
-            print(f"[magic_tv] convergence check: PAT={pat} in 5MB "
+            print(f"[tv_tuner] convergence check: PAT={pat} in 5MB "
                   f"(need ≥{min_pat})")
             if pat >= min_pat:
-                print(f"[magic_tv] LOCK acquired on attempt {attempt}.")
+                print(f"[tv_tuner] LOCK acquired on attempt {attempt}.")
                 return tv
-            print(f"[magic_tv] bad convergence — killing and retrying...")
+            print(f"[tv_tuner] bad convergence — killing and retrying...")
             kill_proc(tv, "tv_live")
             time.sleep(2)
         return None
@@ -1791,7 +1792,7 @@ def run_pipeline(rf: int, callsign: str, play: bool,
 
         new_tv = acquire_lock(max_retries=4, window_sec=12.0, min_pat=5)
         if new_tv is None:
-            print("[magic_tv] decoder restart could not re-acquire lock")
+            print("[tv_tuner] decoder restart could not re-acquire lock")
             return False
         state.tv_proc = new_tv
 
@@ -1799,7 +1800,7 @@ def run_pipeline(rf: int, callsign: str, play: bool,
         try:
             new_ff = spawn_ffmpeg(cmd, ff_log_fh, want_stdout_pipe=play)
         except Exception as e:
-            print(f"[magic_tv] ffmpeg respawn failed: {e}", file=sys.stderr)
+            print(f"[tv_tuner] ffmpeg respawn failed: {e}", file=sys.stderr)
             return False
         state.ffmpeg_proc = new_ff
         state.tail = TailWorker(new_ff.stdin, stop_event)
@@ -1807,19 +1808,19 @@ def run_pipeline(rf: int, callsign: str, play: bool,
         if play:
             try:
                 new_play = spawn_ffplay(
-                    f"Magic TV — {callsign} (RF{rf})", play_log_fh)
+                    f"Software TV Tuner — {callsign} (RF{rf})", play_log_fh)
                 state.ffplay_proc = new_play
                 state.relay_thread = spawn_relay(
                     new_ff.stdout, new_play.stdin,
                     stop_event, tag="ffmpeg→ffplay")
             except Exception as e:
-                print(f"[magic_tv] ffplay respawn failed: {e}",
+                print(f"[tv_tuner] ffplay respawn failed: {e}",
                       file=sys.stderr)
         return True
 
     try:
-        print(f"[magic_tv] starting tv_live for RF{rf} ({callsign})")
-        print(f"[magic_tv]   logs: {tv_log}, {ff_log}"
+        print(f"[tv_tuner] starting tv_live for RF{rf} ({callsign})")
+        print(f"[tv_tuner]   logs: {tv_log}, {ff_log}"
               f"{', '+str(play_log) if play else ''}")
 
         # Convergence watchdog: the atscplus long equalizer locks
@@ -1830,17 +1831,17 @@ def run_pipeline(rf: int, callsign: str, play: bool,
         MIN_GOOD_PAT = 5
         for attempt in range(1, MAX_RETRIES + 1):
             state.tv_proc = spawn_tv_live(rf, tv_log_fh, viterbi=viterbi)
-            print(f"[magic_tv] tv_live PID={state.tv_proc.pid} "
+            print(f"[tv_tuner] tv_live PID={state.tv_proc.pid} "
                   f"(attempt {attempt}); waiting "
                   f"{CONVERGENCE_WINDOW_SEC:.0f}s for convergence...")
             if not wait_for_live_ts(timeout_sec=15.0):
-                print("[magic_tv] live.ts didn't start growing.")
+                print("[tv_tuner] live.ts didn't start growing.")
                 kill_proc(state.tv_proc, "tv_live")
                 state.tv_proc = None
                 if attempt < MAX_RETRIES:
                     time.sleep(2)
                     continue
-                print("[magic_tv] giving up — check tv_live log:", tv_log)
+                print("[tv_tuner] giving up — check tv_live log:", tv_log)
                 shutdown()
                 return 2
             t0 = time.time()
@@ -1849,23 +1850,23 @@ def run_pipeline(rf: int, callsign: str, play: bool,
                     break
                 time.sleep(0.5)
             pat_count = measure_convergence()
-            print(f"[magic_tv] convergence check: PAT={pat_count} in 5MB "
+            print(f"[tv_tuner] convergence check: PAT={pat_count} in 5MB "
                   f"(need ≥{MIN_GOOD_PAT})")
             if pat_count >= MIN_GOOD_PAT:
-                print(f"[magic_tv] LOCK acquired on attempt {attempt}.")
+                print(f"[tv_tuner] LOCK acquired on attempt {attempt}.")
                 break
-            print(f"[magic_tv] bad convergence — killing and retrying...")
+            print(f"[tv_tuner] bad convergence — killing and retrying...")
             kill_proc(state.tv_proc, "tv_live")
             state.tv_proc = None
             time.sleep(2)
         else:
-            print(f"[magic_tv] failed to acquire good lock after "
+            print(f"[tv_tuner] failed to acquire good lock after "
                   f"{MAX_RETRIES} attempts.")
             shutdown()
             return 3
 
         # Two playback paths.
-        # (a) magic_player: reads live.ts directly with decoupled audio/video
+        # (a) tv_player: reads live.ts directly with decoupled audio/video
         #     clocks. Skips the ffmpeg+ffplay middleman entirely. This is the
         #     path that produced our best real-RF result — audio kept playing
         #     through SDR drift while video held the last good frame.
@@ -1873,22 +1874,22 @@ def run_pipeline(rf: int, callsign: str, play: bool,
         #     and any record/stream sinks. Required when --record or --stream
         #     is set (run_pipeline forces player='ffplay' in that case).
         if play and player == "magic":
-            if not MAGIC_PLAYER.exists():
-                print(f"[magic_tv] magic_player.py not found at {MAGIC_PLAYER} "
+            if not TV_PLAYER.exists():
+                print(f"[tv_tuner] tv_player.py not found at {TV_PLAYER} "
                       "— falling back to ffplay path.", file=sys.stderr)
                 player = "ffplay"
 
         if play and player == "magic":
             # cv2.imshow() doesn't reliably attach a GUI window when
-            # magic_player is spawned as a child subprocess on Windows.
-            # The configuration that does work is launching magic_player
+            # tv_player is spawned as a child subprocess on Windows.
+            # The configuration that does work is launching tv_player
             # interactively from its own PowerShell window. Print clear
             # instructions and don't spawn it ourselves.
             print()
             print("=" * 70)
             print(" Open a SECOND PowerShell window and paste this:")
             print()
-            print(f'   & "{PYTHON_EXE}" "{MAGIC_PLAYER}" "{LIVE_TS}"')
+            print(f'   & "{PYTHON_EXE}" "{TV_PLAYER}" "{LIVE_TS}"')
             print()
             print(" The OpenCV video window will appear once it locks.")
             print(" Status overlay shows decoder + buffer health in real time.")
@@ -1898,10 +1899,10 @@ def run_pipeline(rf: int, callsign: str, play: bool,
             print(" python doesn't have cv2 / sounddevice installed.")
             print("=" * 70)
             print()
-            # We still keep magic_tv running so the decoder watchdog,
+            # We still keep tv_tuner running so the decoder watchdog,
             # convergence retries, and tv_live process are managed.
             # state.ffplay_proc stays None — status_loop tolerates that.
-            # No ffmpeg, no tail thread — magic_player runs separately
+            # No ffmpeg, no tail thread — tv_player runs separately
             # in the user's second PowerShell window.
             status_loop(state, stop_event, record_path, stream_url,
                         recover_ffmpeg=None,
@@ -1915,20 +1916,20 @@ def run_pipeline(rf: int, callsign: str, play: bool,
             # 4.1 NBC isn't program_id=1).
             actual_pid = probe_program_id(program)
             if actual_pid is not None and actual_pid != program:
-                print(f"[magic_tv] subchannel {program} → program_id {actual_pid}")
+                print(f"[tv_tuner] subchannel {program} → program_id {actual_pid}")
                 cmd = build_ffmpeg_cmd(play=play, record_path=record_path,
                                        stream_url=stream_url, program=actual_pid)
             elif actual_pid is None:
-                print(f"[magic_tv] WARN: could not probe program list; "
+                print(f"[tv_tuner] WARN: could not probe program list; "
                       f"using --program {program} as program_id directly.")
             state.ffmpeg_proc = spawn_ffmpeg(cmd, ff_log_fh,
                                              want_stdout_pipe=play)
-            print(f"[magic_tv] ffmpeg PID={state.ffmpeg_proc.pid}")
+            print(f"[tv_tuner] ffmpeg PID={state.ffmpeg_proc.pid}")
 
             if play:
                 state.ffplay_proc = spawn_ffplay(
-                    f"Magic TV — {callsign} (RF{rf})", play_log_fh)
-                print(f"[magic_tv] ffplay PID={state.ffplay_proc.pid}")
+                    f"Software TV Tuner — {callsign} (RF{rf})", play_log_fh)
+                print(f"[tv_tuner] ffplay PID={state.ffplay_proc.pid}")
                 state.relay_thread = spawn_relay(
                     state.ffmpeg_proc.stdout, state.ffplay_proc.stdin,
                     stop_event, tag="ffmpeg→ffplay")
@@ -1941,7 +1942,7 @@ def run_pipeline(rf: int, callsign: str, play: bool,
                         recover_decoder=recover_decoder)
 
     except Exception as e:
-        print(f"[magic_tv] error: {e}", file=sys.stderr)
+        print(f"[tv_tuner] error: {e}", file=sys.stderr)
         shutdown()
         return 1
     finally:
@@ -1952,15 +1953,15 @@ def run_pipeline(rf: int, callsign: str, play: bool,
                 try: fh.close()
                 except OSError: pass
 
-    print("[magic_tv] clean exit.")
+    print("[tv_tuner] clean exit.")
     return 0
 
 
 # ── CLI ──────────────────────────────────────────────────────────
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        prog="magic_tv",
-        description="Magic TV — tune, play, record, and stream ATSC channels "
+        prog="tv_tuner",
+        description="Software TV Tuner — tune, play, record, and stream ATSC channels "
                     "via the SDRplay RSPdx + gr-atscplus pipeline.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -1972,7 +1973,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--player", choices=["magic", "ffplay"], default="ffplay",
                    help="Playback engine. 'ffplay' (default) uses ffmpeg "
                         "re-encode + ffplay — single window, simpler UX. "
-                        "'magic' uses our resilient magic_player.py with "
+                        "'magic' uses our resilient tv_player.py with "
                         "decoupled audio/video clocks and a diagnostic "
                         "status overlay (held last frame on drift). "
                         "Recording / RTMP streaming require 'ffplay'.")
@@ -1988,7 +1989,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--no-play", dest="play", action="store_false",
                    help="Disable local playback (recording/streaming only)")
     p.add_argument("--stream", default=None, metavar="NAME",
-                   help="Name of a destination from magic_tv_config.json "
+                   help="Name of a destination from tv_tuner_config.json "
                         "(or a literal rtmp:// URL)")
     p.add_argument("--record", default=None, metavar="FILE",
                    help="Record to this MP4 file (relative paths go under "
@@ -1999,7 +2000,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Two-phase channel scan: a fast power sniff "
                         "across all candidate frequencies (~30s) followed "
                         "by a slow lock test only on hot channels. "
-                        "Saves ~/.magic_tv/scan.json.")
+                        "Saves ~/.tv_tuner/scan.json.")
     p.add_argument("--scan-dwell", type=float, default=8.0,
                    help="Seconds to wait per hot channel during phase 2 "
                         "(longer = more reliable lock on weak signals)")
@@ -2028,7 +2029,7 @@ def main(argv: list[str] | None = None) -> int:
         name, url = args.config_set
         cfg.setdefault("destinations", {})[name] = url
         save_config(cfg)
-        print(f"[magic_tv] saved destination: {name} → {url}")
+        print(f"[tv_tuner] saved destination: {name} → {url}")
         return 0
 
     if args.config_show:
@@ -2052,7 +2053,7 @@ def main(argv: list[str] | None = None) -> int:
             return dests[s]
         if "://" in s:
             return s
-        print(f"[magic_tv] unknown destination '{s}'. "
+        print(f"[tv_tuner] unknown destination '{s}'. "
               f"Known: {', '.join(dests.keys()) or '(none)'}")
         sys.exit(2)
 
@@ -2070,7 +2071,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if has_flags:
         if args.rf is None:
-            print("[magic_tv] --rf is required in scriptable mode.",
+            print("[tv_tuner] --rf is required in scriptable mode.",
                   file=sys.stderr)
             return 2
         _, lookup = _load_stations()
@@ -2103,5 +2104,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except KeyboardInterrupt:
-        print("\n[magic_tv] interrupted")
+        print("\n[tv_tuner] interrupted")
         sys.exit(130)

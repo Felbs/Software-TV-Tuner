@@ -1,6 +1,6 @@
 """Live ATSC TV streamer — Tier 9 variant using atscplus.atsc_viterbi_soft.
 
-Identical to tv_live_rf34.py but swaps stock dtv.atsc_viterbi_decoder()
+Identical to tv_live.py but swaps stock dtv.atsc_viterbi_decoder()
 for atscplus.atsc_viterbi_soft() to debug the soft Viterbi.
 """
 from __future__ import annotations

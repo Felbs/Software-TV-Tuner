@@ -31,7 +31,7 @@ from gnuradio import gr, blocks, analog, dtv
 from gnuradio import filter as gr_filter
 from gnuradio import soapy
 from gnuradio import network
-# Magic TV decoder fork — atsc_fpll_tight is the unlock for clean
+# gr-atscplus fork — atsc_fpll_tight is the unlock for clean
 # decode quality on marginal signals. Stock gr-dtv FPLL uses alpha=0.01
 # which is too wide; the shipped combo is alpha=0.001 + AFC tau=50us.
 from gnuradio import atscplus
@@ -194,7 +194,7 @@ class LiveTVTopBlock(gr.top_block):
         agc  = analog.agc_ff(1e-6, 4.0)
         sync = dtv.atsc_sync(output_rate)
         fs_check = atscplus.atsc_fs_checker_inst()
-        # 256-tap LMS equalizer from the magic-tv fork — drops PAT count
+        # 256-tap LMS equalizer from the gr-atscplus fork — drops PAT count
         # from 2/14MB → 97/14MB, distinct PIDs 7841 → 29, TEI 100% → 0%.
         # Convergence is probabilistic (~1 in 3 cold-starts); see watchdog.
         equalizer = atscplus.atsc_equalizer_long()

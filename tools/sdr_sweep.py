@@ -3,7 +3,7 @@
 Opens the SDR exactly once, tunes through a list of frequencies, captures
 a brief sample window at each, and writes per-frequency RMS power (dBFS)
 as JSON to stdout. Vastly faster than spawning a full GNU Radio flowgraph
-per frequency — used by magic_tv.py's two-phase scanner to skip dead
+per frequency — used by tv_tuner.py's two-phase scanner to skip dead
 channels before running the slow per-channel lock test.
 
 This script must be invoked with radioconda's Python (same as tv_live)

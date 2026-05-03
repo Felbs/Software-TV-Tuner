@@ -1,4 +1,4 @@
-# How Magic TV Decoder actually works — a long read
+# How Software TV Tuner actually works — a long read
 
 This is a tour of every signal-processing step that turns a stream of
 radio noise into watchable television. It assumes you can read code

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-magic_player.py - Resilient video player for unreliable / partial elementary streams
+tv_player.py - Resilient video player for unreliable / partial elementary streams
 
-Designed for the Magic TV Tuner project where SDR ATSC reception produces
+Designed for the Software TV Tuner project where SDR ATSC reception produces
 intermittent corrupt H.264 / MPEG-2.  Where ffplay/VLC freeze, this player
 holds the last good frame, optionally interpolates, advances audio in
 real-time, and overlays a status line.
@@ -44,13 +44,13 @@ Dependencies
 
 Run
 ---
-    python magic_player.py <source>
+    python tv_player.py <source>
         <source> = path to .ts/.mp4/.mkv, or - for stdin, or http(s)://...
 
     Examples:
-      python magic_player.py Z:/SDR_Agent_v2/soak_test.mp4
-      python magic_player.py Z:/SDR_Agent_v2/data/tv_live/live.ts
-      ffmpeg ... | python magic_player.py -
+      python tv_player.py Z:/SDR_Agent_v2/soak_test.mp4
+      python tv_player.py Z:/SDR_Agent_v2/data/tv_live/live.ts
+      ffmpeg ... | python tv_player.py -
 
 Keys
 ----
@@ -85,7 +85,7 @@ def _imp(name):
     try:
         return __import__(name)
     except Exception as e:
-        print(f"[magic_player] WARN cannot import {name}: {e}", file=sys.stderr)
+        print(f"[tv_player] WARN cannot import {name}: {e}", file=sys.stderr)
         return None
 
 
@@ -438,7 +438,7 @@ class FFDecoder(threading.Thread):
         # But that needs a real OS pipe.  In Python, subprocess.PIPE is OK
         # for parent <-> one child.
         #
-        # Even simpler: since stdin from magic_tv.py is the *re-encoded*
+        # Even simpler: since stdin from tv_tuner.py is the *re-encoded*
         # stream from a known mux, demand the user pre-mux to a single
         # output.  For clean stdin we can:
         #   1) read from stdin in Python
@@ -681,7 +681,7 @@ class Display:
             if self.snapshot_every > 0 and \
                     (now - self._t0) >= self._next_snapshot and \
                     cv2 is not None:
-                fname = f"magic_player_snap_{self._snapshot_idx:03d}.png"
+                fname = f"tv_player_snap_{self._snapshot_idx:03d}.png"
                 cv2.imwrite(fname, img)
                 self._snapshot_idx += 1
                 self._next_snapshot += self.snapshot_every
@@ -828,7 +828,7 @@ def main(argv=None):
     parser.add_argument("--probe-timeout", type=float, default=12.0)
     parser.add_argument("--snapshot-every", type=float, default=0.0,
                         help="Save the rendered frame every N seconds to "
-                             "magic_player_snap_*.png (for testing)")
+                             "tv_player_snap_*.png (for testing)")
     parser.add_argument("--max-seconds", type=float, default=0.0,
                         help="Auto-quit after N wall-clock seconds (0 = forever)")
     args = parser.parse_args(argv)

@@ -10,7 +10,8 @@ __pycache__/
 *.ts
 *.bak
 *.bak.*
-# Local user state for the magic_tv launcher
+# Local user state for the tv_tuner launcher
+tv_tuner_config.json
 magic_tv_config.json
 data/
 recordings/

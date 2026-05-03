@@ -1,12 +1,12 @@
-# Magic TV Decoder
+# Software TV Tuner (STVT)
 
 This is a software TV tuner for a software-defined radio. Watch TV on
 your SDR.
 
 A custom GNU Radio fork (`gr-atscplus`) decodes ATSC 1.0 broadcast TV
 from a $100 SDR + a TV antenna into a live MPEG-TS stream. Bundled with
-a CLI launcher (`magic_tv.py`) that picks a channel, tunes it, and
-plays it locally — or records to MP4 and re-streams to RTMP.
+a CLI launcher (`tv_tuner.py`) that scans your area, picks a channel,
+tunes it, and plays it — also records to MP4 and re-streams to RTMP.
 
 ## Download & install (Windows, ~10 minutes)
 
@@ -22,8 +22,8 @@ You need:
 
 ```powershell
 # 1. Clone the repo
-git clone https://github.com/Felbs/magic-tv-decoder.git
-cd magic-tv-decoder
+git clone https://github.com/Felbs/software-tv-tuner.git
+cd software-tv-tuner
 
 # 2. Build the C++ decoder OOT module
 #    Windows: VS 2022 BuildTools + NMake. Linux: bootstrap.sh.
@@ -36,7 +36,7 @@ python -c "from gnuradio import atscplus; print(dir(atscplus))"
 & "$env:USERPROFILE\radioconda\python.exe" -m pip install opencv-python sounddevice
 
 # 5. Pick + run a channel
-python tools\magic_tv.py
+python tools\tv_tuner.py
 ```
 
 The interactive picker shows every channel in your DMA grouped by RF
@@ -47,26 +47,26 @@ frequency. The default channel table covers DC/Baltimore — edit
 
 ```powershell
 # Interactive: banner + channel picker
-python tools\magic_tv.py
+python tools\tv_tuner.py
 
 # Direct: tune RF36 (Fox 5 DC) and play locally
-python tools\magic_tv.py --rf 36
+python tools\tv_tuner.py --rf 36
 
 # Pick a subchannel (4.1 NBC = --program 1, 4.4 Oxygen = --program 4)
-python tools\magic_tv.py --rf 34 --program 1
+python tools\tv_tuner.py --rf 34 --program 1
 
 # Record to MP4 (no playback window)
-python tools\magic_tv.py --rf 36 --no-play --record fox5_news.mp4
+python tools\tv_tuner.py --rf 36 --no-play --record fox5_news.mp4
 
 # Stream live to Twitch / YouTube / any RTMP destination
-python tools\magic_tv.py --config-set twitch rtmp://live.twitch.tv/app/YOUR_KEY
-python tools\magic_tv.py --rf 36 --stream twitch
+python tools\tv_tuner.py --config-set twitch rtmp://live.twitch.tv/app/YOUR_KEY
+python tools\tv_tuner.py --rf 36 --stream twitch
 
 # Dry-run: print the planned subprocess commands without spawning
-python tools\magic_tv.py --rf 36 --dry-run
+python tools\tv_tuner.py --rf 36 --dry-run
 ```
 
-`magic_tv.py` uses ffmpeg's `tee` muxer so one command can play
+`tv_tuner.py` uses ffmpeg's `tee` muxer so one command can play
 locally, record, and push to RTMP simultaneously without re-encoding
 twice.
 
@@ -80,7 +80,7 @@ Three layers keep playback alive on marginal signals:
 - **Pipeline watchdog** — when ffmpeg blocks on bad input, the watchdog
   detects no-bytes-forwarded-while-data-flowing and respawns ffmpeg
   while keeping `tv_live` alive.
-- **`magic_player.py`** — optional Python video player with decoupled
+- **`tv_player.py`** — optional Python video player with decoupled
   audio/video clocks. When the SDR briefly produces corrupt video PES,
   video holds the last good frame while audio keeps decoding from its
   own PID — a more honest diagnostic than ffplay's all-or-nothing
@@ -120,12 +120,14 @@ gr-atscplus/                  GNU Radio OOT module (custom C++ blocks)
   _build.bat                  Windows VS 2022 + NMake build
   _rebuild.bat                Windows incremental rebuild
 tools/
-  magic_tv.py                 Channel picker / player / recorder / streamer
-  tv_live_rf34.py             Continuous SDR → MPEG-TS pipeline
-  tv_live_rf34_softvit.py     Same pipeline, soft-Viterbi variant
+  tv_tuner.py                 Channel picker / player / recorder / streamer
+  tv_live.py                  Continuous SDR → MPEG-TS pipeline
+  tv_live_softvit.py          Same pipeline, soft-Viterbi variant
+  sdr_sweep.py                Fast carrier-presence pre-scanner
+  atsc_psip.py                PSIP parser (virtual channels + EIT)
   fcc_dc_stations.py          Sample channel table (edit for your DMA)
   config.py                   Default tuner/antenna/gain config
-  magic_player.py             Resilient video player (decoupled A/V clocks)
+  tv_player.py                Resilient video player (decoupled A/V clocks)
 docs/                         Science explainer, capture recipe, session log
 bootstrap.sh                  Linux setup + build + install
 ```
