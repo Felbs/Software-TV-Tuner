@@ -15,3 +15,6 @@ tv_tuner_config.json
 magic_tv_config.json
 data/
 recordings/
+
+# Scan-lab fixtures (captured wideband IQ — 400+ MB, regenerate locally)
+tools/scan_lab/fixtures/

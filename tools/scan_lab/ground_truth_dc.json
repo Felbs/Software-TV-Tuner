@@ -1,0 +1,26 @@
+{
+  "site": "Washington DC metro",
+  "source": "HDHomeRun Flex 4K, 2026-05-03",
+  "notes": "RF 100+ are virtual channels for ATSC 3.0 / NextGen TV broadcasts; 1.0 lineup occupies the lower numbers.",
+  "channels": [
+    {"rf": 9,  "callsign": "WUSA",   "network": "CBS",      "expected": "atsc1",       "hdhr_signal_pct": 85, "site_distance_mi": 5,  "comment": "VHF-Hi, weak on UHF antenna"},
+    {"rf": 15, "callsign": "WFDC",   "network": "Univision","expected": "atsc1",       "hdhr_signal_pct": 90, "site_distance_mi": 5},
+    {"rf": 21, "callsign": "WDCW",   "network": "CW",       "expected": "atsc1",       "hdhr_signal_pct": 85, "site_distance_mi": 5},
+    {"rf": 22, "callsign": "MPT",    "network": "Maryland PT","expected": "atsc1_marginal","hdhr_signal_pct": 90, "site_distance_mi": 30, "comment": "Annapolis transmitter, marginal in DC"},
+    {"rf": 25, "callsign": "WDVM",   "network": "Hagerstown", "expected": "atsc1_marginal","hdhr_signal_pct": 85, "site_distance_mi": 70, "comment": "very weak from DC"},
+    {"rf": 27, "callsign": "WETA",   "network": "PBS",      "expected": "atsc1",       "hdhr_signal_pct": 90, "site_distance_mi": 5},
+    {"rf": 31, "callsign": "WPXW",   "network": "ION",      "expected": "atsc1",       "hdhr_signal_pct": 90, "site_distance_mi": 5},
+    {"rf": 34, "callsign": "WRC",    "network": "NBC",      "expected": "atsc1",       "hdhr_signal_pct": 95, "site_distance_mi": 5, "comment": "carries WZDC subchannels too"},
+    {"rf": 35, "callsign": "WDCA",   "network": "MyNetwork","expected": "atsc1",       "hdhr_signal_pct": 90, "site_distance_mi": 5},
+    {"rf": 36, "callsign": "WTTG",   "network": "FOX",      "expected": "atsc1",       "hdhr_signal_pct": 95, "site_distance_mi": 5}
+  ],
+  "atsc3_carriers": [
+    {"rf": null, "virtual": "102.1", "callsign": "WMAR",    "expected": "atsc3"},
+    {"rf": null, "virtual": "104.1", "callsign": "WRC-3",   "expected": "atsc3"},
+    {"rf": null, "virtual": "105.1", "callsign": "WTTG-3",  "expected": "atsc3"},
+    {"rf": null, "virtual": "107.1", "callsign": "WJLA",    "expected": "atsc3"},
+    {"rf": null, "virtual": "109.1", "callsign": "WUSA-3",  "expected": "atsc3"},
+    {"rf": null, "virtual": "132.1", "callsign": "WHUT",    "expected": "atsc3"}
+  ],
+  "expected_empty_rfs": [2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 16, 17, 18, 19, 20, 23, 24, 26, 28, 29, 30, 32, 33]
+}
