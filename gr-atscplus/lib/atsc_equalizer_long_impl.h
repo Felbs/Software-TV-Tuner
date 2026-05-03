@@ -40,13 +40,27 @@ private:
     float training_sequence1[KNOWN_FIELD_SYNC_LENGTH];
     float training_sequence2[KNOWN_FIELD_SYNC_LENGTH];
 
+    // Tier-2 DD-LMS state. We only enable decision-directed adaptation after
+    // the field-sync trainer has run several times AND the residual error is
+    // small enough to trust the slicer decisions. Otherwise wrong decisions
+    // re-enforce themselves and corrupt the taps (the previous failure mode).
+    int   d_field_sync_count   = 0;     // total field-sync adaptN() calls
+    float d_last_fs_mse        = 1e9f;  // MSE from most recent adaptN()
+    // Tier-2 v3: looser MSE gate (DD helps even at partial lock, run 6 shows
+    // late convergence with this enabled) but strict per-symbol gate to block
+    // wrong-decision feedback loops.
+    static constexpr int   DD_MIN_FS_TRAININGS = 4;     // wait for 4 field syncs ~1.5s
+    static constexpr float DD_MAX_FS_MSE       = 6.0f;  // run DD any time field-sync MSE is finite
+    static constexpr float DD_GATE_ABS_ERR     = 0.4f;  // strict: only confident decisions
+    static constexpr float DD_LEAK             = 0.0f;  // leak disabled — was driving taps to 0
+
     void filterN(const float* input_samples, float* output_samples, int nsamples);
     void adaptN(const float* input_samples,
                 const float* training_pattern,
                 float* output_samples,
                 int nsamples);
-void adaptN_dd(const float* input_samples, float* output_samples, int nsamples);
-void adaptN_dfe(const float* input_samples, float* output_samples, int nsamples);
+    void adaptN_dd(const float* input_samples, float* output_samples, int nsamples);
+    void adaptN_dfe(const float* input_samples, float* output_samples, int nsamples);
 
     std::vector<float> d_taps;
 

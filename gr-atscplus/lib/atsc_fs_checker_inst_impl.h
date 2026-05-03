@@ -7,6 +7,7 @@
 
 #include "atsc_syminfo_impl.h"
 #include <gnuradio/atscplus/atsc_fs_checker_inst.h>
+#include <chrono>
 #include <cstdint>
 
 namespace gr {
@@ -38,6 +39,29 @@ private:
     uint64_t d_pn63_hist[64];
     uint64_t d_pn511_hist[32];
     static constexpr uint64_t LOG_EVERY = 50000;
+
+    // Tier-3 telemetry. Track post-AGC, post-sync signal level (mean abs and
+    // peak) per window — this is the cleanest available proxy for AGC drift
+    // because AGC is the immediately upstream block. Also track inter-field-
+    // sync segment cadence: if sync timing drifts, segments-per-field-sync
+    // wanders away from 313.
+    std::chrono::steady_clock::time_point d_t0;
+    double  d_window_sum_abs;
+    double  d_window_sum_sq;
+    float   d_window_max_abs;
+    uint64_t d_window_sample_count;
+    // Per-window field-sync metrics (the "FS511 errors" already tracked are
+    // global mins; these are per-window means).
+    uint64_t d_window_pn511_hits_start;
+    uint64_t d_window_field1_start;
+    uint64_t d_window_field2_start;
+    uint64_t d_window_uncertain_start;
+    uint64_t d_segs_at_last_fs;
+    uint64_t d_last_fs_gap;          // segments since previous FS hit
+    uint64_t d_window_fs_gap_sum;    // sum of FS gaps in window
+    uint64_t d_window_fs_gap_count;  // count of FS gaps in window
+    uint64_t d_window_fs_gap_min;
+    uint64_t d_window_fs_gap_max;
 
     inline static int wrap(int index) { return index & (SRSIZE - 1); }
     inline static int incr(int index) { return wrap(index + 1); }

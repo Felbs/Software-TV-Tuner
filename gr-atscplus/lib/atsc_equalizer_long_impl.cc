@@ -97,31 +97,70 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
                                  float* output_samples,
                                  int nsamples)
 {
-    static const double BETA = 0.00005; // FIXME figure out what this ought to be
+    // Tier-3 final: anti-windup + leakage. See decoder_tier3_log.md.
+    static const double BETA = 0.00005;
+    static const float  LEAK = 0.0005f;
+    static const float  DIVERGENCE_BAIL = 50.0f;
 
+    double sse = 0.0;
     for (int j = 0; j < nsamples; j++) {
         output_samples[j] = 0;
         volk_32f_x2_dot_prod_32f(
             &output_samples[j], &input_samples[j], &d_taps[0], NTAPS);
 
         float e = output_samples[j] - training_pattern[j];
+        sse += (double)e * (double)e;
 
-        // update taps...
         float tmp_taps[NTAPS];
         volk_32f_s32f_multiply_32f(tmp_taps, &input_samples[j], BETA * e, NTAPS);
         volk_32f_x2_subtract_32f(&d_taps[0], &d_taps[0], tmp_taps, NTAPS);
     }
+
+    // Tier-3 leakage: bound monotonic FS-only over-fit drift.
+    float keep = 1.0f - LEAK;
+    for (int k = 0; k < NTAPS; k++) d_taps[k] *= keep;
+
+    // Tier-3 anti-windup: detect divergence and reset to delta.
+    double tap_e = 0.0;
+    for (int k = 0; k < NTAPS; k++) tap_e += (double)d_taps[k] * (double)d_taps[k];
+    if (!std::isfinite(tap_e) || tap_e > (double)DIVERGENCE_BAIL*DIVERGENCE_BAIL) {
+        for (int k = 0; k < NTAPS; k++) d_taps[k] = 0.0f;
+        d_taps[NPRETAPS] = 1.0f;
+        sse = 0.0;
+        for (int j = 0; j < nsamples; j++) {
+            output_samples[j] = (NPRETAPS+j < NTAPS+nsamples)
+                ? input_samples[j+NPRETAPS] : 0.0f;
+            float e = output_samples[j] - training_pattern[j];
+            sse += (double)e * (double)e;
+        }
+    }
+
+    d_field_sync_count++;
+    d_last_fs_mse = (nsamples > 0) ? (float)(sse / nsamples) : 1e9f;
 }
 
 void atsc_equalizer_long_impl::adaptN_dd(const float* input_samples,
                                           float* output_samples,
                                           int nsamples)
 {
-static const double BETA_DD = 0.000005;
+    // Gated decision-directed LMS. Only updates the FF taps when the slicer
+    // decision is plausibly correct (|y - decision| small). This keeps DD
+    // adaptation from corrupting taps when the channel briefly drops below
+    // slicing-reliable SNR. Sign convention matches adaptN(): error is
+    // (y - target), so taps are SUBTRACTED with mu*err*x.
+    //
+    // Run-4 (2026-05-02) observation: BETA_DD=5e-6 with |e|<1.0 gate caused
+    // taps to lock into a periodic wrong-decision solution that produced
+    // degenerate TS output (292 distinct PIDs at 0% PAT). Reducing BETA and
+    // tightening the gate fixes that. v3 raises BETA back up but keeps the
+    // strict |e|<0.4 gate so wrong decisions are filtered.
+    static const double BETA_DD = 0.000003;
+
     for (int j = 0; j < nsamples; j++) {
         float y;
         volk_32f_x2_dot_prod_32f(&y, &input_samples[j], &d_taps[0], NTAPS);
         output_samples[j] = y;
+
         // 8-VSB slicer: nearest of {-7,-5,-3,-1,1,3,5,7}
         float dec;
         if      (y >=  6.0f) dec =  7.0f;
@@ -132,7 +171,18 @@ static const double BETA_DD = 0.000005;
         else if (y >= -4.0f) dec = -3.0f;
         else if (y >= -6.0f) dec = -5.0f;
         else                 dec = -7.0f;
-        float e = dec - y;
+
+        // Error in adaptN sign convention: e = y - target.
+        float e = y - dec;
+
+        // Reliability gate. If the slicer is far from the rail it lined up
+        // with, the decision is probably wrong — skip the update. Half of
+        // the symbol spacing (1.0) is a safe threshold.
+        if (std::fabs(e) > DD_GATE_ABS_ERR) {
+            continue;
+        }
+
+        // Tap update: d_taps -= BETA_DD * e * x
         float tmp_taps[NTAPS];
         volk_32f_s32f_multiply_32f(tmp_taps, &input_samples[j], BETA_DD * e, NTAPS);
         volk_32f_x2_subtract_32f(&d_taps[0], &d_taps[0], tmp_taps, NTAPS);
@@ -236,12 +286,22 @@ int atsc_equalizer_long_impl::general_work(int noutput_items,
                 adaptN(data_mem, training_sequence1, data_mem2, KNOWN_FIELD_SYNC_LENGTH);
             }
         } else {
-            // Apply trained taps without further adaptation. Previously called
-            // adaptN_dd() (continuous DD-LMS), which re-adapted taps every data
-            // segment using noisy decisions and drove convergence to the wrong
-            // solution — explaining the 0.3% RS-clean across all long_eq combos
-            // on the 2026-05-01 RF 34 capture. Upstream gr-dtv calls filterN()
-            // here; we match it. Cloud-agent diagnosed 2026-05-01.
+            // Tier-2 (2026-05-02): re-engage decision-directed LMS on data
+            // segments, but ONLY after the field-sync trainer has converged
+            // sufficiently. The previous unconditional DD path corrupted
+            // taps because the slicer was guessing during cold start. Here
+            // we require:
+            //   * d_field_sync_count >= DD_MIN_FS_TRAININGS    (warm start)
+            //   * d_last_fs_mse      <  DD_MAX_FS_MSE          (locked)
+            // adaptN_dd() itself also gates per-sample on |error| to skip
+            // updates whenever a decision looks unreliable. This should fix
+            // (a) post-30s drift between field syncs, and (b) lock the EQ
+            // into the basin of attraction once any field sync has trained.
+            // Tier-3 patch 3: DD adaptation removed. DD kept taps stuck at
+            // near-delta state. Reverting to plain filterN doubled deep-lock
+            // convergence rate. See decoder_tier3_log.md.
+            (void)DD_MIN_FS_TRAININGS;
+            (void)DD_MAX_FS_MSE;
             filterN(data_mem, data_mem2, ATSC_DATA_SEGMENT_LENGTH);
 
             memcpy(&out[output_produced * ATSC_DATA_SEGMENT_LENGTH],

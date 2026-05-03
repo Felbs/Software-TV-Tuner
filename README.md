@@ -1,126 +1,161 @@
 # Magic TV Decoder
 
-Open-source software ATSC 1.0 (broadcast HDTV) receiver. Pure software,
-runs on a laptop, decodes free over-the-air HD television from radio
-waves picked up by a $100 SDR and a horizontal antenna.
+**Watch free over-the-air HD television, decoded from raw radio waves
+in software, on a regular laptop.**
 
-The C++ heart is a fork of GNU Radio's `gr-dtv` plus 5 experimental
-blocks (called `gr-atscplus` for historical reasons — that's what the
-GNU Radio out-of-tree module is named on disk). The Python wrappers,
-recipe scripts, and live-streaming pipeline are this repo's own work.
+A custom GNU Radio fork (`gr-atscplus`) that decodes ATSC 1.0 broadcast
+TV from a $100 SDR + a TV antenna. It produces a live MPEG-TS stream
+your favorite player can watch — VLC, ffplay, or our included
+`magic_tv.py` CLI launcher.
 
-If the words **8-VSB**, **Hilbert transform**, **trellis-coded
-modulation**, **Reed-Solomon**, or **multipath equalizer** mean
-nothing to you yet but you want them to, jump straight to
-[`docs/science.md`](docs/science.md) — that's a long-form explainer of
-every signal-processing step, written for curious readers without an
-RF engineering background.
+The repo contains:
+- A modified gr-dtv decoder with **6 experimental C++ blocks** that
+  fix bugs and squeeze more locks out of marginal signals.
+- A **command-line TV launcher** (`tools/magic_tv.py`) that scans your
+  channels, picks one, and plays it — also records to MP4 and
+  re-streams to RTMP / Twitch / YouTube live.
+- Watchdogs for both the SDR decoder lock and the downstream player
+  pipeline so playback can self-heal.
 
-> **Milestone:** software decode of a North-American UHF ATSC station at
-> visual quality matching a hardware HDHomeRun reference on the same RF
-> moment, using an SDRplay RSPdx + a horizontally-polarized TV antenna +
-> the proven gain settings + the `fpll_a002_tau20` combo. **62.2%
-> RS-clean, ~1100 HD frames + 1100 SD frames per 60-sec capture** on the
-> reference channel. See [`docs/proven_capture_recipe.md`](docs/proven_capture_recipe.md)
-> and [`results/`](results/) for the data.
->
-> **Live streaming also working** — continuous capture-decode-broadcast
-> pipeline serves decoded TS over `tcp://localhost:5559`. VLC with
-> `--demux=ts --network-caching=10000` reads the TCP stream forever,
-> ~30-45 sec lag end-to-end.
+## What it took
 
-## Quick start
+This is the result of one long iteration session, documented in
+[`docs/2026-05-02-session.md`](docs/2026-05-02-session.md). Short
+version: the stock equalizer was slightly broken (under-tuned LMS),
+the FPLL alpha/tau had too much margin loss past 60 seconds, and the
+correct combination of these two fixes turns "30 seconds and freeze"
+into "watch a baseball game."
 
-You need a **horizontally-polarized TV antenna** (a discone won't work
-— see "Why polarization matters" below), an SDRplay RSPdx (or
-compatible SDR), and a Linux box with GNU Radio 3.10+ installed. Pick
-a strong UHF station in your area (find one via `tvfool.com` or the
-FCC ATSC database for your address); the example below uses an
-arbitrary 593 MHz UHF channel, **change it to your station's
-frequency**.
-
-```bash
-# 1. Capture 60 sec of IQ from your antenna at your station's frequency
-rx_sdr -d "driver=sdrplay" -a "Antenna A" \
-       -f 593000000 -s 8000000 \
-       -g "IFGR=59" -t "rfgain_sel=5" \
-       -F CS16 -n 480000000 capture.cs16
-
-# 2. Build the OOT module (one-time)
-./bootstrap.sh
-
-# 3. Decode + scrub
-python3 run_combo.py capture.cs16 out.ts fpll_a002_tau20
-python3 ts_tei_scrub.py out.ts out_clean.ts
-
-# 4. Watch
-vlc out_clean.ts
-```
-
-The two non-obvious capture values (`rfgain_sel=5`, `IFGR=59`) make
-the difference between 100% TEI=1 (ADC saturation, signal looks dead)
-and 60%+ RS-clean watchable TV. See [`docs/science.md`](docs/science.md)
-for *why*.
-
-## Forked blocks
-
-| Block | Status | Notes |
+| Tier | What we tried | Outcome |
 |---|---|---|
-| `atsc_fpll_tight` | ✓ working, +2pp wins | Parameterized alpha + AFC tau. Best params: alpha=0.002, tau=20µs |
-| `atsc_viterbi_soft` | ✓ working, neutral-positive | Soft-decision Viterbi; small win on top of tight FPLL |
-| `atsc_sync_tunable` | ✓ working, neutral | Lock thresholds + hysteresis; tied stock on the test capture |
-| `atsc_fs_checker_inst` | ✓ working | Instrumented (PN511/PN63 histograms to stderr) |
-| `atsc_equalizer_long` | ✗ **broken**, 0.3% RS-clean | 256-tap DD-LMS, regression of unknown cause; do not use |
+| 1 | Long equalizer + slow AGC | massive PAT improvement, baseline |
+| 2 | DD/DFE adaptation | falsified, removed |
+| 3 | **Anti-windup + leakage on equalizer** | **shipped — current code** |
+| 4 | Tap snapshot/revert | no win, reverted |
+| 5 | GPU 1024-tap LMS | no win |
+| 6 | CMA + DFE blind equalizer | no win — bottleneck not in EQ |
+| 7 | **FPLL tightening (`alpha=0.001, tau=50us`)** | **shipped — fixed t=60s drift** |
+| 8 | Neural-net Viterbi replacement | only beats Viterbi above 17 dB SNR |
 
-`combos.yaml` defines 29 named combos (stock baseline + 28 forks). A
-sweep against a real-RF capture produced this leaderboard:
+## Download & install (Windows, 10 minutes)
 
-| Rank | HD frames | SD frames | Clean% | Combo |
-|---|---|---|---|---|
-| 1 | 1113 | 1094 | 62.2% | **fpll_a002_tau20** |
-| 2 | 1112 | 1094 | 62.2% | fpll_soft_a003_tau10 |
-| 3 | 1111 | 1094 | 62.1% | tight_fpll_soft_vit |
-| ... | | | | |
-| stock | 1083 | 1077 | 60.8% | gr-dtv baseline |
+You need:
+- A computer with **GNU Radio 3.10+**, easiest via
+  [`radioconda`](https://github.com/ryanvolz/radioconda) (free).
+- A supported SDR. We've tested with the **SDRplay RSPdx** + the
+  SDRplay API v3 driver. Other SoapySDR-supported devices may work
+  with parameter tweaks.
+- A **horizontally-polarized TV antenna** — see
+  ["Why polarization matters"](#why-polarization-matters) below.
+- (Windows only) [`ffmpeg`](https://www.gyan.dev/ffmpeg/builds/)
+  (full build) extracted to `C:\ffmpeg\`.
 
-## Build
+```powershell
+# 1. Clone the repo
+git clone https://github.com/Felbs/magic-tv-decoder.git
+cd magic-tv-decoder
 
-Requires Linux (Ubuntu 24.04 tested) with `gnuradio` (3.10.9+),
-`gr-dtv`, `libvolk`, `pybind11`, `cmake`. Use Python 3.12.
+# 2. Build the C++ decoder OOT module (Linux: bootstrap.sh; Windows: gr-atscplus/_build.bat)
+#    On Windows you need VS 2022 BuildTools + NMake; the build script handles the rest.
+gr-atscplus\_build.bat
 
-```bash
-./bootstrap.sh
+# 3. Verify the new blocks are loadable from Python
+python -c "from gnuradio import atscplus; print(dir(atscplus))"
+
+# 4. Pick + run a channel
+python tools\magic_tv.py
 ```
 
-Installs missing prerequisites, builds the OOT module under
-`gr-atscplus/build/`, installs to `/usr/local`, verifies the Python
-binding lists all 5 forked blocks.
+The interactive picker shows every channel in your DMA grouped by RF
+frequency. Pick one and start watching. (The default channel table
+covers DC/Baltimore — edit `tools/fcc_dc_stations.py` for your region.)
 
-## Regression sweep
+## Run
 
-After any C++ change to a forked block, run the local sweep against
-your captured IQ to make sure stock didn't regress and check whether
-your change actually helps:
+```powershell
+# Interactive mode (recommended): banner + channel picker
+python tools\magic_tv.py
 
-```bash
-bash scripts/run_local_sweep.sh /path/to/capture.cs16
+# Direct mode: tune RF36 (Fox 5 DC) and play locally
+python tools\magic_tv.py --rf 36
+
+# Record a show to MP4 (no playback window, ideal for unattended capture)
+python tools\magic_tv.py --rf 36 --no-play --record fox5_news.mp4
+
+# Stream live to Twitch / YouTube / any RTMP destination
+python tools\magic_tv.py --config-set twitch rtmp://live.twitch.tv/app/YOUR_KEY
+python tools\magic_tv.py --rf 36 --stream twitch
+
+# Dry-run: print the planned subprocess commands without spawning
+python tools\magic_tv.py --rf 36 --dry-run
 ```
 
-Outputs RS-clean %, SD frames, HD frames per combo and a sorted
-leaderboard. ~15 minutes for all 29 combos on a 60-sec capture.
+## Live-streaming and recording
 
-## Repo layout
+`magic_tv.py` uses ffmpeg's `tee` muxer so you can multiplex outputs
+without re-encoding twice. One command can simultaneously play
+locally, record to MP4, and push to RTMP. Re-encode is libx264
+ultrafast / zerolatency / crf 28; audio passes through.
 
-```
-gr-atscplus/        forked OOT module (5 C++ blocks)
-combos.yaml         29 named combo configurations
-run_combo.py        parameterized single-decode runner
-benchmark_synth.py  synthetic IQ generator + combo sweep (currently broken — synth IQ produces 0% on stock too; investigation pending)
-scripts/run_local_sweep.sh  real-IQ regression sweep with SD/HD frame counts
-docs/               capture recipe + radio-science explanation + findings
-results/            scoreboard outputs by date
-bootstrap.sh        Linux setup + build + install
-```
+## Watchdogs
+
+Two layers of self-healing keep playback alive on marginal signals:
+
+- **Decoder watchdog** — periodically samples PAT count from the live
+  TS. When the equalizer drifts (PAT drops below threshold), kills
+  and respawns `tv_live` for a fresh equalizer convergence. Brief
+  gap, then continues.
+- **Pipeline watchdog** — when ffmpeg blocks on bad input, the watchdog
+  detects no-bytes-forwarded-while-data-flowing and respawns ffmpeg
+  while keeping `tv_live` alive.
+
+Together they replace "30 seconds and freeze forever" with "play /
+brief gap / play / brief gap / play indefinitely."
+
+## Why this exists
+
+ATSC has been around for 30 years; you can buy a $20 USB ATSC stick
+that decodes it perfectly. So why software-decode it from raw RF?
+
+- **Education.** Software decode lets you instrument every step of
+  the chain — see what the equalizer is doing, what the FPLL is
+  doing, watch field-sync detection happen. You can't open up the
+  ASIC in your USB stick.
+- **Research.** You own every byte from raw IQ to decoded TS, and
+  every block in between is hackable.
+- **Hackability.** Want to add a custom error-concealment frame
+  interpolator? Write a new GR block. Try it. Compare to baseline.
+
+## Forked C++ blocks
+
+| Block | Status | What it does |
+|---|---|---|
+| `atsc_fpll_tight` | ✓ shipped | Carrier PLL with parameterized loop bandwidth + AFC time constant. Best params: **alpha=0.001, tau=50us** (Tier 7 finding) |
+| `atsc_equalizer_long` | ✓ shipped (Tier 3) | 256-tap LMS equalizer with anti-windup + leakage. Replaces the stock 64-tap. Tier 3 fix made this the workhorse decoder |
+| `atsc_viterbi_soft` | ⚠ broken on real RF | Synthesizes correctly but produces 100% TEI on real captures. Bug not yet isolated |
+| `atsc_sync_tunable` | ✓ working, neutral | Lock thresholds + hysteresis |
+| `atsc_fs_checker_inst` | ✓ working | Instrumented field-sync checker (PN511/PN63 histograms to stderr) |
+| `atsc_equalizer_cma` | experimental | Continuous-Modulus + DFE. Falsified in Tier 6 testing — included for reference, not used by default |
+
+## How does this actually work?
+
+[`docs/science.md`](docs/science.md) is a long-form explainer of every
+signal-processing step, written for curious readers without an RF
+engineering background: 8-VSB modulation, why VSB needs the Hilbert
+transform, the FPLL carrier-lock loop, equalizer training vs
+decision-directed adaptation, soft- vs hard-decision Viterbi,
+Reed-Solomon, why gain settings matter so much, and how to tell from
+`atsc_fs_checker_inst` output which step in the pipeline is broken
+when something goes wrong.
+
+[`docs/proven_capture_recipe.md`](docs/proven_capture_recipe.md)
+documents the SDRplay gain settings, antenna polarization, and
+capture parameters that produce the best lock.
+
+[`docs/2026-05-02-session.md`](docs/2026-05-02-session.md) is the
+narrative of the day-long iteration that produced the current
+working state — every tier of fix attempted, what worked, what
+didn't, and why.
 
 ## Why polarization matters
 
@@ -135,15 +170,25 @@ antenna is correctly oriented.
 Indoor rabbit-ears bent into a horizontal "V" work surprisingly well.
 A purpose-built UHF Yagi gives the best SNR margin.
 
-## How does this actually work?
+## Repo layout
 
-See [`docs/science.md`](docs/science.md) for a step-by-step
-explanation of the radio science: 8-VSB modulation, why VSB needs
-the Hilbert transform, the FPLL carrier-lock loop, equalizer
-training vs decision-directed adaptation, soft- vs hard-decision
-Viterbi, Reed-Solomon, why gain settings matter so much, and how
-to tell from `atsc_fs_checker_inst` output which step in the
-pipeline is broken when something goes wrong.
+```
+gr-atscplus/        Forked GNU Radio OOT module (6 C++ blocks)
+tools/              CLI tools you actually run
+  magic_tv.py         Channel picker / player / recorder / streamer
+  tv_live_rf34.py     Continuous SDR → MPEG-TS pipeline
+  fcc_dc_stations.py  Sample channel table (edit for your DMA)
+  config.py           Default tuner/antenna/gain config
+combos.yaml         29 named combo configurations (testing)
+run_combo.py        Single-decode runner with named combos
+benchmark_synth.py  Synthetic IQ generator + sweep
+scripts/            Real-IQ regression sweep + helpers
+docs/               Science explainer, capture recipe, session log
+results/            Scoreboard outputs by date
+bootstrap.sh        Linux setup + build + install
+gr-atscplus/_build.bat       Windows VS 2022 + NMake build
+gr-atscplus/_rebuild.bat     Windows incremental rebuild
+```
 
 ## License
 

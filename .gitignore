@@ -10,3 +10,12 @@ __pycache__/
 *.ts
 results/*.json
 !results/.gitkeep
+# Tier-N recovery snapshots from the 2026-05-02 session
+*.bak
+*.bak.tier*
+# Local user state for the magic_tv launcher
+magic_tv_config.json
+hdhr_info.json
+data/
+recordings/
+training_data/

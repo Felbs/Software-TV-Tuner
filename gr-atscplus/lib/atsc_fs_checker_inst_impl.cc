@@ -13,6 +13,7 @@
 #include <gnuradio/dtv/atsc_consts.h>
 #include <gnuradio/io_signature.h>
 #include <cstdio>
+#include <cmath>
 #include <algorithm>
 
 #define ATSC_SEGMENTS_PER_DATA_FIELD 313
@@ -65,6 +66,23 @@ void atsc_fs_checker_inst_impl::reset()
     d_min_pn63_errors_window = 63;
     std::memset(d_pn63_hist, 0, sizeof(d_pn63_hist));
     std::memset(d_pn511_hist, 0, sizeof(d_pn511_hist));
+
+    // Tier-3 telemetry init.
+    d_t0 = std::chrono::steady_clock::now();
+    d_window_sum_abs = 0.0;
+    d_window_sum_sq = 0.0;
+    d_window_max_abs = 0.0f;
+    d_window_sample_count = 0;
+    d_window_pn511_hits_start = 0;
+    d_window_field1_start = 0;
+    d_window_field2_start = 0;
+    d_window_uncertain_start = 0;
+    d_segs_at_last_fs = 0;
+    d_last_fs_gap = 0;
+    d_window_fs_gap_sum = 0;
+    d_window_fs_gap_count = 0;
+    d_window_fs_gap_min = ~0ull;
+    d_window_fs_gap_max = 0;
 }
 
 atsc_fs_checker_inst_impl::~atsc_fs_checker_inst_impl()
@@ -109,6 +127,17 @@ int atsc_fs_checker_inst_impl::general_work(int noutput_items,
     for (int i = 0; i < noutput_items; i++) {
         d_total_segments++;
 
+        // Tier-3: accumulate per-segment input level (post-AGC, post-sync)
+        // for AGC drift telemetry. Sum |x| across the whole segment.
+        const float* seg = &in[i * ATSC_DATA_SEGMENT_LENGTH];
+        for (int j = 0; j < ATSC_DATA_SEGMENT_LENGTH; j++) {
+            float a = std::fabs(seg[j]);
+            d_window_sum_abs += a;
+            d_window_sum_sq  += (double)seg[j] * (double)seg[j];
+            if (a > d_window_max_abs) d_window_max_abs = a;
+        }
+        d_window_sample_count += ATSC_DATA_SEGMENT_LENGTH;
+
         int errors_511 = 0;
         for (int j = 0; j < LENGTH_511; j++) {
             errors_511 +=
@@ -136,10 +165,29 @@ int atsc_fs_checker_inst_impl::general_work(int noutput_items,
                 d_field1_hits++;
                 d_field_num = 1;
                 d_segment_num = -1;
+                // Tier-3: record FS gap.
+                uint64_t gap = d_total_segments - d_segs_at_last_fs;
+                d_segs_at_last_fs = d_total_segments;
+                d_last_fs_gap = gap;
+                if (d_window_fs_gap_count > 0 || gap < 1000) {
+                    d_window_fs_gap_sum += gap;
+                    d_window_fs_gap_count++;
+                    if (gap < d_window_fs_gap_min) d_window_fs_gap_min = gap;
+                    if (gap > d_window_fs_gap_max) d_window_fs_gap_max = gap;
+                }
             } else if (errors_63 >= (LENGTH_2ND_63 - PN63_ERROR_LIMIT)) {
                 d_field2_hits++;
                 d_field_num = 2;
                 d_segment_num = -1;
+                uint64_t gap = d_total_segments - d_segs_at_last_fs;
+                d_segs_at_last_fs = d_total_segments;
+                d_last_fs_gap = gap;
+                if (d_window_fs_gap_count > 0 || gap < 1000) {
+                    d_window_fs_gap_sum += gap;
+                    d_window_fs_gap_count++;
+                    if (gap < d_window_fs_gap_min) d_window_fs_gap_min = gap;
+                    if (gap > d_window_fs_gap_max) d_window_fs_gap_max = gap;
+                }
             } else {
                 d_pn63_uncertain++;
             }
@@ -168,19 +216,56 @@ int atsc_fs_checker_inst_impl::general_work(int noutput_items,
         }
 
         if (d_total_segments % LOG_EVERY == 0) {
+            auto now = std::chrono::steady_clock::now();
+            double t = std::chrono::duration<double>(now - d_t0).count();
+
+            // Tier-3 window stats.
+            double mean_abs = (d_window_sample_count > 0)
+                ? d_window_sum_abs / (double)d_window_sample_count : 0.0;
+            double rms = (d_window_sample_count > 0)
+                ? std::sqrt(d_window_sum_sq / (double)d_window_sample_count) : 0.0;
+            uint64_t fs_in_window = (d_pn511_hits - d_window_pn511_hits_start);
+            uint64_t f1_in_window = (d_field1_hits - d_window_field1_start);
+            uint64_t f2_in_window = (d_field2_hits - d_window_field2_start);
+            double mean_fs_gap = (d_window_fs_gap_count > 0)
+                ? (double)d_window_fs_gap_sum / (double)d_window_fs_gap_count : 0.0;
+
             std::fprintf(stderr,
-                         "[fs_checker_inst @%llu segs] pn511_hits=%llu f1=%llu f2=%llu "
-                         "uncertain=%llu min_pn511_e=%d min_pn63_e=%d\n",
+                         "[fs_check t=%6.2fs @%llu segs] pn511_hits=%llu "
+                         "f1=%llu f2=%llu uncertain=%llu min_pn511_e=%d "
+                         "min_pn63_e=%d | win: f1=%llu f2=%llu mean|x|=%.3f "
+                         "rms=%.3f maxabs=%.2f fs_gap[min/mean/max]=%llu/%.1f/%llu n=%llu\n",
+                         t,
                          (unsigned long long)d_total_segments,
                          (unsigned long long)d_pn511_hits,
                          (unsigned long long)d_field1_hits,
                          (unsigned long long)d_field2_hits,
                          (unsigned long long)d_pn63_uncertain,
                          d_min_pn511_errors_window,
-                         d_min_pn63_errors_window);
+                         d_min_pn63_errors_window,
+                         (unsigned long long)f1_in_window,
+                         (unsigned long long)f2_in_window,
+                         mean_abs, rms, d_window_max_abs,
+                         (unsigned long long)d_window_fs_gap_min,
+                         mean_fs_gap,
+                         (unsigned long long)d_window_fs_gap_max,
+                         (unsigned long long)d_window_fs_gap_count);
             std::fflush(stderr);
+
             d_min_pn511_errors_window = 511;
             d_min_pn63_errors_window = 63;
+            d_window_sum_abs = 0.0;
+            d_window_sum_sq = 0.0;
+            d_window_max_abs = 0.0f;
+            d_window_sample_count = 0;
+            d_window_pn511_hits_start = d_pn511_hits;
+            d_window_field1_start = d_field1_hits;
+            d_window_field2_start = d_field2_hits;
+            d_window_uncertain_start = d_pn63_uncertain;
+            d_window_fs_gap_sum = 0;
+            d_window_fs_gap_count = 0;
+            d_window_fs_gap_min = ~0ull;
+            d_window_fs_gap_max = 0;
         }
     }
 

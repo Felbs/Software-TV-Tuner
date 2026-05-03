@@ -13,6 +13,7 @@ include(GrPlatform) #define LIB_SUFFIX
 
 list(APPEND atscplus_sources
     atsc_equalizer_long_impl.cc
+    atsc_equalizer_cma_impl.cc
     atsc_single_viterbi_soft.cc
     atsc_viterbi_soft_impl.cc
     atsc_fs_checker_inst_impl.cc
@@ -32,6 +33,8 @@ add_library(gnuradio-atscplus SHARED ${atscplus_sources})
 target_link_libraries(gnuradio-atscplus
     gnuradio::gnuradio-runtime
     gnuradio::gnuradio-dtv
+    gnuradio::gnuradio-filter
+    gnuradio::gnuradio-analog
     Volk::volk
 )
 target_include_directories(
