@@ -1236,29 +1236,53 @@ def run_pipeline(rf: int, callsign: str, play: bool,
         return None
 
     def recover_decoder() -> bool:
-        """Restart ONLY tv_live for a fresh equalizer convergence —
-        leave ffmpeg, tail, and ffplay running. The TailWorker detects
-        live.ts truncation (file_sink reopens with mode='wb') and
-        re-seeks transparently, so the downstream player keeps playing
-        through the SDR-side restart with at most a few seconds of
-        held frames instead of a window-close-and-reopen flicker."""
+        """Restart tv_live AND the player chain for a clean fresh state.
+        We tried keeping ffmpeg/ffplay alive across truncation (commit
+        261629a), but ffmpeg's audio/video decoder state went bad after
+        the live.ts reset, producing no-sound + glitchy output. Full
+        restart gives a brief player window flicker but clean A/V on
+        recovery — the better tradeoff in practice."""
         if stop_event.is_set():
             return False
         kill_proc(state.tv_proc, "tv_live")
         state.tv_proc = None
+        if state.ffmpeg_proc is not None:
+            kill_proc(state.ffmpeg_proc, "ffmpeg")
+            state.ffmpeg_proc = None
+        if state.ffplay_proc is not None:
+            kill_proc(state.ffplay_proc, "ffplay")
+            state.ffplay_proc = None
+        if state.tail is not None:
+            state.tail.stop_local()
+            state.tail = None
         time.sleep(2)
 
-        # Re-acquire decoder lock.
         new_tv = acquire_lock(max_retries=4, window_sec=12.0, min_pat=5)
         if new_tv is None:
             print("[magic_tv] decoder restart could not re-acquire lock")
             return False
         state.tv_proc = new_tv
 
-        # ffmpeg/ffplay/tail are still alive. TailWorker will see the
-        # live.ts truncation, reopen the file, and resume feeding
-        # ffmpeg's stdin within ~1-2 seconds. ffmpeg's output buffer
-        # absorbs the gap; ffplay holds the last frame through it.
+        # Respawn ffmpeg + tail + ffplay with clean state.
+        try:
+            new_ff = spawn_ffmpeg(cmd, ff_log_fh, want_stdout_pipe=play)
+        except Exception as e:
+            print(f"[magic_tv] ffmpeg respawn failed: {e}", file=sys.stderr)
+            return False
+        state.ffmpeg_proc = new_ff
+        state.tail = TailWorker(new_ff.stdin, stop_event)
+        state.tail.start()
+        if play:
+            try:
+                new_play = spawn_ffplay(
+                    f"Magic TV — {callsign} (RF{rf})", play_log_fh)
+                state.ffplay_proc = new_play
+                state.relay_thread = spawn_relay(
+                    new_ff.stdout, new_play.stdin,
+                    stop_event, tag="ffmpeg→ffplay")
+            except Exception as e:
+                print(f"[magic_tv] ffplay respawn failed: {e}",
+                      file=sys.stderr)
         return True
 
     try:
