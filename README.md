@@ -62,7 +62,10 @@ gr-atscplus\_build.bat
 # 3. Verify the new blocks are loadable from Python
 python -c "from gnuradio import atscplus; print(dir(atscplus))"
 
-# 4. Pick + run a channel
+# 4. Install the resilient player's runtime deps
+& "C:\Users\<you>\radioconda\python.exe" -m pip install opencv-python sounddevice
+
+# 5. Pick + run a channel
 python tools\magic_tv.py
 ```
 
@@ -97,20 +100,34 @@ without re-encoding twice. One command can simultaneously play
 locally, record to MP4, and push to RTMP. Re-encode is libx264
 ultrafast / zerolatency / crf 28; audio passes through.
 
-## Watchdogs
+## Watchdogs and the resilient player
 
-Two layers of self-healing keep playback alive on marginal signals:
+Three layers keep playback alive on marginal signals:
 
 - **Decoder watchdog** — periodically samples PAT count from the live
   TS. When the equalizer drifts (PAT drops below threshold), kills
-  and respawns `tv_live` for a fresh equalizer convergence. Brief
-  gap, then continues.
+  and respawns `tv_live` for a fresh equalizer convergence.
 - **Pipeline watchdog** — when ffmpeg blocks on bad input, the watchdog
   detects no-bytes-forwarded-while-data-flowing and respawns ffmpeg
   while keeping `tv_live` alive.
+- **`magic_player.py`** — the default playback engine, a Python video
+  player with **decoupled audio/video clocks** that *never* freezes.
+  When SDR drift produces corrupt video PES, video holds the last good
+  frame while audio keeps decoding from its own PID. ffplay would
+  freeze both, hiding what's actually happening; magic_player shows
+  the SDR's true state with a status overlay (frame age, byte rate,
+  decoder health). Toggle off with `--player ffplay` if you prefer.
 
-Together they replace "30 seconds and freeze forever" with "play /
-brief gap / play / brief gap / play indefinitely."
+Together they replace "30 seconds and freeze forever" with continuous
+viewing where SDR drift events appear as held frames + audio (visible
+diagnostic) instead of the whole player locking up.
+
+By default `python tools\magic_tv.py` prints instructions to launch
+`magic_player.py` in a second PowerShell window — cv2's GUI window
+attaches reliably when run interactively, not when spawned as a
+subprocess. Recording (`--record`) and RTMP streaming (`--stream`)
+automatically use the legacy ffplay path since they need ffmpeg's
+tee muxer.
 
 ## Why this exists
 

@@ -50,6 +50,7 @@ RECORD_DIR = HERE / "recordings"
 PYTHON_EXE = r"C:\Users\user\radioconda\python.exe"
 FFMPEG = r"C:\ffmpeg\bin\ffmpeg.exe"
 FFPLAY = r"C:\ffmpeg\bin\ffplay.exe"
+MAGIC_PLAYER = HERE / "magic_player.py"   # bundled with the repo
 SDRPLAY_API_DIR = r"C:\Program Files\SDRplay\API\x64"
 
 # A NULL transport-stream packet (PID 0x1FFF). VLC/ffmpeg ignore these
@@ -995,7 +996,11 @@ def status_loop(state: PipelineState, stop_event: threading.Event,
                 print(f"[magic_tv] refresh error: {e}")
             continue
 
-        if not ff_alive:
+        # Only treat ffmpeg death as fatal if we actually spawned an
+        # ffmpeg process. The magic_player playback path skips ffmpeg
+        # entirely (player decodes live.ts directly), so state.ffmpeg_proc
+        # will be None and ff_alive False legitimately.
+        if state.ffmpeg_proc is not None and not ff_alive:
             # ffmpeg died but tv_live alive: try recovery.
             if recover_ffmpeg and not in_cooldown:
                 print("[magic_tv] ffmpeg exited unexpectedly — recovering...")
@@ -1034,7 +1039,17 @@ def status_loop(state: PipelineState, stop_event: threading.Event,
 # ── Pipeline orchestration ───────────────────────────────────────
 def run_pipeline(rf: int, callsign: str, play: bool,
                  stream_url: str | None, record_path: Path | None,
-                 dry_run: bool = False, program: int = 1) -> int:
+                 dry_run: bool = False, program: int = 1,
+                 player: str = "magic") -> int:
+    # The 'magic' player reads live.ts directly and decodes with decoupled
+    # audio/video clocks, so audio keeps playing while video holds on a drift
+    # event — what produced our best real-RF result. Recording / RTMP need
+    # the ffmpeg+ffplay pipeline, so those flags force player='ffplay'.
+    if record_path is not None or stream_url is not None:
+        if player == "magic":
+            print("[magic_tv] --record/--stream require ffplay player path; "
+                  "switching player from 'magic' to 'ffplay'.")
+        player = "ffplay"
     if not (play or stream_url or record_path):
         # No outputs requested → still allow it if user is just locking
         # the tuner; emit warning.
@@ -1191,15 +1206,16 @@ def run_pipeline(rf: int, callsign: str, play: bool,
 
     def recover_decoder() -> bool:
         """Restart tv_live to grab a fresh equalizer convergence. Also
-        respawns ffmpeg+ffplay because file_sink truncates live.ts on
-        tv_live restart, which would confuse the existing pipeline."""
+        respawns the player chain because file_sink truncates live.ts
+        on tv_live restart, which would confuse downstream readers."""
         if stop_event.is_set():
             return False
-        # Tear down everything downstream of the SDR.
+        # Tear down the SDR + whichever player path we're on.
         kill_proc(state.tv_proc, "tv_live")
         state.tv_proc = None
-        kill_proc(state.ffmpeg_proc, "ffmpeg")
-        state.ffmpeg_proc = None
+        if state.ffmpeg_proc is not None:
+            kill_proc(state.ffmpeg_proc, "ffmpeg")
+            state.ffmpeg_proc = None
         if state.ffplay_proc is not None:
             kill_proc(state.ffplay_proc, "ffplay")
             state.ffplay_proc = None
@@ -1215,7 +1231,13 @@ def run_pipeline(rf: int, callsign: str, play: bool,
             return False
         state.tv_proc = new_tv
 
-        # Respawn ffmpeg, tail, ffplay.
+        # In magic_player mode, the user runs the player manually in a
+        # second PowerShell. Don't try to respawn it here — magic_player
+        # detects file truncation and re-seeks on its own.
+        if play and player == "magic":
+            return True
+
+        # Legacy ffplay path: ffmpeg + tail + optional ffplay.
         try:
             new_ff = spawn_ffmpeg(cmd, ff_log_fh, want_stdout_pipe=play)
         except Exception as e:
@@ -1285,25 +1307,69 @@ def run_pipeline(rf: int, callsign: str, play: bool,
             shutdown()
             return 3
 
-        # ffmpeg first; it owns stdout pipe iff playing.
-        state.ffmpeg_proc = spawn_ffmpeg(cmd, ff_log_fh,
-                                         want_stdout_pipe=play)
-        print(f"[magic_tv] ffmpeg PID={state.ffmpeg_proc.pid}")
+        # Two playback paths.
+        # (a) magic_player: reads live.ts directly with decoupled audio/video
+        #     clocks. Skips the ffmpeg+ffplay middleman entirely. This is the
+        #     path that produced our best real-RF result — audio kept playing
+        #     through SDR drift while video held the last good frame.
+        # (b) ffplay: legacy path. ffmpeg re-encodes, tee fans out to ffplay
+        #     and any record/stream sinks. Required when --record or --stream
+        #     is set (run_pipeline forces player='ffplay' in that case).
+        if play and player == "magic":
+            if not MAGIC_PLAYER.exists():
+                print(f"[magic_tv] magic_player.py not found at {MAGIC_PLAYER} "
+                      "— falling back to ffplay path.", file=sys.stderr)
+                player = "ffplay"
 
-        if play:
-            state.ffplay_proc = spawn_ffplay(
-                f"Magic TV — {callsign} (RF{rf})", play_log_fh)
-            print(f"[magic_tv] ffplay PID={state.ffplay_proc.pid}")
-            state.relay_thread = spawn_relay(
-                state.ffmpeg_proc.stdout, state.ffplay_proc.stdin,
-                stop_event, tag="ffmpeg→ffplay")
+        if play and player == "magic":
+            # cv2.imshow() doesn't reliably attach a GUI window when
+            # magic_player is spawned as a child subprocess on Windows.
+            # The configuration that does work is launching magic_player
+            # interactively from its own PowerShell window. Print clear
+            # instructions and don't spawn it ourselves.
+            print()
+            print("=" * 70)
+            print(" Open a SECOND PowerShell window and paste this:")
+            print()
+            print(f'   & "{PYTHON_EXE}" "{MAGIC_PLAYER}" "{LIVE_TS}"')
+            print()
+            print(" The OpenCV video window will appear once it locks.")
+            print(" Status overlay shows decoder + buffer health in real time.")
+            print(" When done, Ctrl+C in that window to close the player.")
+            print()
+            print(" NOTE: Use the radioconda python path above — system")
+            print(" python doesn't have cv2 / sounddevice installed.")
+            print("=" * 70)
+            print()
+            # We still keep magic_tv running so the decoder watchdog,
+            # convergence retries, and tv_live process are managed.
+            # state.ffplay_proc stays None — status_loop tolerates that.
+            # No ffmpeg, no tail thread — magic_player runs separately
+            # in the user's second PowerShell window.
+            status_loop(state, stop_event, record_path, stream_url,
+                        recover_ffmpeg=None,
+                        recover_ffplay=None,
+                        recover_decoder=recover_decoder)
+        else:
+            # Legacy ffplay path: ffmpeg re-encode → optional tee fan-out.
+            state.ffmpeg_proc = spawn_ffmpeg(cmd, ff_log_fh,
+                                             want_stdout_pipe=play)
+            print(f"[magic_tv] ffmpeg PID={state.ffmpeg_proc.pid}")
 
-        state.tail = TailWorker(state.ffmpeg_proc.stdin, stop_event)
-        state.tail.start()
-        status_loop(state, stop_event, record_path, stream_url,
-                    recover_ffmpeg=recover_ffmpeg,
-                    recover_ffplay=recover_ffplay,
-                    recover_decoder=recover_decoder)
+            if play:
+                state.ffplay_proc = spawn_ffplay(
+                    f"Magic TV — {callsign} (RF{rf})", play_log_fh)
+                print(f"[magic_tv] ffplay PID={state.ffplay_proc.pid}")
+                state.relay_thread = spawn_relay(
+                    state.ffmpeg_proc.stdout, state.ffplay_proc.stdin,
+                    stop_event, tag="ffmpeg→ffplay")
+
+            state.tail = TailWorker(state.ffmpeg_proc.stdin, stop_event)
+            state.tail.start()
+            status_loop(state, stop_event, record_path, stream_url,
+                        recover_ffmpeg=recover_ffmpeg,
+                        recover_ffplay=recover_ffplay,
+                        recover_decoder=recover_decoder)
 
     except Exception as e:
         print(f"[magic_tv] error: {e}", file=sys.stderr)
@@ -1334,6 +1400,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--program", type=int, default=1,
                    help="ATSC program/sub-channel number to play (1 = main, "
                         "2 = .2 sub, 3 = .3 sub, ...). Used with --rf.")
+    p.add_argument("--player", choices=["magic", "ffplay"], default="magic",
+                   help="Playback engine. 'magic' (default) uses our resilient "
+                        "magic_player.py — decoupled audio/video clocks, never "
+                        "freezes, holds last frame on drift. 'ffplay' is the "
+                        "older path with ffmpeg re-encode + ffplay (recording "
+                        "and RTMP streaming require this).")
     p.add_argument("--play", dest="play", action="store_true",
                    default=None,
                    help="Force local playback via ffplay")
@@ -1418,7 +1490,8 @@ def main(argv: list[str] | None = None) -> int:
                             play=play, stream_url=stream_url,
                             record_path=record_path,
                             dry_run=args.dry_run,
-                            program=args.program)
+                            program=args.program,
+                            player=args.player)
     else:
         # Pure interactive mode
         choice = interactive_pick(cfg)
@@ -1427,7 +1500,8 @@ def main(argv: list[str] | None = None) -> int:
                             stream_url=choice["stream_url"],
                             record_path=choice["record_path"],
                             dry_run=False,
-                            program=choice["program"])
+                            program=choice["program"],
+                            player=args.player)
 
 
 if __name__ == "__main__":
