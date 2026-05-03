@@ -550,6 +550,33 @@ class TailWorker:
                 with self._target_lock:
                     target = self.target
                 if not chunk:
+                    # Detect file truncation — tv_live restart reopens
+                    # live.ts with mode='wb' which truncates. If file is
+                    # smaller than our position, reopen and re-align so we
+                    # follow the fresh stream without disturbing ffmpeg.
+                    try:
+                        cur_pos = f.tell()
+                        cur_size = LIVE_TS.stat().st_size
+                        if cur_size < cur_pos:
+                            try: f.close()
+                            except OSError: pass
+                            time.sleep(0.5)  # wait for tv_live to write a bit
+                            f = open(LIVE_TS, "rb")
+                            f.seek(0, 2)
+                            new_end = f.tell()
+                            f.seek(max(0, new_end - 1_000_000))
+                            head = f.read(2048)
+                            for i in range(len(head) - 188 - 1):
+                                if head[i] == 0x47 and head[i + 188] == 0x47:
+                                    f.seek(f.tell() - len(head) + i)
+                                    break
+                            leftover = b""
+                            idle = 0
+                            print("[tail] live.ts truncated — reopened, "
+                                  "ffmpeg keeps reading", flush=True)
+                            continue
+                    except OSError:
+                        pass
                     idle += 1
                     try:
                         target.write(NULL_BURST)
@@ -1209,23 +1236,16 @@ def run_pipeline(rf: int, callsign: str, play: bool,
         return None
 
     def recover_decoder() -> bool:
-        """Restart tv_live to grab a fresh equalizer convergence. Also
-        respawns the player chain because file_sink truncates live.ts
-        on tv_live restart, which would confuse downstream readers."""
+        """Restart ONLY tv_live for a fresh equalizer convergence —
+        leave ffmpeg, tail, and ffplay running. The TailWorker detects
+        live.ts truncation (file_sink reopens with mode='wb') and
+        re-seeks transparently, so the downstream player keeps playing
+        through the SDR-side restart with at most a few seconds of
+        held frames instead of a window-close-and-reopen flicker."""
         if stop_event.is_set():
             return False
-        # Tear down the SDR + whichever player path we're on.
         kill_proc(state.tv_proc, "tv_live")
         state.tv_proc = None
-        if state.ffmpeg_proc is not None:
-            kill_proc(state.ffmpeg_proc, "ffmpeg")
-            state.ffmpeg_proc = None
-        if state.ffplay_proc is not None:
-            kill_proc(state.ffplay_proc, "ffplay")
-            state.ffplay_proc = None
-        if state.tail is not None:
-            state.tail.stop_local()
-            state.tail = None
         time.sleep(2)
 
         # Re-acquire decoder lock.
@@ -1235,33 +1255,10 @@ def run_pipeline(rf: int, callsign: str, play: bool,
             return False
         state.tv_proc = new_tv
 
-        # In magic_player mode, the user runs the player manually in a
-        # second PowerShell. Don't try to respawn it here — magic_player
-        # detects file truncation and re-seeks on its own.
-        if play and player == "magic":
-            return True
-
-        # Legacy ffplay path: ffmpeg + tail + optional ffplay.
-        try:
-            new_ff = spawn_ffmpeg(cmd, ff_log_fh, want_stdout_pipe=play)
-        except Exception as e:
-            print(f"[magic_tv] ffmpeg respawn after decoder restart failed: {e}",
-                  file=sys.stderr)
-            return False
-        state.ffmpeg_proc = new_ff
-        state.tail = TailWorker(new_ff.stdin, stop_event)
-        state.tail.start()
-        if play:
-            try:
-                new_play = spawn_ffplay(
-                    f"Magic TV — {callsign} (RF{rf})", play_log_fh)
-                state.ffplay_proc = new_play
-                state.relay_thread = spawn_relay(
-                    new_ff.stdout, new_play.stdin,
-                    stop_event, tag="ffmpeg→ffplay")
-            except Exception as e:
-                print(f"[magic_tv] ffplay respawn after decoder restart "
-                      f"failed: {e}", file=sys.stderr)
+        # ffmpeg/ffplay/tail are still alive. TailWorker will see the
+        # live.ts truncation, reopen the file, and resume feeding
+        # ffmpeg's stdin within ~1-2 seconds. ffmpeg's output buffer
+        # absorbs the gap; ffplay holds the last frame through it.
         return True
 
     try:
