@@ -362,11 +362,9 @@ def build_ffmpeg_cmd(play: bool, record_path: Path | None,
         # Shorter GOP so ffplay can resync after corruption within ~1s
         # instead of waiting up to 2s for the next keyframe.
         "-g", "30", "-keyint_min", "30", "-sc_threshold", "0",
-        # Audio: pass ATSC's native AC3 through. ffplay decodes AC3
-        # natively; re-encoding adds latency that causes dropouts on
-        # transient buffer hiccups. If you need AAC output instead:
-        #   "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
-        "-c:a", "copy",
+        # Re-encode AC3 to AAC. ffplay sometimes fails to play passthrough
+        # AC3 from a tee'd mpegts stream; AAC is universal.
+        "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
     ]
 
     sinks = []
