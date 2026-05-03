@@ -200,21 +200,18 @@ A purpose-built UHF Yagi gives the best SNR margin.
 ## Repo layout
 
 ```
-gr-atscplus/        Forked GNU Radio OOT module (6 C++ blocks)
-tools/              CLI tools you actually run
-  magic_tv.py         Channel picker / player / recorder / streamer
-  tv_live_rf34.py     Continuous SDR → MPEG-TS pipeline
-  fcc_dc_stations.py  Sample channel table (edit for your DMA)
-  config.py           Default tuner/antenna/gain config
-combos.yaml         29 named combo configurations (testing)
-run_combo.py        Single-decode runner with named combos
-benchmark_synth.py  Synthetic IQ generator + sweep
-scripts/            Real-IQ regression sweep + helpers
-docs/               Science explainer, capture recipe, session log
-results/            Scoreboard outputs by date
-bootstrap.sh        Linux setup + build + install
-gr-atscplus/_build.bat       Windows VS 2022 + NMake build
-gr-atscplus/_rebuild.bat     Windows incremental rebuild
+gr-atscplus/                  Forked GNU Radio OOT module (6 C++ blocks)
+  _build.bat                  Windows VS 2022 + NMake build
+  _rebuild.bat                Windows incremental rebuild
+tools/
+  magic_tv.py                 Channel picker / player / recorder / streamer
+  tv_live_rf34.py             Continuous SDR → MPEG-TS pipeline
+  tv_live_rf34_softvit.py     Same pipeline, soft-Viterbi variant (--viterbi soft)
+  fcc_dc_stations.py          Sample channel table (edit for your DMA)
+  config.py                   Default tuner/antenna/gain config
+  magic_player.py             Resilient video player (decoupled A/V clocks)
+docs/                         Science explainer, capture recipe, session log
+bootstrap.sh                  Linux setup + build + install
 ```
 
 ## License
