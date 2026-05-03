@@ -33,6 +33,17 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+# Make our colocated helper modules (atsc_psip.py, fcc_dc_stations.py)
+# importable regardless of cwd or how this script was invoked.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# Local stdlib-only PSIP parser for VCT + EIT (ATSC channel + show data)
+try:
+    from atsc_psip import extract_psip, find_current_event
+except ImportError:
+    extract_psip = None  # type: ignore
+    find_current_event = None  # type: ignore
+
 # ── Windows console UTF-8 (best-effort) ─────────────────────────
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -411,13 +422,31 @@ def scan_one_rf(rf: int, dwell_sec: float = 12.0,
             return {"rf": rf, "lock": False, "pat_count": pat,
                     "reason": "weak signal / no lock"}
         progs = ffprobe_programs()
-        return {
+        result = {
             "rf": rf,
             "freq_mhz": rf_to_freq_mhz(rf),
             "lock": True,
             "pat_count": pat,
             "programs": progs,
         }
+        # ATSC PSIP: virtual-channel labels + the next ~12 hours of EIT
+        # show titles, decoded directly from the captured TS via our
+        # stdlib-only parser. Events are stored with GPS start_time so
+        # the picker can compute "what's on now" against the current
+        # wall clock at display time.
+        if extract_psip is not None:
+            try:
+                psip = extract_psip(LIVE_TS)
+                if psip.get("channels") or psip.get("events"):
+                    # JSON keys must be strings — convert source_id ints.
+                    result["psip"] = {
+                        "channels": psip["channels"],
+                        "events": {str(k): v for k, v in
+                                   psip["events"].items()},
+                    }
+            except Exception as e:
+                print(f"[scan]   psip parse failed: {e}", file=sys.stderr)
+        return result
     finally:
         kill_proc(proc, "scan_tv_live")
         # SDRplay driver needs ~3 s to fully release the device.
@@ -901,15 +930,13 @@ def prompt_choice(msg: str, options: list[str], default: int = 1) -> int:
 
 
 def expand_channels_from_scan(scan: dict) -> list[dict]:
-    """Build the picker rows from scan.json + the static stations table.
+    """Build the picker rows from scan.json.
 
-    Strategy: only include RFs that actually locked. Cross-reference each
-    locked RF against fcc_dc_stations.py for callsign + sub-channel labels.
-    For each program reported by ffprobe, try to label it as virtual
-    {major}.{minor} using the static table; programs without a table entry
-    fall back to a generic "RF{N} prog{program_num}" label.
+    Prefers ATSC PSIP data (broadcast-authoritative virtual channels +
+    EIT show schedule) when available. Falls back to ffprobe program
+    info + the static fcc_dc_stations table for unmapped channels.
 
-    Each row is the picker entry for one (rf, program_id) tuple.
+    Each row is the picker entry for one (rf, program_number) tuple.
     """
     _stations, lookup = _load_stations()
     rows = []
@@ -919,6 +946,13 @@ def expand_channels_from_scan(scan: dict) -> list[dict]:
         rf = ch["rf"]
         info = lookup(rf)
         progs = ch.get("programs") or []
+        psip = ch.get("psip") or {}
+        psip_channels = psip.get("channels") or []
+        psip_events = psip.get("events") or {}
+        # Index PSIP virtual-channel records by program_number for
+        # quick lookup against ffprobe's per-stream program_num.
+        psip_by_prognum = {c.get("program_number"): c for c in psip_channels}
+
         for sub_idx, p in enumerate(progs, start=1):
             program_id = p.get("program_id")
             program_num = p.get("program_num")
@@ -927,13 +961,27 @@ def expand_channels_from_scan(scan: dict) -> list[dict]:
             audio_codec = p.get("audio_codec")
             service_name = p.get("service_name") or ""
 
-            # Resolve a friendly virtual channel + label.
             virt = ""
             callsign = ""
             network = service_name
-            if info is not None:
-                callsign = info.get("callsign", "") or ""
-                # Sub-index into the static table (1=main, 2=first sub, ...)
+            now_title = ""
+            now_remaining = 0
+
+            psip_ch = psip_by_prognum.get(program_num)
+            if psip_ch is not None:
+                # Authoritative virtual channel from broadcaster's VCT.
+                virt = f"{psip_ch['major']}.{psip_ch['minor']}"
+                callsign = psip_ch.get("short_name", "") or ""
+                evs = psip_events.get(str(psip_ch.get("source_id"))) or []
+                if find_current_event is not None:
+                    cur = find_current_event(evs)
+                    if cur is not None:
+                        now_title = cur.get("title") or ""
+                        now_remaining = cur.get("remaining_sec") or 0
+
+            if not virt and info is not None:
+                # Fall back to static fcc_dc_stations table.
+                callsign = callsign or info.get("callsign", "") or ""
                 if sub_idx == 1:
                     virt = info.get("virtual", "") or ""
                     network = info.get("network", "") or network
@@ -942,9 +990,10 @@ def expand_channels_from_scan(scan: dict) -> list[dict]:
                     if sub_idx - 2 < len(subs):
                         virt, network = subs[sub_idx - 2]
             if not virt:
-                # Synthesize a virtual label from program_num so the user
-                # has something readable for unmapped channels.
                 virt = f"{rf}.{program_num or sub_idx}"
+            if not callsign:
+                callsign = f"RF{rf}"
+
             quality_bits = []
             if video_h:
                 quality_bits.append(f"{video_h}p" if video_h <= 720 else
@@ -958,7 +1007,7 @@ def expand_channels_from_scan(scan: dict) -> list[dict]:
             rows.append({
                 "rf": rf,
                 "virtual": virt,
-                "callsign": callsign or f"RF{rf}",
+                "callsign": callsign,
                 "network": network or "",
                 "city": "",
                 "program": program_id or sub_idx,
@@ -966,30 +1015,56 @@ def expand_channels_from_scan(scan: dict) -> list[dict]:
                 "label": f"{callsign} {network}".strip(),
                 "quality": quality,
                 "service_name": service_name,
+                "now_title": now_title,
+                "now_remaining_sec": now_remaining,
             })
-    return sorted(rows, key=lambda r: (r["rf"], r["program"]))
+    # Sort by virtual major.minor when available so 4.1, 4.2, 4.3, 4.4
+    # group naturally above 5.1, 7.1, etc.
+    def sort_key(r):
+        try:
+            major, minor = r["virtual"].split(".")
+            return (int(major), int(minor))
+        except (ValueError, AttributeError):
+            return (r["rf"], r["program"])
+    return sorted(rows, key=sort_key)
 
 
 def print_scan_table(scan: dict) -> list[dict]:
-    """Pretty-print the scanned channel table grouped by RF, return picker
-    rows so caller can prompt by index."""
+    """Pretty-print the scanned channel table grouped by RF major channel,
+    return picker rows so caller can prompt by index. When the scan
+    captured ATSC EIT data, the currently-airing show appears next to
+    each entry (computed against current wall clock)."""
     rows = expand_channels_from_scan(scan)
     if not rows:
         print("(scan.json contains no locked channels — try --scan again)")
         return []
+    has_now = any(r.get("now_title") for r in rows)
     print()
-    print(f"  {'#':>3}  {'Channel':<8}  {'Callsign':<8}  "
-          f"{'Network':<14}  Quality")
-    print("  " + "-" * 60)
-    last_rf = None
+    if has_now:
+        print(f"  {'#':>3}  {'Ch':<5}  {'Callsign':<8}  "
+              f"{'Quality':<14}  Now playing")
+    else:
+        print(f"  {'#':>3}  {'Ch':<5}  {'Callsign':<8}  "
+              f"{'Network':<14}  Quality")
+    print("  " + "-" * 70)
+    last_major = None
     for i, r in enumerate(rows, start=1):
-        if last_rf is not None and r["rf"] != last_rf:
-            print(f"       {'─' * 55}")
+        major = r["virtual"].split(".")[0] if "." in r["virtual"] else None
+        if last_major is not None and major != last_major:
+            print(f"       {'─' * 65}")
         marker = "└▸" if r["is_sub"] else "★ "
         q = r.get("quality", "") or ""
-        print(f"  {i:>3}  {marker} {r['virtual']:<5}  "
-              f"{r['callsign']:<8}  {r['network']:<14}  {q}")
-        last_rf = r["rf"]
+        if has_now:
+            now = r.get("now_title") or ""
+            rem = r.get("now_remaining_sec") or 0
+            now_str = (f"{now[:38]}{'…' if len(now) > 38 else ''}"
+                       f" ({rem // 60}m)") if now else ""
+            print(f"  {i:>3}  {marker} {r['virtual']:<3}  "
+                  f"{r['callsign']:<8}  {q:<14}  {now_str}")
+        else:
+            print(f"  {i:>3}  {marker} {r['virtual']:<3}  "
+                  f"{r['callsign']:<8}  {r['network']:<14}  {q}")
+        last_major = major
     print()
     return rows
 
