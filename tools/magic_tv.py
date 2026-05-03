@@ -330,19 +330,38 @@ def measure_convergence(min_size: int = 5_000_000) -> int:
     return pat_count
 
 
-# ── Channel scanner ──────────────────────────────────────────────
-# RF channels currently licensed for ATSC 1.0 in North America:
-#   VHF-Lo  RF  2-6   (54-88 MHz)   rare post-digital, but used in a few markets
-#   VHF-Hi  RF  7-13  (174-216 MHz) several majors per market
-#   UHF     RF 14-36  (470-608 MHz) bulk of broadcasting
-# Channels 37-51 were reclaimed for T-Mobile's 600 MHz (5G band 71) in the
-# 2017 repack; channels 52-69 were reclaimed for cellular in 2009. Not
-# scanning either since they hold no TV. Scan dwells 12 s per channel by
-# default, ~7 min wall clock for the full sweep.
-# Note: this scanner finds ATSC 1.0 only. ATSC 3.0 (NextGen TV) lives in
-# the same UHF range but uses OFDM and our gr-atscplus only does 8-VSB,
-# so a 3.0 broadcast will show up here as "no lock".
+# ── Channel allocations ──────────────────────────────────────────
+# North American ATSC 1.0:  RF 2-6 (54-88 MHz), 7-13 (174-216 MHz),
+# 14-36 (470-608 MHz). 37-51 was reclaimed for 5G band 71 in the 2017
+# repack; 52-69 went to cellular in 2009.
 SCAN_RF_RANGE = list(range(2, 7)) + list(range(7, 14)) + list(range(14, 37))
+
+# International TV-band centre frequencies in Hz, for the carrier-presence
+# pre-sweep. These regions use DVB-T/T2, ISDB-T, or DTMB — magic-tv-decoder
+# can't decode those (we're 8-VSB only), but reporting "carrier present at
+# 506 MHz" still helps an international user verify their antenna + SDR
+# are actually receiving TV signals.
+def _make_intl_channels():
+    out = []
+    # EU/UK DVB-T (8 MHz UHF channels 21-48, 470-694 MHz).
+    out.extend([(471_250_000 + (n - 21) * 8_000_000, f"DVB-T UHF{n}")
+                for n in range(21, 49)])
+    # EU DVB-T VHF Band III (7 MHz, channels 5-12, 174-230 MHz).
+    out.extend([(177_500_000 + (n - 5) * 7_000_000, f"DVB-T VHF{n}")
+                for n in range(5, 13)])
+    # Australia DVB-T (7 MHz UHF 28-51, 526-694 MHz).
+    out.extend([(529_500_000 + (n - 28) * 7_000_000, f"AU UHF{n}")
+                for n in range(28, 52)])
+    # Japan / Brazil ISDB-T (6 MHz UHF, channels 13-62, 470-770 MHz pre-repack).
+    out.extend([(473_142_857 + (n - 13) * 6_000_000, f"ISDB UHF{n}")
+                for n in range(13, 63)])
+    return out
+
+INTL_FREQS = _make_intl_channels()
+
+
+# ── Channel scanner ──────────────────────────────────────────────
+SDR_SWEEP_PY = HERE / "sdr_sweep.py"
 
 
 def kill_proc(proc, label: str = "proc"):
@@ -485,49 +504,155 @@ def lookup_callsign(rf: int) -> tuple[str, str] | None:
     return info.get("callsign", ""), info.get("network", "")
 
 
+def run_power_sweep(freqs_hz: list[int], log_fh=None) -> list[dict]:
+    """Phase-1 carrier sniff: spawn sdr_sweep.py with the candidate
+    frequency list, return per-freq RMS power. Single fast SDR session
+    instead of one tv_live spawn per channel."""
+    payload = json.dumps([int(f) for f in freqs_hz]).encode("utf-8")
+    fh = log_fh if log_fh is not None else sys.stderr
+    proc = subprocess.Popen(
+        [PYTHON_EXE, "-u", str(SDR_SWEEP_PY)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=fh,
+        env=env_with_sdrplay(),
+        creationflags=NEW_PROCESS_GROUP,
+    )
+    out, _ = proc.communicate(input=payload, timeout=180)
+    if proc.returncode != 0:
+        raise RuntimeError(f"sdr_sweep.py exited with {proc.returncode}")
+    return json.loads(out.decode("utf-8"))
+
+
 def run_scan(rf_list: list[int] | None = None,
              dwell_sec: float = 12.0,
+             include_intl: bool = False,
              save: bool = True) -> dict:
-    """Sweep RF channels, return scan result + optionally persist to
-    SCAN_PATH. Prints a one-line update per channel."""
+    """Two-phase scan:
+      Phase 1: fast SoapySDR power-sniff sweep across all candidate
+        frequencies in a single SDR session (~30s for 35 channels).
+        Computes a noise-floor estimate from the median, marks any
+        channel above floor + 8 dB as 'hot'.
+      Phase 2: spawn tv_live for the slow lock-test only on hot ATSC
+        channels.
+      International (DVB-T/ISDB-T/DTMB) frequencies, if --international,
+        get power-sniffed only — we report 'carrier present, can't
+        decode' since we're 8-VSB only.
+    """
     if rf_list is None:
         rf_list = SCAN_RF_RANGE
-    results = []
-    print(f"[scan] sweeping {len(rf_list)} RF channels "
-          f"(~{int(len(rf_list) * (dwell_sec + 5))}s)...")
     log_dir = HERE / "data" / "tv_live"
     log_dir.mkdir(parents=True, exist_ok=True)
     scan_log = log_dir / "magic_tv.scan.log"
-    with open(scan_log, "a", encoding="utf-8") as log_fh:
-        for rf in rf_list:
-            freq = rf_to_freq_mhz(rf)
-            print(f"  RF {rf:>2} ({freq:5.1f} MHz) … ", end="", flush=True)
+    log_fh = open(scan_log, "a", encoding="utf-8")
+    try:
+        # Phase 1: fast power sniff.
+        atsc_freqs = [(rf, int(rf_to_freq_mhz(rf) * 1_000_000))
+                      for rf in rf_list]
+        intl_freqs = INTL_FREQS if include_intl else []
+        all_freqs = ([("atsc", rf, f) for rf, f in atsc_freqs] +
+                     [("intl", label, f) for f, label in intl_freqs])
+        if not all_freqs:
+            print("[scan] no candidate frequencies", file=sys.stderr)
+            return {"scanned_at": datetime.now().isoformat(timespec="seconds"),
+                    "channels": []}
+        n = len(all_freqs)
+        print(f"[scan] phase 1 — power sniff across {n} frequencies "
+              f"(~{n * 0.5:.0f}s)...")
+        try:
+            sweep_in = [f for _, _, f in all_freqs]
+            sweep_out = run_power_sweep(sweep_in, log_fh=log_fh)
+        except Exception as e:
+            print(f"[scan] phase-1 sweep failed ({e}); "
+                  "falling back to slow per-RF dwell.", file=sys.stderr)
+            sweep_out = [{"rms_dbfs": 0.0} for _ in all_freqs]
+        time.sleep(3)  # let SDR fully release before phase 2
+
+        # Hot threshold: median + 8 dB. ATSC carriers typically sit
+        # 10–25 dB above noise; this catches them while skipping
+        # channels that are merely-noise.
+        rms_values = [r["rms_dbfs"] for r in sweep_out
+                      if r["rms_dbfs"] > -150]
+        if rms_values:
+            median = sorted(rms_values)[len(rms_values) // 2]
+        else:
+            median = -50.0
+        threshold = median + 8.0
+        print(f"[scan] noise floor ≈ {median:+.1f} dBFS; "
+              f"hot threshold = {threshold:+.1f} dBFS")
+
+        results = []
+        intl_carriers = []
+        hot_atsc = []
+        for (kind, label, freq), s in zip(all_freqs, sweep_out):
+            rms = s.get("rms_dbfs", float("-inf"))
+            hot = rms >= threshold
+            if kind == "atsc":
+                rf = label
+                rec = {"rf": rf, "freq_mhz": freq / 1e6,
+                       "rms_dbfs": rms, "hot": hot}
+                if hot:
+                    hot_atsc.append((rf, rec))
+                else:
+                    rec["lock"] = False
+                    rec["reason"] = f"no carrier ({rms:+.1f} dBFS)"
+                results.append(rec)
+            else:
+                if hot:
+                    intl_carriers.append({
+                        "label": label, "freq_mhz": freq / 1e6,
+                        "rms_dbfs": rms,
+                        "note": "carrier present (DVB-T/ISDB-T/DTMB — "
+                                "magic-tv-decoder can't decode)",
+                    })
+
+        # Phase 2: full lock test on hot ATSC channels only.
+        print(f"[scan] phase 2 — full lock test on {len(hot_atsc)} "
+              f"hot ATSC channel(s) (~{len(hot_atsc) * (dwell_sec + 5):.0f}s)...")
+        for rf, rec in hot_atsc:
+            print(f"  RF {rf:>2} ({rec['freq_mhz']:5.1f} MHz, "
+                  f"{rec['rms_dbfs']:+5.1f} dBFS) … ",
+                  end="", flush=True)
             res = scan_one_rf(rf, dwell_sec=dwell_sec, log_fh=log_fh)
+            # Merge phase-1 power info into phase-2 result.
+            res["rms_dbfs"] = rec["rms_dbfs"]
+            res["hot"] = True
             if res.get("lock"):
                 cs = lookup_callsign(rf)
                 if cs:
                     res["callsign"], res["network_hint"] = cs
                 n_progs = len(res.get("programs") or [])
                 pat = res.get("pat_count", 0)
-                label = res.get("callsign") or "?"
-                print(f"LOCKED  {label:<6} {n_progs} programs, "
-                      f"PAT={pat}")
+                cs_label = res.get("callsign") or "?"
+                print(f"LOCKED  {cs_label:<6} {n_progs} programs, PAT={pat}")
             else:
-                why = res.get("reason", "no lock")
-                print(f"{why}")
-            results.append(res)
+                print(res.get("reason", "no lock"))
+            # Replace the phase-1-only placeholder.
+            for i, existing in enumerate(results):
+                if existing.get("rf") == rf:
+                    results[i] = res
+                    break
 
-    scan = {
-        "scanned_at": datetime.now().isoformat(timespec="seconds"),
-        "channels": results,
-    }
-    n_lock = sum(1 for r in results if r.get("lock"))
-    print(f"[scan] done — {n_lock} of {len(results)} channels locked.")
-    if save:
-        SCAN_PATH.parent.mkdir(parents=True, exist_ok=True)
-        SCAN_PATH.write_text(json.dumps(scan, indent=2), encoding="utf-8")
-        print(f"[scan] saved to {SCAN_PATH}")
-    return scan
+        scan = {
+            "scanned_at": datetime.now().isoformat(timespec="seconds"),
+            "channels": results,
+            "intl_carriers": intl_carriers,
+            "noise_floor_dbfs": median,
+        }
+        n_lock = sum(1 for r in results if r.get("lock"))
+        n_hot = sum(1 for r in results if r.get("hot"))
+        print(f"[scan] done — {n_lock} of {n_hot} hot ATSC channels locked "
+              f"({len(results)} candidates total).")
+        if intl_carriers:
+            print(f"[scan] {len(intl_carriers)} non-ATSC carrier(s) "
+                  "detected (DVB-T / ISDB-T / DTMB — cannot decode).")
+        if save:
+            SCAN_PATH.parent.mkdir(parents=True, exist_ok=True)
+            SCAN_PATH.write_text(json.dumps(scan, indent=2), encoding="utf-8")
+            print(f"[scan] saved to {SCAN_PATH}")
+        return scan
+    finally:
+        log_fh.close()
 
 
 def load_scan() -> dict | None:
@@ -1871,12 +1996,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--list", action="store_true",
                    help="Print the channel table and exit")
     p.add_argument("--scan", action="store_true",
-                   help="Sweep the SDR across all RF channels (~6 min), "
-                        "save the result to ~/.magic_tv/scan.json, then "
-                        "exit. Run this once after install.")
-    p.add_argument("--scan-dwell", type=float, default=12.0,
-                   help="Seconds to wait per channel during --scan "
-                        "(longer = more reliable lock detection)")
+                   help="Two-phase channel scan: a fast power sniff "
+                        "across all candidate frequencies (~30s) followed "
+                        "by a slow lock test only on hot channels. "
+                        "Saves ~/.magic_tv/scan.json.")
+    p.add_argument("--scan-dwell", type=float, default=8.0,
+                   help="Seconds to wait per hot channel during phase 2 "
+                        "(longer = more reliable lock on weak signals)")
+    p.add_argument("--international", action="store_true",
+                   help="Also power-sniff DVB-T/T2, ISDB-T, and DTMB "
+                        "frequency bands. Reports carrier presence; "
+                        "note that magic-tv-decoder cannot DECODE these "
+                        "(it's ATSC-1.0 / 8-VSB only).")
     p.add_argument("--dry-run", action="store_true",
                    help="Print the planned subprocess commands and exit "
                         "(does not start tv_live, ffmpeg, or ffplay)")
@@ -1909,7 +2040,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.scan:
-        run_scan(dwell_sec=args.scan_dwell)
+        run_scan(dwell_sec=args.scan_dwell, include_intl=args.international)
         return 0
 
     # Resolve stream URL: NAME from config, else literal URL, else None
