@@ -98,9 +98,16 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
                                  int nsamples)
 {
     // Tier-3 final: anti-windup + leakage. See decoder_tier3_log.md.
+    // Tier-10 (2026-05-03): reduced DIVERGENCE_BAIL 50 -> 10. Phase 0 data
+    // showed FPLL/AGC/sync rock-solid through drift events (PAT collapse)
+    // while only the equalizer has long-term state. Hypothesis: taps grow
+    // into a metastable basin that fits FS but mis-equalizes data, and the
+    // existing 50.0 threshold is too lax to trigger reset on shallow
+    // divergence. Tier-3 measured healthy-lock tap_norm staying < 1.7,
+    // so 10 still leaves >5x headroom for normal drift.
     static const double BETA = 0.00005;
     static const float  LEAK = 0.0005f;
-    static const float  DIVERGENCE_BAIL = 50.0f;
+    static const float  DIVERGENCE_BAIL = 10.0f;
 
     double sse = 0.0;
     for (int j = 0; j < nsamples; j++) {
