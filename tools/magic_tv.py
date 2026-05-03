@@ -1241,7 +1241,11 @@ def status_loop(state: PipelineState, stop_event: threading.Event,
     # playback usable indefinitely instead of permafreezing after drift.
     DECODER_CHECK_INTERVAL_SEC = 5.0
     DECODER_BAD_PAT = 3        # PAT in 5MB; below this = lost lock
-    DECODER_BAD_GRACE = 1      # single bad check = restart (drift is fast)
+    # 3 consecutive bad checks (~15s) before forcing a restart. Tier 21's
+    # FS-spacing validator means real drifts are rare; brief PAT dips
+    # are usually atmospheric / RF transients that recover on their own,
+    # so we tolerate them rather than flashing the player window.
+    DECODER_BAD_GRACE = 3
     last_decoder_check_t = start
     decoder_bad_count = 0
 
