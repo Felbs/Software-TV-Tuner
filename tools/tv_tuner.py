@@ -662,7 +662,9 @@ def run_power_sweep(freqs_hz: list[int], log_fh=None) -> list[dict]:
 def run_scan(region: dict | None = None,
              dwell_sec: float = 12.0,
              save: bool = True,
-             pilot_snr_threshold_db: float = 10.0,
+             pilot_snr_threshold_db: float = 20.0,
+             pilot_sharpness_threshold_db: float = 15.0,
+             vsb_asymmetry_threshold_db: float = 6.0,
              rms_threshold_db: float = 4.0) -> dict:
     """Two-phase scan over the channels of `region`.
 
@@ -726,8 +728,16 @@ def run_scan(region: dict | None = None,
         for (atsc_rf, freq, label), s in zip(all_freqs, sweep_out):
             rms = s.get("rms_dbfs", float("-inf"))
             pilot_snr = s.get("pilot_snr_db", float("-inf"))
+            pilot_sharp = s.get("pilot_sharpness_db", float("-inf"))
+            vsb_asym = s.get("vsb_asymmetry_db", float("-inf"))
             atsc3_score = s.get("atsc3_db", float("-inf"))
-            atsc1_carrier = pilot_snr >= pilot_snr_threshold_db
+            # All three ATSC 1.0 fingerprints must be present:
+            # 1. pilot bin clearly above noise (pilot SNR)
+            # 2. that peak is sharp like a CW carrier (sharpness)
+            # 3. data sideband above pilot is louder than vestigial side
+            atsc1_carrier = (pilot_snr >= pilot_snr_threshold_db
+                             and pilot_sharp >= pilot_sharpness_threshold_db
+                             and vsb_asym >= vsb_asymmetry_threshold_db)
             atsc3_carrier = (not atsc1_carrier
                              and atsc3_score >= 10.0
                              and rms >= rms_threshold)
@@ -736,22 +746,24 @@ def run_scan(region: dict | None = None,
                 rec = {"rf": atsc_rf, "freq_mhz": freq / 1e6,
                        "label": label, "rms_dbfs": rms,
                        "pilot_snr_db": pilot_snr,
+                       "pilot_sharpness_db": pilot_sharp,
+                       "vsb_asymmetry_db": vsb_asym,
                        "atsc3_db": atsc3_score,
                        "hot": atsc1_carrier}
                 if atsc1_carrier:
                     hot_atsc.append((atsc_rf, rec))
                 elif atsc3_carrier:
                     rec["lock"] = False
-                    rec["reason"] = (f"ATSC 3.0 / NextGen TV detected "
-                                     f"({atsc3_score:+.1f} dB in-band, "
-                                     f"no 8-VSB pilot) — install a 3.0 "
-                                     f"decoder to watch")
+                    rec["reason"] = (f"ATSC 3.0 / NextGen TV detected — "
+                                     f"install a 3.0 decoder to watch")
                     rec["atsc3"] = True
                     atsc3_carriers.append(rec)
                 else:
                     rec["lock"] = False
-                    rec["reason"] = (f"no carrier (pilot SNR "
-                                     f"{pilot_snr:+.1f} dB)")
+                    rec["reason"] = (f"no ATSC 1.0 (pilot SNR "
+                                     f"{pilot_snr:+.0f}, sharpness "
+                                     f"{pilot_sharp:+.0f}, VSB "
+                                     f"{vsb_asym:+.0f} dB)")
                 results.append(rec)
             else:
                 if rms_carrier:
@@ -776,7 +788,9 @@ def run_scan(region: dict | None = None,
                       f"need a 3.0 decoder to watch those)")
             for rf, rec in hot_atsc:
                 print(f"  RF {rf:>2} ({rec['freq_mhz']:5.1f} MHz, "
-                      f"pilot SNR {rec['pilot_snr_db']:+5.1f} dB) … ",
+                      f"SNR {rec['pilot_snr_db']:+4.0f} / sharp "
+                      f"{rec['pilot_sharpness_db']:+4.0f} / VSB "
+                      f"{rec['vsb_asymmetry_db']:+4.0f} dB) … ",
                       end="", flush=True)
                 res = scan_one_rf(rf, dwell_sec=dwell_sec, log_fh=log_fh)
                 res["rms_dbfs"] = rec["rms_dbfs"]

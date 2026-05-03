@@ -98,16 +98,22 @@ def _analyze(samples: np.ndarray, sample_rate: int, mode: str) -> dict:
     power = float(np.mean(np.abs(samples) ** 2))
     rms_dbfs = 10.0 * np.log10(power + 1e-20)
 
+    base_empty = {
+        "rms_dbfs": rms_dbfs,
+        "pilot_snr_db": float("-inf"),
+        "pilot_sharpness_db": float("-inf"),
+        "vsb_asymmetry_db": float("-inf"),
+        "in_band_excess_db": float("-inf"),
+        "atsc3_db": float("-inf"),
+    }
     if mode == "rms":
-        return {"rms_dbfs": rms_dbfs, "pilot_db": float("-inf"),
-                "pilot_snr_db": float("-inf"), "atsc3_db": float("-inf")}
+        return base_empty
 
     # FFT analysis. Window-then-FFT to suppress sidelobes.
     n_fft = 1 << 14  # 16384
     n = min(samples.size, n_fft)
     if n < 1024:
-        return {"rms_dbfs": rms_dbfs, "pilot_db": float("-inf"),
-                "pilot_snr_db": float("-inf"), "atsc3_db": float("-inf")}
+        return base_empty
     win = np.hanning(n).astype(np.float32)
     windowed = samples[:n] * win
     spec = np.fft.fftshift(np.fft.fft(windowed, n_fft))
@@ -115,45 +121,70 @@ def _analyze(samples: np.ndarray, sample_rate: int, mode: str) -> dict:
     # Frequency axis: bin k corresponds to (k - n_fft/2) * sample_rate / n_fft
     bin_hz = sample_rate / n_fft
 
-    # ATSC 1.0 pilot is at -2.690 MHz from channel center (lower_edge +
-    # 0.31 MHz, where lower_edge = center - 3 MHz). Look in a ±10 kHz
-    # window around the expected bin to allow for tuner offset / phase
-    # noise. The pilot is a CW spike, so peak-pick within the window.
+    # ATSC 1.0 pilot at -2.690 MHz from channel center.
     pilot_center_bin = n_fft // 2 + int(round(-2.690e6 / bin_hz))
-    win_bins = max(1, int(round(20e3 / bin_hz)))  # ±10 kHz
-    lo = max(0, pilot_center_bin - win_bins)
-    hi = min(n_fft, pilot_center_bin + win_bins + 1)
-    pilot_peak = float(np.max(psd[lo:hi])) if hi > lo else 0.0
-    # Noise floor: median of bins outside the channel's main occupancy
-    # (channel spans ±3 MHz from center). Use bins beyond ±3.5 MHz as
-    # the local noise reference, falling back to global median if none.
+    # Narrow ±2 kHz pilot bin (a real CW pilot fits in 1-2 bins; widening
+    # the window mostly admits noise).
+    pilot_win = max(1, int(round(2e3 / bin_hz)))
+    pilot_lo = max(0, pilot_center_bin - pilot_win)
+    pilot_hi = min(n_fft, pilot_center_bin + pilot_win + 1)
+    pilot_peak = float(np.max(psd[pilot_lo:pilot_hi])) if pilot_hi > pilot_lo else 0.0
+
+    # Noise floor: median of bins beyond ±3.5 MHz (out of channel).
     margin_bins = int(round(3.5e6 / bin_hz))
-    out_of_band_lo = psd[:max(0, n_fft // 2 - margin_bins)]
-    out_of_band_hi = psd[min(n_fft, n_fft // 2 + margin_bins):]
-    noise_ref = np.concatenate([out_of_band_lo, out_of_band_hi])
+    oob_lo = psd[:max(0, n_fft // 2 - margin_bins)]
+    oob_hi = psd[min(n_fft, n_fft // 2 + margin_bins):]
+    noise_ref = np.concatenate([oob_lo, oob_hi])
     noise_floor = float(np.median(noise_ref)) if noise_ref.size else \
                   float(np.median(psd))
     if noise_floor <= 0:
         noise_floor = 1e-20
-    pilot_snr_db = 10.0 * np.log10(pilot_peak / noise_floor + 1e-20)
-    pilot_db = 10.0 * np.log10(pilot_peak / n_fft / n_fft + 1e-20)
 
-    # ATSC 3.0 / OFDM signature: flat power envelope across the channel.
-    # Compute std/mean of in-band PSD ÷ a clean reference; lower std is
-    # flatter. Score = mean_in_band_db - rms_log_var. Simpler heuristic:
-    # the in-band power is well above noise AND the pilot is NOT
-    # particularly elevated relative to the rest of in-band → likely 3.0.
-    in_band_lo = max(0, n_fft // 2 - int(round(3.0e6 / bin_hz)))
-    in_band_hi = min(n_fft, n_fft // 2 + int(round(3.0e6 / bin_hz)))
-    in_band = psd[in_band_lo:in_band_hi]
-    in_band_mean = float(np.mean(in_band)) if in_band.size else 0.0
-    in_band_excess_db = 10.0 * np.log10(in_band_mean / noise_floor + 1e-20)
-    atsc3_db = in_band_excess_db  # crude; refined by caller w/ pilot ratio
+    # Pilot sharpness: ratio of pilot peak to the local neighborhood mean
+    # (±100 kHz around the pilot, excluding the pilot bin itself). Real
+    # CW carriers concentrate energy in 1-2 bins → ratio 25-40 dB.
+    # Broadband noise peaks → ratio 3-8 dB.
+    nbhd_win = int(round(100e3 / bin_hz))
+    nbhd_lo = max(0, pilot_center_bin - nbhd_win)
+    nbhd_hi = min(n_fft, pilot_center_bin + nbhd_win + 1)
+    nbhd = psd[nbhd_lo:nbhd_hi].copy()
+    # Zero out the pilot bins so they don't contaminate the mean.
+    inner_lo = max(0, (pilot_lo - nbhd_lo))
+    inner_hi = max(inner_lo, (pilot_hi - nbhd_lo))
+    nbhd[inner_lo:inner_hi] = 0
+    nbhd_nonzero = nbhd[nbhd > 0]
+    nbhd_mean = float(np.mean(nbhd_nonzero)) if nbhd_nonzero.size else noise_floor
+    pilot_sharpness_db = 10.0 * np.log10(pilot_peak / nbhd_mean + 1e-20)
+
+    # VSB asymmetry: ATSC has a vestigial sideband BELOW the pilot
+    # (suppressed) and a full data sideband ABOVE the pilot. The power
+    # ratio data/vestigial is 10-20 dB on real ATSC, ≈0 dB on noise.
+    bins_per_300k = max(1, int(round(0.3e6 / bin_hz)))
+    bins_per_3m = max(1, int(round(3.0e6 / bin_hz)))
+    vsb_lo = max(0, pilot_center_bin - bins_per_300k)
+    vsb_hi = pilot_center_bin
+    data_lo = pilot_center_bin
+    data_hi = min(n_fft, pilot_center_bin + bins_per_3m)
+    vsb_pow = float(np.mean(psd[vsb_lo:vsb_hi])) if vsb_hi > vsb_lo else 1e-20
+    data_pow = float(np.mean(psd[data_lo:data_hi])) if data_hi > data_lo else 0.0
+    vsb_asymmetry_db = 10.0 * np.log10(data_pow / vsb_pow + 1e-20)
+
+    pilot_snr_db = 10.0 * np.log10(pilot_peak / noise_floor + 1e-20)
+    in_band_excess_db = 10.0 * np.log10(data_pow / noise_floor + 1e-20)
+
+    # ATSC 3.0 / OFDM: in-band excess present BUT no narrow pilot AND no
+    # VSB asymmetry (OFDM is symmetric across the channel).
+    atsc3_db = in_band_excess_db if (
+        in_band_excess_db > 5 and pilot_sharpness_db < 15
+        and abs(vsb_asymmetry_db) < 4
+    ) else float("-inf")
 
     return {
         "rms_dbfs": rms_dbfs,
-        "pilot_db": pilot_db,
         "pilot_snr_db": pilot_snr_db,
+        "pilot_sharpness_db": pilot_sharpness_db,
+        "vsb_asymmetry_db": vsb_asymmetry_db,
+        "in_band_excess_db": in_band_excess_db,
         "atsc3_db": atsc3_db,
     }
 
