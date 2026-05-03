@@ -19,12 +19,16 @@ The repo contains:
 
 ## What it took
 
-This is the result of one long iteration session, documented in
+This is the result of a multi-day iteration session, documented in
 [`docs/2026-05-02-session.md`](docs/2026-05-02-session.md). Short
-version: the stock equalizer was slightly broken (under-tuned LMS),
-the FPLL alpha/tau had too much margin loss past 60 seconds, and the
-correct combination of these two fixes turns "30 seconds and freeze"
-into "watch a baseball game."
+version: the stock equalizer was slightly broken (under-tuned LMS,
+fixed in Tier 3), the FPLL alpha/tau had too much margin loss past
+60 seconds (fixed in Tier 7), and the *actual* recurring 30 s drift
+bug turned out to be upstream of all of that — `atsc_fs_checker_inst`
+was accepting spurious early field-sync detections, frame-slipping
+the entire downstream chain. Tier 21 added a 313-segment spacing
+validator and turned "30 seconds and freeze" into continuous HD
+playback.
 
 | Tier | What we tried | Outcome |
 |---|---|---|
@@ -36,6 +40,11 @@ into "watch a baseball game."
 | 6 | CMA + DFE blind equalizer | no win — bottleneck not in EQ |
 | 7 | **FPLL tightening (`alpha=0.001, tau=50us`)** | **shipped — fixed t=60s drift** |
 | 8 | Neural-net Viterbi replacement | only beats Viterbi above 17 dB SNR |
+| 9 | **Soft-Viterbi memset of uninit stack buffer** | **shipped — fixed 100% TEI on real RF** |
+| 10 | Tighter `DIVERGENCE_BAIL` (50→10) | falsified, reverted (bit-identical TS) |
+| 11–19 | Equalizer/Viterbi state speculation | all falsified — wrong layer |
+| 20 | Per-FS `n_data_segs` instrumentation | smoking gun: FS slips at fs_pass 843/846 |
+| 21 | **FS-checker 313-segment spacing validator** | **shipped — the actual fix** |
 
 ## Download & install (Windows, 10 minutes)
 
@@ -149,7 +158,8 @@ that decodes it perfectly. So why software-decode it from raw RF?
 |---|---|---|
 | `atsc_fpll_tight` | ✓ shipped | Carrier PLL with parameterized loop bandwidth + AFC time constant. Best params: **alpha=0.001, tau=50us** (Tier 7 finding) |
 | `atsc_equalizer_long` | ✓ shipped (Tier 3) | 256-tap LMS equalizer with anti-windup + leakage. Replaces the stock 64-tap. Tier 3 fix made this the workhorse decoder |
-| `atsc_viterbi_soft` | ⚠ broken on real RF | Synthesizes correctly but produces 100% TEI on real captures. Bug not yet isolated |
+| `atsc_viterbi_soft` | ✓ shipped (Tier 9) | Soft-decision Viterbi. The "broken on real RF" phase was an uninitialized stack buffer (`out_copy`); a `memset` to zero on entry fixed it |
+| `atsc_fs_checker_inst` | ✓ shipped (Tier 21) | Field-sync checker with 313-segment spacing validation. Rejects spurious early FS detections that misalign the equalizer downstream — the *actual* root cause of the long-running 30 s drift bug |
 | `atsc_sync_tunable` | ✓ working, neutral | Lock thresholds + hysteresis |
 | `atsc_fs_checker_inst` | ✓ working | Instrumented field-sync checker (PN511/PN63 histograms to stderr) |
 | `atsc_equalizer_cma` | experimental | Continuous-Modulus + DFE. Falsified in Tier 6 testing — included for reference, not used by default |

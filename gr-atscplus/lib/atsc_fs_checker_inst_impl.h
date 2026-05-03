@@ -63,6 +63,22 @@ private:
     uint64_t d_window_fs_gap_min;
     uint64_t d_window_fs_gap_max;
 
+    // Tier-21 FS spacing validation. Each field in 8-VSB is exactly 313
+    // segments (1 FS + 312 data). Any candidate FS hit that arrives at
+    // a gap not within tolerance of 313 is presumed spurious and rejected.
+    // The dominant failure mode observed in Tier 20 was *early* spurious
+    // hits (gap=208, gap=249); late hits indicate a missed FS where we
+    // do want to re-acquire. We reject only early candidates by default.
+    // Gated on ATSCPLUS_FS_VALIDATE env var (default ON; "0"/"off" disables).
+    bool d_fs_validate_enabled;
+    bool d_fs_locked;                // have we accepted at least one FS?
+    uint64_t d_segs_since_accepted_fs;
+    uint64_t d_fs_accepted;
+    uint64_t d_fs_rejected_early;
+    uint64_t d_fs_rejected_late;
+    int d_fs_tol_low;                // reject if gap <  d_fs_tol_low  (default 280)
+    int d_fs_tol_high;               // reject if gap >  d_fs_tol_high (default INT_MAX -> off)
+
     inline static int wrap(int index) { return index & (SRSIZE - 1); }
     inline static int incr(int index) { return wrap(index + 1); }
     inline static int decr(int index) { return wrap(index - 1); }

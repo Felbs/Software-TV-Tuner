@@ -12,7 +12,10 @@
 #include "atsc_types.h"
 #include <gnuradio/dtv/atsc_consts.h>
 #include <gnuradio/io_signature.h>
+#include <climits>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <cmath>
 #include <algorithm>
 
@@ -83,10 +86,60 @@ void atsc_fs_checker_inst_impl::reset()
     d_window_fs_gap_count = 0;
     d_window_fs_gap_min = ~0ull;
     d_window_fs_gap_max = 0;
+
+    // Tier-21 FS spacing validator init. Defaults: enabled, low=280, high=INT_MAX
+    // (i.e., reject only early candidates). Env vars override:
+    //   ATSCPLUS_FS_VALIDATE=0/off -> disable validator entirely (legacy)
+    //   ATSCPLUS_FS_TOL_LOW=<int>  -> override low tolerance (segments)
+    //   ATSCPLUS_FS_TOL_HIGH=<int> -> override high tolerance (segments)
+    d_fs_validate_enabled = true;
+    {
+        const char* s = std::getenv("ATSCPLUS_FS_VALIDATE");
+        if (s && *s &&
+            (std::strcmp(s, "0") == 0 || std::strcmp(s, "off") == 0 ||
+             std::strcmp(s, "OFF") == 0 || std::strcmp(s, "false") == 0)) {
+            d_fs_validate_enabled = false;
+        }
+    }
+    d_fs_tol_low  = 280;
+    d_fs_tol_high = INT_MAX;
+    {
+        const char* s = std::getenv("ATSCPLUS_FS_TOL_LOW");
+        if (s && *s) {
+            int v = std::atoi(s);
+            if (v > 0) d_fs_tol_low = v;
+        }
+    }
+    {
+        const char* s = std::getenv("ATSCPLUS_FS_TOL_HIGH");
+        if (s && *s) {
+            int v = std::atoi(s);
+            if (v > 0) d_fs_tol_high = v;
+        }
+    }
+    d_fs_locked = false;
+    d_segs_since_accepted_fs = 0;
+    d_fs_accepted = 0;
+    d_fs_rejected_early = 0;
+    d_fs_rejected_late = 0;
+
+    std::fprintf(stderr,
+                 "[fs_check_v2] init validate=%s tol_low=%d tol_high=%d\n",
+                 d_fs_validate_enabled ? "ON" : "OFF",
+                 d_fs_tol_low, d_fs_tol_high);
+    std::fflush(stderr);
 }
 
 atsc_fs_checker_inst_impl::~atsc_fs_checker_inst_impl()
 {
+    std::fprintf(stderr,
+                 "[fs_check_v2 FINAL] accepted=%llu rejected_early=%llu "
+                 "rejected_late=%llu validate=%s tol_low=%d tol_high=%d\n",
+                 (unsigned long long)d_fs_accepted,
+                 (unsigned long long)d_fs_rejected_early,
+                 (unsigned long long)d_fs_rejected_late,
+                 d_fs_validate_enabled ? "ON" : "OFF",
+                 d_fs_tol_low, d_fs_tol_high);
     std::fprintf(stderr,
                  "[fs_checker_inst FINAL] segments=%llu pn511_hits=%llu "
                  "field1=%llu field2=%llu uncertain=%llu min_pn511_err=%d min_pn63_err=%d\n",
@@ -126,6 +179,8 @@ int atsc_fs_checker_inst_impl::general_work(int noutput_items,
 
     for (int i = 0; i < noutput_items; i++) {
         d_total_segments++;
+        // Tier-21: count segments since last accepted FS.
+        d_segs_since_accepted_fs++;
 
         // Tier-3: accumulate per-segment input level (post-AGC, post-sync)
         // for AGC drift telemetry. Sum |x| across the whole segment.
@@ -161,35 +216,72 @@ int atsc_fs_checker_inst_impl::general_work(int noutput_items,
             int min_dist = std::min(dist_to_field1, dist_to_field2);
             if (min_dist < d_min_pn63_errors_window) d_min_pn63_errors_window = min_dist;
 
+            // Tier-21: classify candidate FS field, then apply spacing validation.
+            int candidate_field = 0;  // 1 or 2 if accepted by PN63 polarity check
             if (errors_63 <= PN63_ERROR_LIMIT) {
-                d_field1_hits++;
-                d_field_num = 1;
-                d_segment_num = -1;
-                // Tier-3: record FS gap.
-                uint64_t gap = d_total_segments - d_segs_at_last_fs;
-                d_segs_at_last_fs = d_total_segments;
-                d_last_fs_gap = gap;
-                if (d_window_fs_gap_count > 0 || gap < 1000) {
-                    d_window_fs_gap_sum += gap;
-                    d_window_fs_gap_count++;
-                    if (gap < d_window_fs_gap_min) d_window_fs_gap_min = gap;
-                    if (gap > d_window_fs_gap_max) d_window_fs_gap_max = gap;
-                }
+                candidate_field = 1;
             } else if (errors_63 >= (LENGTH_2ND_63 - PN63_ERROR_LIMIT)) {
-                d_field2_hits++;
-                d_field_num = 2;
-                d_segment_num = -1;
-                uint64_t gap = d_total_segments - d_segs_at_last_fs;
-                d_segs_at_last_fs = d_total_segments;
-                d_last_fs_gap = gap;
-                if (d_window_fs_gap_count > 0 || gap < 1000) {
-                    d_window_fs_gap_sum += gap;
-                    d_window_fs_gap_count++;
-                    if (gap < d_window_fs_gap_min) d_window_fs_gap_min = gap;
-                    if (gap > d_window_fs_gap_max) d_window_fs_gap_max = gap;
-                }
+                candidate_field = 2;
             } else {
                 d_pn63_uncertain++;
+            }
+
+            if (candidate_field != 0) {
+                // Spacing validation. d_segs_since_accepted_fs was incremented
+                // earlier this iteration, so it equals the gap from last accept
+                // to this candidate (1 if back-to-back, 313 nominal).
+                uint64_t gap = d_segs_since_accepted_fs;
+                bool accept = true;
+                if (d_fs_validate_enabled && d_fs_locked) {
+                    if ((int)gap < d_fs_tol_low) {
+                        accept = false;
+                        d_fs_rejected_early++;
+                        std::fprintf(stderr,
+                            "[fs_check_v2] REJECT_EARLY seg=%llu gap=%llu "
+                            "field=%d e511=%d e63=%d\n",
+                            (unsigned long long)d_total_segments,
+                            (unsigned long long)gap,
+                            candidate_field, errors_511, errors_63);
+                    } else if ((int)gap > d_fs_tol_high) {
+                        accept = false;
+                        d_fs_rejected_late++;
+                        std::fprintf(stderr,
+                            "[fs_check_v2] REJECT_LATE seg=%llu gap=%llu "
+                            "field=%d e511=%d e63=%d\n",
+                            (unsigned long long)d_total_segments,
+                            (unsigned long long)gap,
+                            candidate_field, errors_511, errors_63);
+                    }
+                }
+
+                if (accept) {
+                    if (candidate_field == 1) d_field1_hits++;
+                    else                      d_field2_hits++;
+                    d_field_num = candidate_field;
+                    d_segment_num = -1;
+                    d_fs_accepted++;
+                    d_fs_locked = true;
+                    d_segs_since_accepted_fs = 0;
+
+                    // Tier-3: record FS gap (legacy telemetry, gap relative to
+                    // last *detected* hit including any rejected ones we
+                    // updated d_segs_at_last_fs on prior).
+                    uint64_t legacy_gap = d_total_segments - d_segs_at_last_fs;
+                    d_segs_at_last_fs = d_total_segments;
+                    d_last_fs_gap = legacy_gap;
+                    if (d_window_fs_gap_count > 0 || legacy_gap < 1000) {
+                        d_window_fs_gap_sum += legacy_gap;
+                        d_window_fs_gap_count++;
+                        if (legacy_gap < d_window_fs_gap_min)
+                            d_window_fs_gap_min = legacy_gap;
+                        if (legacy_gap > d_window_fs_gap_max)
+                            d_window_fs_gap_max = legacy_gap;
+                    }
+                }
+                // If rejected: d_field_num is unchanged. If we were mid-field
+                // (1 <= d_segment_num <= 312), the existing per-segment loop
+                // below continues outputting that field's data segments with
+                // their proper segment numbers — exactly the desired behavior.
             }
         }
 
@@ -230,6 +322,14 @@ int atsc_fs_checker_inst_impl::general_work(int noutput_items,
             double mean_fs_gap = (d_window_fs_gap_count > 0)
                 ? (double)d_window_fs_gap_sum / (double)d_window_fs_gap_count : 0.0;
 
+            std::fprintf(stderr,
+                         "[fs_check_v2] @%llu segs accepted=%llu "
+                         "rejected_early=%llu rejected_late=%llu locked=%d\n",
+                         (unsigned long long)d_total_segments,
+                         (unsigned long long)d_fs_accepted,
+                         (unsigned long long)d_fs_rejected_early,
+                         (unsigned long long)d_fs_rejected_late,
+                         d_fs_locked ? 1 : 0);
             std::fprintf(stderr,
                          "[fs_check t=%6.2fs @%llu segs] pn511_hits=%llu "
                          "f1=%llu f2=%llu uncertain=%llu min_pn511_e=%d "
