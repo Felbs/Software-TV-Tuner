@@ -920,7 +920,12 @@ def run_scan(region: dict | None = None,
                 # the equalizer just didn't converge on first try.
                 res = scan_one_rf_with_retry(rf, dwell_sec=dwell_sec,
                                               log_fh=log_fh, retries=1)
+                # Preserve phase-1 metrics into the post-lock record so
+                # the picker can show signal strength %.
                 res["rms_dbfs"] = rec["rms_dbfs"]
+                res["pilot_snr_db"] = rec["pilot_snr_db"]
+                res["pilot_sharpness_db"] = rec["pilot_sharpness_db"]
+                res["vsb_asymmetry_db"] = rec["vsb_asymmetry_db"]
                 res["hot"] = True
                 if res.get("lock"):
                     cs = lookup_callsign(rf)
@@ -1393,6 +1398,18 @@ def prompt_choice(msg: str, options: list[str], default: int = 1) -> int:
         print("  invalid choice")
 
 
+def signal_pct_from_pilot_snr(pilot_snr_db: float) -> int:
+    """Map pilot SNR (the phase-1 carrier-to-noise figure) to a 0-100%
+    signal-strength label. The strict-detection threshold is at SNR=30 dB,
+    and clean local ATSC at this antenna runs SNR=60-70 dB. The scale
+    matches the rough range HDHomeRun reports for the same stations
+    (95% strong, 85% medium, 30-40% marginal)."""
+    if pilot_snr_db is None or pilot_snr_db < 30:
+        return 0
+    pct = (pilot_snr_db - 30) * 100.0 / (65 - 30)
+    return max(0, min(100, int(round(pct))))
+
+
 def expand_channels_from_scan(scan: dict) -> list[dict]:
     """Build the picker rows from scan.json.
 
@@ -1413,6 +1430,8 @@ def expand_channels_from_scan(scan: dict) -> list[dict]:
         psip = ch.get("psip") or {}
         psip_channels = psip.get("channels") or []
         psip_events = psip.get("events") or {}
+        # All sub-channels on this mux share one signal strength.
+        signal_pct = signal_pct_from_pilot_snr(ch.get("pilot_snr_db"))
         # Index PSIP virtual-channel records by program_number for
         # quick lookup against ffprobe's per-stream program_num.
         psip_by_prognum = {c.get("program_number"): c for c in psip_channels}
@@ -1512,6 +1531,7 @@ def expand_channels_from_scan(scan: dict) -> list[dict]:
                 "now_description": now_description,
                 "channel_description": channel_description,
                 "audio_streams": audio_streams,
+                "signal_pct": signal_pct,
             })
     # Append weak ATSC carriers — channels where phase-1 detected a real
     # ATSC carrier but at marginal signal. Phase 2 was skipped, so these
@@ -1626,16 +1646,16 @@ def print_scan_table(scan: dict) -> list[dict]:
     print()
     if has_now:
         print(f"  {'#':>3}  {'Ch':<5}  {'Callsign':<8}  "
-              f"{'Quality':<14}  Now playing")
+              f"{'Sig':>4}  {'Quality':<14}  Now playing")
     else:
         print(f"  {'#':>3}  {'Ch':<5}  {'Callsign':<8}  "
-              f"{'Network':<14}  Quality")
-    print("  " + "-" * 70)
+              f"{'Sig':>4}  {'Network':<14}  Quality")
+    print("  " + "-" * 76)
     last_major = None
     for i, r in enumerate(rows, start=1):
         major = r["virtual"].split(".")[0] if "." in r["virtual"] else None
         if last_major is not None and major != last_major:
-            print(f"       {'─' * 65}")
+            print(f"       {'─' * 71}")
         if r.get("not_detected"):
             marker = "? "  # known station, not detected this scan
         elif r.get("weak"):
@@ -1643,6 +1663,12 @@ def print_scan_table(scan: dict) -> list[dict]:
         else:
             marker = "└▸" if r["is_sub"] else "★ "
         q = r.get("quality", "") or ""
+        # Signal strength: real % for detected channels, "—" for stations
+        # the scan didn't see (no metric available).
+        if r.get("not_detected") or r.get("weak"):
+            sig_str = "  — "
+        else:
+            sig_str = f"{r.get('signal_pct', 0):>3}%"
         if has_now:
             now = r.get("now_title") or ""
             rem = r.get("now_remaining_sec") or 0
@@ -1653,10 +1679,11 @@ def print_scan_table(scan: dict) -> list[dict]:
             now_str = (f"{now[:title_max]}{'…' if len(now) > title_max else ''}"
                        f"{rating_tag} ({rem // 60}m)") if now else ""
             print(f"  {i:>3}  {marker} {r['virtual']:<3}  "
-                  f"{r['callsign']:<8}  {q:<24}  {now_str}")
+                  f"{r['callsign']:<8}  {sig_str:>4}  {q:<24}  {now_str}")
         else:
             print(f"  {i:>3}  {marker} {r['virtual']:<3}  "
-                  f"{r['callsign']:<8}  {r['network']:<14}  {q}")
+                  f"{r['callsign']:<8}  {sig_str:>4}  "
+                  f"{r['network']:<14}  {q}")
         last_major = major
     print()
     return rows
@@ -1674,6 +1701,8 @@ def print_channel_details(rows: list[dict], idx: int):
     if r.get("network"):
         print(f"  Network:    {r['network']}")
     print(f"  Tuned to:   RF {r['rf']}")
+    if "signal_pct" in r and not r.get("not_detected"):
+        print(f"  Signal:     {r['signal_pct']}%")
     print(f"  Quality:    {r.get('quality', '')}")
     audios = r.get("audio_streams") or []
     if len(audios) > 1:
