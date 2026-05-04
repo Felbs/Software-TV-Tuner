@@ -21,6 +21,10 @@ TABLE_MGT = 0xC7   # Master Guide Table — points to EIT PIDs
 TABLE_TVCT = 0xC8
 TABLE_CVCT = 0xC9
 TABLE_EIT = 0xCB   # all EIT-N variants share this table_id; PID differs
+TABLE_ETT = 0xCC   # Extended Text Table (event/channel descriptions)
+
+# Descriptor tags we care about (per ATSC A/65 + MPEG-2)
+DESCRIPTOR_CONTENT_ADVISORY = 0x87  # TV-PG / TV-14 / TV-MA ratings
 
 # GPS epoch = 1980-01-06 00:00:00 UTC. PSIP times are GPS seconds with a
 # constant 18-second offset versus UTC (correct as of 2017; GPS doesn't
@@ -203,6 +207,68 @@ def parse_mgt_section(section: bytes) -> list[dict]:
     return out
 
 
+def parse_descriptor_list(data: bytes) -> list[dict]:
+    """Parse a flat list of MPEG-2 descriptors (tag/length/body)."""
+    out = []
+    idx = 0
+    while idx + 2 <= len(data):
+        tag = data[idx]
+        length = data[idx + 1]
+        if idx + 2 + length > len(data):
+            break
+        out.append({"tag": tag, "data": data[idx + 2:idx + 2 + length]})
+        idx += 2 + length
+    return out
+
+
+# US RRT (Rating Region Table region 0x01) dimension 0 = main TV rating.
+# Index = rating_value (0..7). Per ATSC A/65 default labels for region 0x01.
+US_RRT_DIM0 = ["", "TV-Y", "TV-Y7", "TV-G", "TV-PG", "TV-14", "TV-MA"]
+# Optional content-advisory dimension flags (D dialogue, V violence, S sex,
+# L language, FV fantasy violence). Their dimension index is broadcaster-
+# specific via RRT but commonly 1..5 for these letters.
+US_RRT_FLAG_LETTERS = {1: "FV", 2: "V", 3: "S", 4: "L", 5: "D"}
+
+
+def parse_content_advisory(data: bytes) -> str:
+    """Decode content_advisory_descriptor body. Return a short string like
+    'TV-PG' or 'TV-14 LV' or '' on parse failure / no recognised rating."""
+    if len(data) < 1:
+        return ""
+    rating_region_count = data[0] & 0x3F
+    idx = 1
+    main = ""
+    flags = []
+    for _ in range(rating_region_count):
+        if idx + 2 > len(data):
+            break
+        rating_region = data[idx]
+        rated_dimensions = data[idx + 1]
+        idx += 2
+        if rating_region == 0x01:
+            for _ in range(rated_dimensions):
+                if idx + 2 > len(data):
+                    break
+                rating_dimension = data[idx]
+                rating_value = data[idx + 1] & 0x0F
+                idx += 2
+                if rating_dimension == 0 and not main:
+                    if 0 <= rating_value < len(US_RRT_DIM0):
+                        main = US_RRT_DIM0[rating_value]
+                elif rating_dimension in US_RRT_FLAG_LETTERS and rating_value > 0:
+                    flags.append(US_RRT_FLAG_LETTERS[rating_dimension])
+        else:
+            # Skip dimensions of unknown regions
+            idx += rated_dimensions * 2
+        if idx >= len(data):
+            break
+        rating_description_length = data[idx]
+        idx += 1 + rating_description_length
+    if main and flags:
+        return f"{main} {''.join(sorted(set(flags)))}"
+    return main
+
+
 def parse_eit_section(section: bytes):
     """Parse an EIT-N section, return (source_id, [event...])."""
     if len(section) < 11:
@@ -233,14 +299,42 @@ def parse_eit_section(section: bytes):
             break
         descriptors_length = ((section[idx] & 0x0F) << 8) | section[idx + 1]
         idx += 2
+        descriptor_blob = section[idx:idx + descriptors_length]
         idx += descriptors_length
+        # Parse descriptors for content-advisory rating.
+        rating = ""
+        for d in parse_descriptor_list(descriptor_blob):
+            if d["tag"] == DESCRIPTOR_CONTENT_ADVISORY:
+                r = parse_content_advisory(d["data"])
+                if r:
+                    rating = r
+                    break
         events.append({
             "event_id": event_id,
             "start_gps": start_time,
             "length_sec": length_sec,
             "title": title,
+            "rating": rating,
         })
     return source_id, events
+
+
+def parse_ett_section(section: bytes):
+    """Parse an ETT (Extended Text Table) section.
+    Returns (source_id, event_id, description_text).
+    For a channel ETT, event_id == 0."""
+    if len(section) < 13 or section[0] != TABLE_ETT:
+        return None, None, ""
+    # 0:tab_id 1-2:section_len 3-4:ETT_table_id_extension 5:version etc.
+    # 6:section_num 7:last_section_num 8:protocol_version
+    # 9-12:ETM_id (32 bits)
+    etm_id = int.from_bytes(section[9:13], "big")
+    source_id = (etm_id >> 16) & 0xFFFF
+    event_id = (etm_id >> 2) & 0x3FFF  # zero for channel ETT
+    # CRC_32 is the last 4 bytes; text is between idx=13 and -4.
+    text_blob = section[13:-4] if len(section) > 17 else section[13:]
+    text = parse_atsc_text(text_blob)
+    return source_id, event_id, text
 
 
 def gps_to_datetime(gps_sec: int) -> datetime.datetime:
@@ -264,6 +358,8 @@ def extract_psip(ts_path: Path, max_bytes: int = 100_000_000) -> dict:
 
     channels = []
     eit_pids: set[int] = set()
+    ett_pids: set[int] = set()
+    channel_ett_pids: set[int] = set()
     for section in reassemble_sections(parse_ts_packets(data, PSIP_BASE_PID)):
         if len(section) < 4:
             continue
@@ -273,8 +369,15 @@ def extract_psip(ts_path: Path, max_bytes: int = 100_000_000) -> dict:
         elif table_id == TABLE_MGT:
             for ref in parse_mgt_section(section):
                 # EIT-N table_type values: 0x0100..0x017F per A/65 §6.3.
-                if 0x0100 <= ref["table_type"] <= 0x017F:
+                # ETT-N (event ETT)        : 0x0200..0x027F.
+                # Channel ETT              : 0x0004.
+                tt = ref["table_type"]
+                if 0x0100 <= tt <= 0x017F:
                     eit_pids.add(ref["pid"])
+                elif 0x0200 <= tt <= 0x027F:
+                    ett_pids.add(ref["pid"])
+                elif tt == 0x0004:
+                    channel_ett_pids.add(ref["pid"])
 
     events_by_source: dict[int, list[dict]] = {}
     for pid in eit_pids:
@@ -284,6 +387,27 @@ def extract_psip(ts_path: Path, max_bytes: int = 100_000_000) -> dict:
             sid, evs = parse_eit_section(section)
             if sid is not None and evs:
                 events_by_source.setdefault(sid, []).extend(evs)
+
+    # ETT pass — collect (source_id, event_id) → description, then attach
+    # to the matching event after EIT dedupe.
+    descriptions: dict[tuple[int, int], str] = {}
+    channel_descriptions: dict[int, str] = {}
+    for pid in ett_pids:
+        for section in reassemble_sections(parse_ts_packets(data, pid)):
+            if len(section) < 4 or section[0] != TABLE_ETT:
+                continue
+            sid, eid, text = parse_ett_section(section)
+            if sid is None or not text:
+                continue
+            descriptions[(sid, eid)] = text
+    for pid in channel_ett_pids:
+        for section in reassemble_sections(parse_ts_packets(data, pid)):
+            if len(section) < 4 or section[0] != TABLE_ETT:
+                continue
+            sid, eid, text = parse_ett_section(section)
+            if sid is None or eid != 0 or not text:
+                continue
+            channel_descriptions[sid] = text
     # Dedupe channels by source_id (multiple sections can repeat them).
     seen = set()
     deduped = []
@@ -292,13 +416,22 @@ def extract_psip(ts_path: Path, max_bytes: int = 100_000_000) -> dict:
             continue
         seen.add(c["source_id"])
         deduped.append(c)
-    # Dedupe events by event_id within each source.
+    # Dedupe events by event_id within each source; attach ETT description.
     for sid, evs in events_by_source.items():
         seen_e: dict[int, dict] = {}
         for e in evs:
             seen_e.setdefault(e["event_id"], e)
+        for ev in seen_e.values():
+            desc = descriptions.get((sid, ev["event_id"]))
+            if desc:
+                ev["description"] = desc
         events_by_source[sid] = sorted(
             seen_e.values(), key=lambda e: e["start_gps"])
+    # Channel-level ETT descriptions get attached to the matching VCT entry.
+    for c in deduped:
+        d = channel_descriptions.get(c["source_id"])
+        if d:
+            c["description"] = d
     return {"channels": deduped, "events": events_by_source}
 
 
@@ -319,6 +452,8 @@ def find_current_event(events: list,
                 "start_iso": start.isoformat(),
                 "duration_sec": ev["length_sec"],
                 "remaining_sec": remaining,
+                "rating": ev.get("rating", ""),
+                "description": ev.get("description", ""),
             }
     return None
 

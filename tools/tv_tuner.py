@@ -554,13 +554,34 @@ def ffprobe_programs(timeout_sec: float = 12.0) -> list[dict]:
             "program_num": p.get("program_num"),
             "service_name": (p.get("tags") or {}).get("service_name"),
         }
+        # Audio streams may be plural (English + Spanish SAP, etc.).
+        audio_streams: list[dict] = []
         for s in p.get("streams", []) or []:
             ct = s.get("codec_type")
             if ct == "video":
                 info["video_codec"] = s.get("codec_name")
                 info["video_height"] = s.get("height")
+                # Frame rate: ffprobe gives "avg_frame_rate" as "num/den".
+                fps_str = s.get("avg_frame_rate", "0/1")
+                try:
+                    num, den = fps_str.split("/")
+                    fps = float(num) / float(den) if float(den) else 0
+                    if fps > 0:
+                        info["video_fps"] = round(fps, 2)
+                except (ValueError, ZeroDivisionError):
+                    pass
             elif ct == "audio":
-                info["audio_codec"] = s.get("codec_name")
+                if "audio_codec" not in info:
+                    info["audio_codec"] = s.get("codec_name")
+                    info["audio_channels"] = s.get("channels")
+                lang = (s.get("tags") or {}).get("language", "")
+                audio_streams.append({
+                    "codec": s.get("codec_name"),
+                    "channels": s.get("channels"),
+                    "lang": lang,
+                })
+        if audio_streams:
+            info["audio_streams"] = audio_streams
         progs.append(info)
     return progs
 
@@ -1393,7 +1414,10 @@ def expand_channels_from_scan(scan: dict) -> list[dict]:
             program_num = p.get("program_num")
             video_h = p.get("video_height")
             video_codec = p.get("video_codec")
+            video_fps = p.get("video_fps")
             audio_codec = p.get("audio_codec")
+            audio_channels = p.get("audio_channels")
+            audio_streams = p.get("audio_streams") or []
             service_name = p.get("service_name") or ""
 
             virt = ""
@@ -1401,18 +1425,24 @@ def expand_channels_from_scan(scan: dict) -> list[dict]:
             network = service_name
             now_title = ""
             now_remaining = 0
+            now_rating = ""
+            now_description = ""
+            channel_description = ""
 
             psip_ch = psip_by_prognum.get(program_num)
             if psip_ch is not None:
                 # Authoritative virtual channel from broadcaster's VCT.
                 virt = f"{psip_ch['major']}.{psip_ch['minor']}"
                 callsign = psip_ch.get("short_name", "") or ""
+                channel_description = psip_ch.get("description", "") or ""
                 evs = psip_events.get(str(psip_ch.get("source_id"))) or []
                 if find_current_event is not None:
                     cur = find_current_event(evs)
                     if cur is not None:
                         now_title = cur.get("title") or ""
                         now_remaining = cur.get("remaining_sec") or 0
+                        now_rating = cur.get("rating") or ""
+                        now_description = cur.get("description") or ""
 
             if not virt and info is not None:
                 # Fall back to static fcc_dc_stations table.
@@ -1431,12 +1461,30 @@ def expand_channels_from_scan(scan: dict) -> list[dict]:
 
             quality_bits = []
             if video_h:
-                quality_bits.append(f"{video_h}p" if video_h <= 720 else
-                                     f"{video_h}i")
+                video_tag = f"{video_h}p" if video_h <= 720 else f"{video_h}i"
+                if video_fps:
+                    fps_int = int(round(video_fps))
+                    if fps_int in (24, 30, 60):
+                        video_tag = f"{video_h}{video_tag[-1]}{fps_int}"
+                quality_bits.append(video_tag)
             if video_codec:
                 quality_bits.append(video_codec)
-            if audio_codec:
-                quality_bits.append(audio_codec)
+            # Audio: codec + channel-count tag.
+            audio_tag = audio_codec or ""
+            if audio_channels:
+                if audio_channels == 1:
+                    audio_tag = f"{audio_tag} mono".strip()
+                elif audio_channels == 2:
+                    audio_tag = f"{audio_tag} 2.0".strip()
+                elif audio_channels >= 6:
+                    audio_tag = f"{audio_tag} 5.1".strip()
+            if audio_tag:
+                quality_bits.append(audio_tag)
+            # Multilingual hint if more than one audio language is present.
+            langs = [a.get("lang", "") for a in audio_streams
+                     if a.get("lang") and a.get("lang") != "und"]
+            if len(set(langs)) > 1:
+                quality_bits.append("+" + ",".join(sorted(set(langs))[1:]))
             quality = " ".join(quality_bits)
 
             rows.append({
@@ -1452,6 +1500,10 @@ def expand_channels_from_scan(scan: dict) -> list[dict]:
                 "service_name": service_name,
                 "now_title": now_title,
                 "now_remaining_sec": now_remaining,
+                "now_rating": now_rating,
+                "now_description": now_description,
+                "channel_description": channel_description,
+                "audio_streams": audio_streams,
             })
     # Append weak ATSC carriers — channels where phase-1 detected a real
     # ATSC carrier but at marginal signal. Phase 2 was skipped, so these
@@ -1521,16 +1573,56 @@ def print_scan_table(scan: dict) -> list[dict]:
         if has_now:
             now = r.get("now_title") or ""
             rem = r.get("now_remaining_sec") or 0
-            now_str = (f"{now[:38]}{'…' if len(now) > 38 else ''}"
-                       f" ({rem // 60}m)") if now else ""
+            rating = r.get("now_rating") or ""
+            rating_tag = f" [{rating}]" if rating else ""
+            # Trim title to fit; rating goes in brackets after.
+            title_max = 32
+            now_str = (f"{now[:title_max]}{'…' if len(now) > title_max else ''}"
+                       f"{rating_tag} ({rem // 60}m)") if now else ""
             print(f"  {i:>3}  {marker} {r['virtual']:<3}  "
-                  f"{r['callsign']:<8}  {q:<14}  {now_str}")
+                  f"{r['callsign']:<8}  {q:<24}  {now_str}")
         else:
             print(f"  {i:>3}  {marker} {r['virtual']:<3}  "
                   f"{r['callsign']:<8}  {r['network']:<14}  {q}")
         last_major = major
     print()
     return rows
+
+
+def print_channel_details(rows: list[dict], idx: int):
+    """Show full PSIP details for one channel: synopsis, rating, audio
+    streams, channel description. Triggered by 'i N' at the picker."""
+    if idx < 1 or idx > len(rows):
+        print("  invalid")
+        return
+    r = rows[idx - 1]
+    print()
+    print(f"  ── Channel {r['virtual']} {r['callsign']} ─────────────────────")
+    if r.get("network"):
+        print(f"  Network:    {r['network']}")
+    print(f"  Tuned to:   RF {r['rf']}")
+    print(f"  Quality:    {r.get('quality', '')}")
+    audios = r.get("audio_streams") or []
+    if len(audios) > 1:
+        print(f"  Audio:      {len(audios)} streams:")
+        for a in audios:
+            ch = a.get("channels") or "?"
+            lang = a.get("lang") or "—"
+            codec = a.get("codec") or "?"
+            print(f"                {codec} {ch}ch ({lang})")
+    if r.get("channel_description"):
+        print(f"  Channel:    {r['channel_description']}")
+    if r.get("now_title"):
+        rating = r.get("now_rating") or "no rating"
+        rem = r.get("now_remaining_sec") or 0
+        print(f"  Now:        {r['now_title']}  [{rating}]  ({rem // 60} min remaining)")
+        if r.get("now_description"):
+            # Wrap long descriptions.
+            desc = r["now_description"]
+            for i_ in range(0, len(desc), 65):
+                prefix = "  Synopsis:   " if i_ == 0 else "              "
+                print(f"{prefix}{desc[i_:i_+65]}")
+    print()
 
 
 def maybe_first_run_scan(cfg: dict) -> dict | None:
@@ -1571,7 +1663,10 @@ def interactive_pick(cfg: dict):
 
     while True:
         try:
-            ans = input(f"Pick channel # [1-{len(rows)}], r=re-scan, q=quit: ").strip().lower()
+            ans = input(
+                f"Pick channel # [1-{len(rows)}], "
+                f"i N=info, r=re-scan, q=quit: "
+            ).strip().lower()
         except EOFError:
             raise SystemExit("no input")
         if ans in ("q", "quit", "exit"):
@@ -1581,6 +1676,15 @@ def interactive_pick(cfg: dict):
             new_scan = run_scan(region=region)
             rows = print_scan_table(new_scan) or rows
             print("  r) Re-scan       q) Quit")
+            continue
+        # `i N` shows full details (synopsis, audio streams, etc.) for #N
+        # without picking it.
+        if ans.startswith("i ") or ans.startswith("info "):
+            try:
+                n = int(ans.split()[-1])
+                print_channel_details(rows, n)
+            except (ValueError, IndexError):
+                print("  invalid info command (use 'i 5' or 'info 5')")
             continue
         try:
             n = int(ans)
