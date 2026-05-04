@@ -121,15 +121,25 @@ def _analyze(samples: np.ndarray, sample_rate: int, mode: str) -> dict:
     if mode == "rms":
         return base_empty
 
-    # FFT analysis. Window-then-FFT to suppress sidelobes.
+    # FFT analysis. For short captures (≤16k samples), single FFT.
+    # For longer captures (deep-scan), use Welch's method: chop into
+    # disjoint windows of n_fft each, average the magnitude-squared
+    # spectra. The pilot tone is CW so its bin power is identical
+    # in every segment, while noise variance reduces by sqrt(N_seg).
+    # Net gain on every threshold metric: ~10·log10(N_seg) dB.
     n_fft = 1 << 14  # 16384
-    n = min(samples.size, n_fft)
-    if n < 1024:
+    if samples.size < 1024:
         return base_empty
-    win = np.hanning(n).astype(np.float32)
-    windowed = samples[:n] * win
-    spec = np.fft.fftshift(np.fft.fft(windowed, n_fft))
-    psd = np.abs(spec) ** 2
+    n_segments = max(1, samples.size // n_fft)
+    win = np.hanning(n_fft).astype(np.float32)
+    psd = np.zeros(n_fft, dtype=np.float64)
+    for k in range(n_segments):
+        seg = samples[k * n_fft:(k + 1) * n_fft]
+        if seg.size < n_fft:
+            break
+        spec = np.fft.fftshift(np.fft.fft(seg * win, n_fft))
+        psd += np.abs(spec) ** 2
+    psd /= max(1, n_segments)
     # Frequency axis: bin k corresponds to (k - n_fft/2) * sample_rate / n_fft
     bin_hz = sample_rate / n_fft
 
