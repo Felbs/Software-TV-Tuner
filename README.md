@@ -26,8 +26,11 @@ You need:
   [`radioconda`](https://github.com/ryanvolz/radioconda) (free).
 - A SoapySDR-supported SDR. Tested with **SDRplay RSPdx** + the
   SDRplay API v3 driver.
-- A **horizontally-polarized TV antenna** — see
-  [Why polarization matters](#why-polarization-matters) below.
+- **Any antenna** — even ones that weren't designed for TV (we've
+  locked broadcasts on a vertical ham-radio whip). A proper
+  horizontally-polarized TV antenna gives the best signal margin,
+  but it's not required. See
+  [Antennas — what works](#antennas--what-works) below.
 - (Windows only) [`ffmpeg`](https://www.gyan.dev/ffmpeg/builds/) full
   build extracted to `C:\ffmpeg\`.
 
@@ -154,18 +157,48 @@ step is broken when something goes wrong.
 documents the SDRplay gain settings, antenna polarization, and capture
 parameters that produce the best lock.
 
-## Why polarization matters
+## Antennas — what works
 
-ATSC broadcast TV in North America is **horizontally polarized**. A
-vertically-polarized antenna (e.g. a discone or a vertical whip) loses
-10–15 dB of signal versus a horizontally-polarized one. That loss is
-below the threshold the FPLL needs to lock the carrier. A "perfectly
-fine" SDR setup that decodes ham radio and aircraft signals beautifully
-will produce 100% TEI=1 garbage on TV unless the antenna is correctly
-oriented.
+**You can use this on antennas that weren't designed to receive TV
+signals.** Our test rig regularly locks ATSC broadcasts on a vertical
+ham-radio whip — exactly the kind of antenna conventional wisdom says
+shouldn't work for TV. With a strong-enough station, a clean front
+end, and the watchdogs respawning the decoder when it drifts, the
+software pulls a watchable picture out of antennas that off-the-shelf
+HDHomeRun-style tuners would give up on.
 
-Indoor rabbit-ears bent into a horizontal "V" work surprisingly well.
-A purpose-built UHF Yagi gives the best SNR margin.
+But — what *does* polarization mean, and why do TV antennas help?
+
+Radio waves carry their energy in an electric field that oscillates
+in some direction perpendicular to the direction the wave is
+traveling. The orientation of that oscillation is the wave's
+**polarization**. ATSC broadcast TV in North America is transmitted
+**horizontally polarized**: the field oscillates left-to-right.
+
+For maximum reception, the receiving antenna's element should be
+oriented in the *same plane* as the transmitted wave. A vertically-
+mounted whip catches a horizontally-polarized wave at maybe
+10–20% of the energy of a properly-oriented horizontal antenna —
+roughly **10–15 dB of signal loss**. That's a lot. For a marginal
+station it can be the difference between a clean picture and no
+lock at all.
+
+So a **proper TV antenna helps** — and "proper" here means two
+things:
+
+- **Horizontally polarized** (the elements run side-to-side, not
+  up-and-down). Indoor rabbit-ears bent into a horizontal "V" work
+  surprisingly well; a purpose-built UHF Yagi or log-periodic gives
+  the best SNR margin.
+- **Connected with proper coax**, ideally short, ideally low-loss
+  (RG-6 or LMR-style) with the right F-connector or N-connector
+  matching for your SDR. Long thin coax + bad connectors throws
+  away signal you can't get back.
+
+Both of these make the receive side easier. **Neither is required
+to use this program** — if your station is loud enough at your
+location, a "wrong" antenna often still works. The watchdogs and
+the equalizer's tracking margin cover a lot of sins.
 
 ## Repo layout
 
