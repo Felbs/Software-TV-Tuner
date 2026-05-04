@@ -1,31 +1,79 @@
 """ATSC CEA-608 closed-caption decoder — pure Python, stdlib only.
 
-Reads an MPEG-TS file (live.ts by default) and prints the live
-closed-caption text to stdout. Used by tv_tuner.py's --cc flag when
-the external `ccextractor` tool isn't installed. ccextractor handles
-both CEA-608 and CEA-708 and is preferred when available; this
-fallback handles the much-more-common CEA-608 line-21 captions on
-field 1 / channel 1 (English primary), which covers the vast majority
-of broadcast TV.
+Reads an MPEG-TS file (live.ts by default) and prints the live closed-
+caption text to stdout. Used by tv_tuner.py's --cc flag when the
+external `ccextractor` tool isn't installed. ccextractor handles both
+CEA-608 and CEA-708 and is preferred when available; this fallback
+handles CEA-608 line-21 captions on field 1 / channel 1 (English
+primary), which covers nearly all broadcast TV.
 
-Format reference: ATSC A/53 Part 4, CEA-608-E.
+Why this exists & what 1980s line-21 captions taught us
+-------------------------------------------------------
+Closed-captioning rolled out on US TV on March 16, 1980 (PBS WGBH).
+The encoding had to survive:
+  - cheap consumer decoder hardware (a single LSI chip),
+  - noisy analog VBI on line 21 of NTSC,
+  - lost fields from multipath, snow, and tape duplication.
 
-Pipeline:
-  1. Read TS packets (188 bytes each) from the input file. Tail-follow
-     the file as new bytes arrive (live.ts is being written by tv_live).
-  2. Reassemble video-PID PES payloads. We don't bother parsing PMT —
-     we just scan every PID's payload for the mpeg2video user-data
-     start code (0x000001B2). Cheap and correct enough.
-  3. After 0x000001B2, check for the ATSC identifier 'GA94' followed
-     by user_data_type_code 0x03 (cc_data).
-  4. Parse cc_count, then cc_count entries of (cc_valid+cc_type, b1, b2).
-     Filter to cc_type == 0 (NTSC field 1). Strip parity bits.
-  5. Run the byte pairs through a CEA-608 state machine: print printable
-     characters, treat control codes (CR, EOC, EDM) as line breaks.
+The CEA-608-E design solves those constraints with three tricks that
+this decoder must respect — getting any of them wrong produces the
+"jumbled stream of letters" symptom we had:
 
-This is a deliberately simplified decoder — no positioning, no colors,
-no italics, no pop-on/paint-on/roll-up distinction. Just a stream of
-plain text in the order the broadcaster sent it.
+  1. Odd parity per byte. Each 7-bit char has an 8th parity bit; the
+     decoder strips it (`b & 0x7F`) before interpretation. We treat
+     parity as advisory and don't reject pairs with bad parity, since
+     digital ATSC streams already have stronger FEC upstream.
+
+  2. Doubled control codes. Every CONTROL pair (byte 1 in 0x10–0x1F)
+     is transmitted TWICE on consecutive fields. The receiver must
+     suppress the duplicate. (Parity catches single-bit errors; doubling
+     catches whole-field dropouts. The cheap hardware couldn't do both
+     forward error correction and parity, so they doubled instead.)
+
+  3. Channel multiplexing in field 1. CC1 (primary, e.g. English) and
+     CC2 (secondary, e.g. Spanish) share the same byte stream. The
+     channel of every CONTROL code is encoded in bit 3 of byte 1:
+         0x10–0x17  →  CC1
+         0x18–0x1F  →  CC2
+     Printable bytes (0x20–0x7F) inherit the channel of the most
+     recent control code. THIS IS THE CRITICAL DEMUX RULE — without
+     it, CC2 text leaks into the CC1 stream as scrambled gibberish.
+
+Three caption display modes (every consumer TV implements all three):
+
+    pop-on  (RCL  0x14 0x20): broadcaster pre-builds an entire
+        caption in "non-displayed memory"; EOC (0x14 0x2F) atomically
+        swaps it onto the screen. Used for movies, dramas, sitcoms.
+
+    roll-up (RU2  0x14 0x25,
+             RU3  0x14 0x26,
+             RU4  0x14 0x27): each new line writes to the bottom row;
+        CR (0x14 0x2D) scrolls the previous rows up. Used for live
+        news, sports, weather — anything where captions stream in
+        real time.
+
+    paint-on (RDC 0x14 0x29): characters appear on screen as received,
+        no buffering. Rare; usually a transition between modes.
+
+For plain-text stdout output we don't need positioning, color, or
+italics — but we MUST honor the mode boundaries (EOC for pop-on, CR
+for roll-up) or pop-on captions print one character at a time as the
+broadcaster builds them off-screen, which looks exactly like the
+garbled output we had before this rewrite.
+
+Pipeline
+--------
+  1. TS demux: parse PAT (PID 0) → find PMT PID → parse PMT → find
+     video PID (stream_type 0x02). Collect that PID's payload bytes.
+     Demuxing matters: scanning the whole TS for 0x000001B2 hits
+     audio PIDs and PSI tables and produces false matches.
+  2. Inside video PES: scan for mpeg2video user_data_start_code
+     (0x00 0x00 0x01 0xB2) followed by ATSC identifier 'GA94' and
+     user_data_type_code 0x03 (cc_data).
+  3. cc_data entries: filter cc_type == 0 (NTSC field 1 = CC1/CC2),
+     strip parity bits, drop invalid pairs.
+  4. Run byte pairs through a CEA-608 channel/mode state machine
+     and emit complete lines on EOC / CR.
 """
 
 from __future__ import annotations
@@ -40,239 +88,403 @@ try:
 except Exception:
     pass
 
-# CEA-608 has minor differences from ASCII — these byte values map to
-# accented Spanish characters in the standard. Mapping pulled from
-# CEA-608-E table 5.
-CEA608_BASIC_MAP = {
-    0x2A: "á",
-    0x5C: "é",
-    0x5E: "í",
-    0x5F: "ó",
-    0x60: "ú",
-    0x7B: "ç",
-    0x7C: "÷",
-    0x7D: "Ñ",
-    0x7E: "ñ",
-    0x7F: "█",
+
+# CEA-608-E Annex C: standard ASCII 0x20–0x7F with a few overrides for
+# the accented chars common in Spanish-language captions.
+CEA608_BASIC_OVERRIDES = {
+    0x2A: "á", 0x5C: "é", 0x5E: "í", 0x5F: "ó", 0x60: "ú",
+    0x7B: "ç", 0x7C: "÷", 0x7D: "Ñ", 0x7E: "ñ", 0x7F: "█",
 }
 
-# Special characters introduced by 0x11/0x19 + 0x30..0x3F.
-CEA608_SPECIAL_CHARS = "®°½¿™¢£♪à èâêîôû"
+# Special characters: prefix 0x11 (CC1) / 0x19 (CC2), second byte 0x30–0x3F.
+CEA608_SPECIAL = "®°½¿™¢£♪à èâêîôû"
 
 
-def cc_decode_byte(b: int) -> str:
-    """Map a single CEA-608 character byte to a Unicode string.
+def decode_basic(b: int) -> str:
+    """Map a printable CEA-608 byte (parity stripped) to a Unicode glyph.
     Returns "" for non-printable bytes."""
-    b &= 0x7F  # strip parity
-    if b in CEA608_BASIC_MAP:
-        return CEA608_BASIC_MAP[b]
+    b &= 0x7F
+    if b in CEA608_BASIC_OVERRIDES:
+        return CEA608_BASIC_OVERRIDES[b]
     if 0x20 <= b <= 0x7F:
         return chr(b)
     return ""
 
 
 class CC608Decoder:
-    """Stateful CEA-608 byte-pair decoder.  Emits text fragments and
-    line breaks; the caller writes them to stdout."""
+    """Stateful CEA-608 decoder for field 1 (CC1 + CC2 multiplexed).
 
-    def __init__(self):
-        self.last_pair: tuple[int, int] | None = None
-        self.in_special = False  # awaiting second byte of an extended char
+    Mirrors a 1980s consumer line-21 decoder: pop-on captions appear
+    all at once on EOC, roll-up captions emit one line per CR.
+    """
 
-    def feed_pair(self, b1: int, b2: int) -> str:
-        """Feed one CEA-608 byte pair. Returns any text/control output."""
+    def __init__(self, write, target_channel: int = 1):
+        self.write = write
+        self.target = target_channel
+        self.channel = 1            # last channel selected by a control code
+        self.last_pair = None       # for doubled-control suppression
+        self.mode = "pop"           # 'pop' | 'roll' | 'paint'
+        self.buf_nd: list[str] = [] # non-displayed memory (pop-on accumulator)
+        self.row: list[str] = []    # current row (roll-up / paint-on staging)
+
+    def feed_pair(self, b1: int, b2: int) -> None:
         b1 &= 0x7F
         b2 &= 0x7F
-        # Skip null pairs
         if b1 == 0 and b2 == 0:
-            return ""
-        # Filter repeats — line-21 captions are sent twice for redundancy
-        # (both fields), but we only care about field 1, so duplicate
-        # control-code suppression here is mostly a guard against the
-        # dual-write of preamble address codes.
-        if (b1, b2) == self.last_pair and 0x10 <= b1 <= 0x1F:
-            self.last_pair = None
-            return ""
-        self.last_pair = (b1, b2)
+            return  # null pair: idle field, no caption data this frame
 
-        # Control codes: 0x10..0x1F (control or preamble first byte).
-        if 0x10 <= b1 <= 0x17:
-            # Channel-select control codes are paired with second byte
-            # in 0x20..0x7F (preamble address) or 0x20..0x2F (mid-row).
-            return self._handle_control(b1, b2)
-        if 0x18 <= b1 <= 0x1F:
-            # Channel-2 control codes — skip; we only show channel 1.
-            return ""
-        # Two printable characters back-to-back.
-        return cc_decode_byte(b1) + cc_decode_byte(b2)
+        is_control = 0x10 <= b1 <= 0x1F
+        if is_control:
+            # Doubled-control suppression. CEA-608 transmits every
+            # control pair twice on consecutive fields; the receiver
+            # discards the second. Reset on suppress so a true third
+            # repeat (rare, but legal) still gets through.
+            if (b1, b2) == self.last_pair:
+                self.last_pair = None
+                return
+            self.last_pair = (b1, b2)
+            # Channel bit lives in byte 1, regardless of opcode family.
+            self.channel = 2 if (b1 & 0x08) else 1
+            if self.channel == self.target:
+                self._handle_control(b1, b2)
+            return
 
-    def _handle_control(self, b1: int, b2: int) -> str:
-        # 0x14, 0x15 are channel-1 control prefix bytes. 0x16, 0x17 are
-        # extended/Spanish chars. 0x11 is special chars.
-        # Most-common channel-1 commands (0x14 + xx):
-        #   0x14 0x2C = EDM (erase displayed memory)
-        #   0x14 0x2D = CR  (carriage return — roll-up scroll)
-        #   0x14 0x2E = ENM (erase non-displayed memory)
-        #   0x14 0x2F = EOC (end of caption — swap)
-        #   0x14 0x25..0x27 = RU2/3/4 (roll-up start)
-        #   0x14 0x20 = RCL (resume caption loading — pop-on)
-        if b1 in (0x14, 0x15):
-            if b2 in (0x2C, 0x2D, 0x2F):  # EDM / CR / EOC → newline
-                return "\n"
-            return ""
-        # Extended Spanish/French characters: 0x12 0x20..0x3F or
-        # 0x13 0x20..0x3F.  Ignore for the basic English decoder.
-        if b1 in (0x12, 0x13):
-            return ""
-        # Special characters: 0x11 0x30..0x3F → one of CEA608_SPECIAL_CHARS.
+        # Printable bytes inherit the most-recent control's channel.
+        # Drop them entirely if we're parked on the wrong channel —
+        # this is what stops CC2 (Spanish) gibberish leaking in.
+        self.last_pair = None
+        if self.channel != self.target:
+            return
+        s = decode_basic(b1) + decode_basic(b2)
+        if s:
+            self._add_text(s)
+
+    def _handle_control(self, b1: int, b2: int) -> None:
+        # Misc control codes: 0x14 0x20–0x2F (also 0x15 as a duplicate
+        # field-2-disambiguation form some encoders emit).
+        if b1 in (0x14, 0x15) and 0x20 <= b2 <= 0x2F:
+            cmd = b2
+            if cmd == 0x20:                  # RCL: pop-on mode
+                self.mode = "pop"
+            elif cmd in (0x25, 0x26, 0x27):  # RU2/RU3/RU4: roll-up
+                self._enter_rollup()
+            elif cmd == 0x29:                # RDC: paint-on
+                self.mode = "paint"
+            elif cmd == 0x2C:                # EDM: erase displayed memory
+                # We don't render a screen, so "clearing display" is a
+                # no-op for stdout output. Anything pending in row /
+                # buf_nd belongs to the next caption, not what's onscreen.
+                pass
+            elif cmd == 0x2D:                # CR: carriage return
+                self._cr()
+            elif cmd == 0x2E:                # ENM: erase non-displayed
+                self.buf_nd.clear()
+            elif cmd == 0x2F:                # EOC: end of caption (swap)
+                self._eoc()
+            return
+
+        # Mid-row codes: 0x11 0x20–0x2F (color/italic/underline).
+        # They occupy one screen cell; emit a space so word boundaries
+        # survive style transitions like "<white>HELLO<yellow>WORLD".
+        if b1 == 0x11 and 0x20 <= b2 <= 0x2F:
+            self._add_text(" ")
+            return
+
+        # Special characters: 0x11 0x30–0x3F → ®°½¿™¢£♪ etc.
         if b1 == 0x11 and 0x30 <= b2 <= 0x3F:
             idx = b2 - 0x30
-            if 0 <= idx < len(CEA608_SPECIAL_CHARS):
-                return CEA608_SPECIAL_CHARS[idx]
-            return ""
-        # Mid-row codes (color/italic/underline) and preamble address
-        # codes — ignored for plain-text output.
-        return ""
+            if idx < len(CEA608_SPECIAL):
+                self._add_text(CEA608_SPECIAL[idx])
+            return
+
+        # Extended characters: 0x12 / 0x13 + 0x20–0x3F. The standard
+        # spec replaces the previously-written cell with an accented
+        # form; we'd need cursor tracking to do that right. Skip.
+        if b1 in (0x12, 0x13):
+            return
+
+        # Preamble Address Code: 0x10–0x17 with byte 2 in 0x40–0x7F.
+        # Sets row + indent + style. We don't track positioning, but
+        # a row change inside a caption needs a separator so words
+        # don't slam together: "ROW1TEXTROW2TEXT" → "ROW1TEXT ROW2TEXT".
+        if 0x10 <= b1 <= 0x17 and 0x40 <= b2 <= 0x7F:
+            if (self.mode == "pop" and self.buf_nd) or \
+               (self.mode != "pop" and self.row):
+                self._add_text(" ")
+            return
+
+        # Tab offsets (0x17 0x21–0x23, 0x1F 0x21–0x23) and other rare
+        # codes — ignored for plain text output.
+
+    def _enter_rollup(self) -> None:
+        # Switching from pop-on to roll-up: drop any half-built pop-on
+        # caption so it doesn't surface incorrectly on the next CR.
+        if self.mode == "pop":
+            self.buf_nd.clear()
+        self.mode = "roll"
+
+    def _add_text(self, s: str) -> None:
+        if not s:
+            return
+        if self.mode == "pop":
+            self.buf_nd.append(s)
+        elif self.mode == "paint":
+            # Paint-on: text appears as it's received. Stream straight
+            # to stdout, just like a real TV draws each cell.
+            self.write(s)
+        else:  # roll-up
+            self.row.append(s)
+
+    def _cr(self) -> None:
+        # Roll-up CR: finishes the current row and "scrolls" — we just
+        # emit the row.
+        if self.row:
+            line = "".join(self.row).strip()
+            if line:
+                self.write(line + "\n")
+            self.row.clear()
+
+    def _eoc(self) -> None:
+        # Pop-on EOC: the broadcaster has finished building the caption
+        # in non-displayed memory; swap it to "displayed" and emit the
+        # whole thing at once. This is the difference between captions
+        # appearing as readable lines vs. char-by-char gibberish.
+        if self.buf_nd:
+            text = "".join(self.buf_nd).strip()
+            if text:
+                self.write(text + "\n")
+            self.buf_nd.clear()
 
 
-def find_cc_data_in_userdata(blob: bytes, decoder: CC608Decoder,
-                               write) -> None:
-    """Scan a chunk of bytes for ATSC user-data sections that carry
-    cc_data, decode the byte pairs through `decoder`, and call `write`
-    with each emitted text fragment."""
+class TSDemux:
+    """Minimal MPEG-TS demuxer: just enough to find the video PID via
+    PAT → PMT and yield that PID's payload bytes. Without demuxing,
+    audio PIDs and PSI tables produce false 0x000001B2 matches that
+    feed garbage into the CEA-608 state machine.
+    """
+
+    SYNC = 0x47
+    PKT_LEN = 188
+
+    def __init__(self) -> None:
+        self.pmt_pid: int | None = None
+        self.video_pid: int | None = None
+
+    def feed(self, data: bytes):
+        """Process raw TS bytes; yield video-PID payload chunks."""
+        i = 0
+        n = len(data)
+        while i + self.PKT_LEN <= n:
+            if data[i] != self.SYNC:
+                i += 1
+                continue
+            payload = self._extract(data[i:i + self.PKT_LEN])
+            if payload:
+                yield payload
+            i += self.PKT_LEN
+
+    def _extract(self, pkt: bytes) -> bytes | None:
+        # TS hdr: sync(8) tei(1) pusi(1) tp(1) pid(13) tsc(2) afc(2) cc(4)
+        pusi = (pkt[1] >> 6) & 0x01
+        pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
+        afc = (pkt[3] >> 4) & 0x03
+        offset = 4
+        if afc & 0x02:  # adaptation field present
+            af_len = pkt[4]
+            offset = 5 + af_len
+        if not (afc & 0x01) or offset >= self.PKT_LEN:
+            return None
+        payload = pkt[offset:]
+
+        if pid == 0:
+            if pusi:
+                self._parse_pat(self._strip_ptr(payload))
+            return None
+        if self.pmt_pid is not None and pid == self.pmt_pid:
+            if pusi:
+                self._parse_pmt(self._strip_ptr(payload))
+            return None
+        if self.video_pid is not None and pid == self.video_pid:
+            return bytes(payload)
+        return None
+
+    @staticmethod
+    def _strip_ptr(payload: bytes) -> bytes:
+        if not payload:
+            return b""
+        ptr = payload[0]
+        return payload[1 + ptr:]
+
+    def _parse_pat(self, sec: bytes) -> None:
+        if len(sec) < 12 or sec[0] != 0x00:
+            return
+        section_len = ((sec[1] & 0x0F) << 8) | sec[2]
+        end = min(3 + section_len - 4, len(sec))  # exclude CRC32
+        i = 8
+        while i + 4 <= end:
+            program_num = (sec[i] << 8) | sec[i + 1]
+            pid = ((sec[i + 2] & 0x1F) << 8) | sec[i + 3]
+            if program_num != 0:  # 0 is the network PID, skip
+                self.pmt_pid = pid
+                return
+            i += 4
+
+    def _parse_pmt(self, sec: bytes) -> None:
+        if len(sec) < 12 or sec[0] != 0x02:
+            return
+        section_len = ((sec[1] & 0x0F) << 8) | sec[2]
+        end = min(3 + section_len - 4, len(sec))
+        prog_info_len = ((sec[10] & 0x0F) << 8) | sec[11]
+        i = 12 + prog_info_len
+        while i + 5 <= end:
+            stream_type = sec[i]
+            es_pid = ((sec[i + 1] & 0x1F) << 8) | sec[i + 2]
+            es_info_len = ((sec[i + 3] & 0x0F) << 8) | sec[i + 4]
+            if stream_type == 0x02:  # MPEG-2 video
+                self.video_pid = es_pid
+                return
+            i += 5 + es_info_len
+
+
+def scan_userdata(blob: bytes, decoder: CC608Decoder) -> int:
+    """Scan video-stream bytes for ATSC cc_data sections, feed cc_type==0
+    byte pairs to the decoder. Returns the offset just past the last
+    fully-consumed cc_data section so the caller can keep an unparsed
+    tail for the next round (handles section spans across chunks)."""
     pos = 0
     n = len(blob)
-    while pos < n - 8:
-        # Find the next mpeg2video user_data_start_code (0x00 0x00 0x01 0xB2).
+    last_consumed = 0
+    while pos + 8 < n:
         idx = blob.find(b"\x00\x00\x01\xB2", pos)
         if idx < 0:
-            return
+            return last_consumed
         i = idx + 4
+        # ATSC ATSC_user_data identifier "GA94"
         if i + 5 > n:
-            return
-        # ATSC ATSC_user_data: identifier "GA94" (0x47 0x41 0x39 0x34)
+            return last_consumed
         if blob[i:i + 4] != b"GA94":
             pos = idx + 4
             continue
         i += 4
-        # user_data_type_code: 0x03 = cc_data
         ud_type = blob[i]
         i += 1
-        if ud_type != 0x03:
+        if ud_type != 0x03:  # 0x03 == cc_data
             pos = idx + 4
             continue
-        # cc_data header: 1 byte: process_em_data_flag(1) +
-        #   process_cc_data_flag(1) + additional_data_flag(1) +
-        #   cc_count(5)
+        # cc_data header: process_em_data_flag(1) + process_cc_data_flag(1)
+        # + reserved(1) + cc_count(5)
         if i >= n:
-            return
-        hdr = blob[i]
+            return last_consumed
+        cc_count = blob[i] & 0x1F
         i += 1
-        cc_count = hdr & 0x1F
-        # 1 byte em_data (always 0xFF in ATSC)
-        i += 1
-        # cc_count × 3 bytes: marker_bits(5)+cc_valid(1)+cc_type(2),
-        #                     cc_data_1, cc_data_2
+        i += 1  # em_data byte (always 0xFF in ATSC)
         if i + cc_count * 3 > n:
-            return
+            return last_consumed
         for _ in range(cc_count):
             type_byte = blob[i]
-            cc_data_1 = blob[i + 1]
-            cc_data_2 = blob[i + 2]
+            cc1 = blob[i + 1]
+            cc2 = blob[i + 2]
             i += 3
             cc_valid = (type_byte >> 2) & 0x01
             cc_type = type_byte & 0x03
-            # cc_type 0 = NTSC field 1, 1 = NTSC field 2,
-            # 2/3 = DTVCC (CEA-708 fragments — ignored here).
+            # cc_type 0 = NTSC field 1 (CC1/CC2), 1 = NTSC field 2 (CC3/CC4),
+            # 2/3 = DTVCC (CEA-708 packet fragments — not handled here).
             if cc_valid and cc_type == 0:
-                out = decoder.feed_pair(cc_data_1, cc_data_2)
-                if out:
-                    write(out)
+                decoder.feed_pair(cc1, cc2)
         pos = i
+        last_consumed = i
+    return last_consumed
 
 
 def tail_follow(path: Path, chunk_size: int = 64 * 1024,
-                 startup_timeout: float = 30.0):
-    """Yield byte chunks from `path` as the file grows. Waits at startup
-    for the file to appear and to have at least chunk_size bytes."""
+                startup_timeout: float = 30.0):
+    """Yield byte chunks from `path` as the file grows. Waits for the
+    file to appear at startup."""
     deadline = time.time() + startup_timeout
     while not path.exists() and time.time() < deadline:
         time.sleep(0.5)
     if not path.exists():
         raise FileNotFoundError(f"{path} did not appear within "
-                                  f"{startup_timeout} s")
-    # Start near the end of the file so we get LIVE captions, not the
-    # backlog from a previous tune. ~256 KB back covers ~100 ms of TS
-    # which guarantees we land on a packet boundary.
+                                f"{startup_timeout} s")
     f = open(path, "rb")
     try:
+        # Start near the end so we get LIVE captions, not the backlog.
+        # 256 KB ≈ 100 ms of TS — guaranteed to land on a packet.
         size = path.stat().st_size
         f.seek(max(0, size - 256 * 1024))
-        # Align to next TS sync byte.
-        leftover = b""
+        first = True
         while True:
             chunk = f.read(chunk_size)
             if not chunk:
                 time.sleep(0.5)
                 continue
-            data = leftover + chunk
-            # Re-align to a TS sync if we just started.
-            if leftover == b"":
-                sync = data.find(b"\x47")
+            if first:
+                # Re-align to a TS sync byte on the first read so the
+                # demuxer doesn't waste packets resyncing.
+                sync = chunk.find(b"\x47")
                 if sync > 0:
-                    data = data[sync:]
-            yield data
-            # Hold last 1 KB as overlap so user_data start codes that
-            # straddle chunk boundaries still get parsed cleanly.
-            leftover = data[-1024:]
+                    chunk = chunk[sync:]
+                first = False
+            yield chunk
     finally:
         f.close()
 
 
-def main():
-    ap = argparse.ArgumentParser()
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description="Pure-Python CEA-608 closed-caption decoder.")
     ap.add_argument("ts_path", nargs="?",
-                     help="Path to live MPEG-TS (default: live.ts in the "
-                          "tv_live data dir)")
+                    help="Path to live MPEG-TS (default: tv_live's live.ts)")
+    ap.add_argument("--channel", type=int, default=1, choices=[1, 2],
+                    help="Which CEA-608 channel to emit (1=primary, 2=SAP). "
+                         "Default 1 (English).")
     args = ap.parse_args()
 
     if args.ts_path:
         path = Path(args.ts_path)
     else:
-        # Default to the tv_tuner data dir's live.ts.
-        path = Path(__file__).resolve().parent.parent / "data" / "tv_live" / "live.ts"
-        if not path.exists():
-            # Fallback: hunt nearby.
-            here = Path(__file__).resolve().parent
-            for cand in [here / "data" / "tv_live" / "live.ts",
-                         here.parent / "SDR_Agent_v2" / "data" / "tv_live" / "live.ts"]:
-                if cand.exists():
-                    path = cand
-                    break
+        here = Path(__file__).resolve().parent
+        candidates = [
+            here.parent / "data" / "tv_live" / "live.ts",
+            here / "data" / "tv_live" / "live.ts",
+            here.parent / "SDR_Agent_v2" / "data" / "tv_live" / "live.ts",
+        ]
+        path = next((c for c in candidates if c.exists()), candidates[0])
 
     print(f"[atsc_cc] reading captions from {path}", file=sys.stderr)
-    print("[atsc_cc] CEA-608 field 1 / channel 1 (English) only.",
+    print(f"[atsc_cc] CEA-608 field 1 / channel {args.channel} only.",
           file=sys.stderr)
-    print("[atsc_cc] If captions don't appear, the broadcaster may not "
-          "be transmitting them.\n", file=sys.stderr)
+    print("[atsc_cc] If captions don't appear, the broadcaster may not be "
+          "transmitting them.\n", file=sys.stderr)
 
-    decoder = CC608Decoder()
-    line_buf: list[str] = []
+    def write_text(s: str) -> None:
+        sys.stdout.write(s)
+        sys.stdout.flush()
 
-    def write_text(s: str):
-        # Roll-up captions stream characters then send a CR; pop-on/
-        # paint-on send EOC. Both surface as "\n" from the decoder.
-        # Buffer characters into a line, flush on newline.
-        if s == "\n":
-            if line_buf:
-                print("".join(line_buf).strip(), flush=True)
-                line_buf.clear()
-        else:
-            line_buf.append(s)
+    decoder = CC608Decoder(write_text, target_channel=args.channel)
+    demux = TSDemux()
+    video_buf = bytearray()
+    announced_video_pid = False
 
     try:
         for chunk in tail_follow(path):
-            find_cc_data_in_userdata(chunk, decoder, write_text)
+            for vp in demux.feed(chunk):
+                video_buf.extend(vp)
+            if (not announced_video_pid and demux.video_pid is not None):
+                print(f"[atsc_cc] locked video PID 0x{demux.video_pid:04X}",
+                      file=sys.stderr)
+                announced_video_pid = True
+            # Scan when there's enough to chew on; keep an overlap tail
+            # so cc_data sections that straddle chunks parse on the
+            # next pass.
+            if len(video_buf) >= 8192:
+                consumed = scan_userdata(bytes(video_buf), decoder)
+                if consumed > 0:
+                    del video_buf[:consumed]
+                # Cap the buffer if the broadcaster is sending no CCs,
+                # so memory usage stays bounded.
+                if len(video_buf) > 256 * 1024:
+                    del video_buf[:-1024]
     except KeyboardInterrupt:
         pass
     except FileNotFoundError as e:
