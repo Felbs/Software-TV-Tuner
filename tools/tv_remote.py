@@ -208,6 +208,13 @@ def kill_existing_tv_tuner():
         PID_PATH.unlink()
     except OSError:
         pass
+    # Belt-and-suspenders: taskkill /F /T sometimes misses children
+    # that were re-parented when the original parent died (e.g. tv_live
+    # spawned in a new console). Sweep for any tv_live / ffmpeg / ffplay
+    # that match our scripts and clean them up too. Without this, an
+    # orphan tv_live keeps the SDR open and the next tune crashes ~12s
+    # in when the OS finally reaps the orphan.
+    nuke_orphans()
     # Give the SDRplay driver enough time to fully release the device
     # before the next tv_live tries to open it.
     time.sleep(3)
