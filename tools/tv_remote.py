@@ -82,6 +82,91 @@ def kill_subprocess(proc: subprocess.Popen | None):
         pass
 
 
+def nuke_orphans():
+    """Scan for stuck Software TV Tuner processes from a crashed
+    previous session and kill them. The PID lockfile only knows
+    about the parent process; if that parent crashed, its children
+    (tv_live still holding the SDR, ffmpeg, ffplay) become orphans
+    that pin CPU and prevent a new scan from opening the device.
+
+    We identify orphans conservatively: only python.exe processes
+    whose command line references one of our scripts, plus any
+    ffmpeg/ffplay process whose command line includes the
+    distinctive pipe + decoder flags our pipeline uses. This avoids
+    nuking unrelated VLC / Plex / OBS ffmpeg instances."""
+    if sys.platform != "win32":
+        return 0
+    # Single PowerShell call gets every candidate's PID + command line.
+    ps_cmd = (
+        "Get-CimInstance Win32_Process -Filter "
+        "\"Name='python.exe' or Name='ffmpeg.exe' or Name='ffplay.exe'\" "
+        "| Select-Object ProcessId, Name, CommandLine "
+        "| ConvertTo-Json -Compress"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_cmd],
+            capture_output=True, text=True, timeout=15,
+        )
+    except Exception:
+        return 0
+    if result.returncode != 0 or not result.stdout.strip():
+        return 0
+    import json as _json
+    try:
+        items = _json.loads(result.stdout)
+    except _json.JSONDecodeError:
+        return 0
+    if isinstance(items, dict):
+        items = [items]
+    me = os.getpid()
+    target_pids = []
+    for it in items:
+        pid = it.get("ProcessId")
+        if not pid or int(pid) == me:
+            continue
+        name = (it.get("Name") or "").lower()
+        cmdline = it.get("CommandLine") or ""
+        cmdline_l = cmdline.lower()
+        is_ours = False
+        if name == "python.exe":
+            for marker in ("tv_tuner.py", "tv_live.py",
+                           "tv_live_softvit.py", "sdr_sweep.py",
+                           "tv_remote.py", "tv_player.py"):
+                if marker in cmdline_l:
+                    is_ours = True
+                    break
+        elif name in ("ffmpeg.exe", "ffplay.exe"):
+            # Distinctive flag combos used by tv_tuner's build_ffmpeg_cmd
+            # and spawn_ffplay. Avoids nuking unrelated ffmpeg jobs.
+            if (("-f mpegts -i pipe:0" in cmdline_l) or
+                ("tv_tuner" in cmdline_l) or
+                ("data\\tv_live" in cmdline_l) or
+                ("tv_live\\live.ts" in cmdline_l)):
+                is_ours = True
+        if is_ours:
+            target_pids.append(int(pid))
+    if not target_pids:
+        return 0
+    print(f"[remote] sweeping {len(target_pids)} stuck process(es) "
+          f"from a previous session...")
+    for pid in target_pids:
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                capture_output=True, timeout=5,
+            )
+        except Exception:
+            pass
+    # SDRplay needs a beat to fully release after a forced kill.
+    time.sleep(3)
+    try:
+        PID_PATH.unlink()
+    except OSError:
+        pass
+    return len(target_pids)
+
+
 def kill_existing_tv_tuner():
     """If there's a tv_tuner already running (e.g. from a separate
     PowerShell window or a previous remote pick), shut down it AND its
@@ -168,9 +253,14 @@ def resolve_channel(ans: str, rows: list[dict]) -> dict | None:
 
 def main() -> int:
     print(REMOTE_BANNER)
-    # We do NOT kill any tv_tuner that's already running — let whatever
-    # the user is currently watching keep playing until they pick a new
-    # channel. The kill happens lazily in the channel-pick handler.
+    # Sweep stuck-from-crashed-session processes: orphaned tv_live still
+    # holding the SDR, leftover ffmpeg/ffplay eating CPU. We do this
+    # only if the PID lockfile is missing or stale (suggesting a previous
+    # parent crashed without cleaning up its children); otherwise we
+    # assume a tv_tuner is legitimately playing right now and leave it
+    # alone until the user picks a new channel.
+    if not PID_PATH.exists():
+        nuke_orphans()
     scan = load_scan()
     if scan is None:
         print(f"\nNo scan found at {SCAN_PATH}.")
