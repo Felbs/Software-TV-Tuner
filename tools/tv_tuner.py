@@ -1461,6 +1461,18 @@ def expand_channels_from_scan(scan: dict) -> list[dict]:
                 virt = f"{psip_ch['major']}.{psip_ch['minor']}"
                 callsign = psip_ch.get("short_name", "") or ""
                 channel_description = psip_ch.get("description", "") or ""
+                # PSIP rarely carries the human-readable network name
+                # (NBC / CBS / Fox); the static table fills that gap so
+                # the picker reads "WTTG Fox" instead of just "WTTG-DT".
+                if info is not None:
+                    if sub_idx == 1 and info.get("network"):
+                        network = info["network"]
+                    elif sub_idx > 1:
+                        subs = info.get("subs", []) or []
+                        if sub_idx - 2 < len(subs):
+                            _v, sub_net = subs[sub_idx - 2]
+                            if sub_net:
+                                network = sub_net
                 evs = psip_events.get(str(psip_ch.get("source_id"))) or []
                 if find_current_event is not None:
                     cur = find_current_event(evs)
@@ -1643,20 +1655,37 @@ def print_scan_table(scan: dict) -> list[dict]:
         return []
     has_now = any(r.get("now_title") for r in rows)
 
+    # Lookup table for over-long network labels we want to abbreviate.
+    NET_ABBREV = {
+        "PBS Maryland": "PBS",
+        "Subscription": "Sub",
+        "Independent": "Ind",
+        "Telemundo": "Telem",
+        "MyNetTV": "MyNet",
+    }
+
     def name_str(r: dict) -> str:
         """Combine callsign + network when they're different and both
-        are useful labels — so 5.1 reads "WTTG-DT Fox" but 5.2 stays
+        are useful labels — so 5.1 reads "WTTG Fox" but 5.2 stays
         just "BUZZR" (because the sub-network IS the callsign-equivalent
-        for subchannels)."""
+        for subchannels). Trims to fit a 14-char column."""
         cs = (r["callsign"] or "").strip()
         net = (r.get("network") or "").strip()
+        net = NET_ABBREV.get(net, net)
         if not cs:
-            return net
+            return net[:14]
         if not net or net.upper() == cs.upper():
-            return cs
+            return cs[:14]
         # Strip "-DT" / "-HD" suffix from PSIP callsigns when joining.
         cs_clean = cs.replace("-DT", "").replace("-HD", "").strip()
-        return f"{cs_clean} {net}"
+        combined = f"{cs_clean} {net}"
+        if len(combined) <= 14:
+            return combined
+        # Still too long — truncate the network word.
+        room = 14 - len(cs_clean) - 1
+        if room < 2:
+            return cs_clean[:14]
+        return f"{cs_clean} {net[:room]}"
 
     print()
     if has_now:
