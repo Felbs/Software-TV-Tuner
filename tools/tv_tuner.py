@@ -840,6 +840,11 @@ def run_scan(region: dict | None = None,
         except Exception as e:
             print(f"[scan] phase-1 sweep failed ({e}); aborting.",
                   file=sys.stderr)
+            print("[scan] this is almost always 'no SDR detected' — "
+                  "either the SDR isn't plugged in, the user lacks USB "
+                  "permissions, or the SoapySDR driver for your device "
+                  "isn't installed.\n"
+                  "[scan] verify with:  SoapySDRUtil --probe", file=sys.stderr)
             return {"scanned_at": datetime.now().isoformat(timespec="seconds"),
                     "channels": [], "error": str(e)}
         time.sleep(3)  # let SDR fully release before phase 2
@@ -1701,6 +1706,23 @@ def print_scan_table(scan: dict) -> list[dict]:
         print("(scan.json contains no locked channels — try --scan again)")
         return []
     has_now = any(r.get("now_title") for r in rows)
+    all_undetected = all(r.get("not_detected") for r in rows)
+    if all_undetected:
+        # Be loud about the fact that nothing was actually detected so
+        # the user understands the names below come from the static
+        # tools/default_stations.py table, not from RF metadata.
+        err = scan.get("error")
+        if err:
+            print()
+            print(f"  ⚠  Phase-1 RF sweep failed: {err}")
+            print(f"  ⚠  Verify your SDR with: SoapySDRUtil --probe")
+        print()
+        print("  No channels were detected on RF — listing the static")
+        print(f"  default station table for {scan.get('region_label', 'your region')}.")
+        print("  These names come from tools/default_stations.py, not from")
+        print("  PSIP/EIT (which need a successful tune to populate).")
+        print("  Edit that file to match your local DMA, fix your SDR, then")
+        print("  re-scan with the 's' option or `python tools/tv_tuner.py --scan`.")
 
     # Lookup table for over-long network labels we want to abbreviate.
     NET_ABBREV = {

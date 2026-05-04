@@ -29,9 +29,16 @@ fi
 echo "[bootstrap] building gr-atscplus OOT module..."
 mkdir -p "$HERE/gr-atscplus/build"
 cd "$HERE/gr-atscplus/build"
-cmake .. > cmake.log 2>&1
-make -j"$(nproc)" 2>&1 | tail -10
-sudo make install
+# Clean stale CMake cache so a re-run picks up renames / new files in
+# the source tree (e.g. the cmake/Modules/*.cmake config files).
+rm -rf CMakeCache.txt CMakeFiles
+cmake .. 2>&1 | tee cmake.log
+# Use PIPESTATUS to surface the build's exit code through tee.
+make -j"$(nproc)" 2>&1 | tee build.log | tail -20
+test "${PIPESTATUS[0]}" -eq 0 || \
+    { echo "[bootstrap] make failed — see gr-atscplus/build/build.log"; exit 1; }
+sudo make install || \
+    { echo "[bootstrap] make install failed"; exit 1; }
 sudo ldconfig
 
 # ── 3. Verify the new blocks are importable ───────────────────────

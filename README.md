@@ -69,11 +69,34 @@ chmod +x bootstrap.sh && ./bootstrap.sh
 python3 tools/tv_tuner.py
 ```
 
-If you have an SDRplay device, install the [SDRplay API for Linux
-v3](https://www.sdrplay.com/api/) before running `bootstrap.sh` —
-it drops a `.so` into `/usr/local/lib` that `soapysdr-module-all`
-binds to. RTL-SDR, HackRF, BladeRF, and other SoapySDR devices
-work out of the box from the apt packages above.
+If you have an SDRplay device, install the SDRplay drivers (in
+this order; bootstrap doesn't do this for you because each step
+needs you to accept a vendor EULA):
+
+```bash
+# 1. SDRplay API v3 (the kernel-side driver, ~30 MB)
+wget https://www.sdrplay.com/software/SDRplay_RSP_API-Linux-3.15.2.run
+chmod +x SDRplay_RSP_API-Linux-3.15.2.run
+sudo ./SDRplay_RSP_API-Linux-3.15.2.run
+# Make sure the daemon is running:
+sudo systemctl enable --now sdrplay
+
+# 2. SoapySDRPlay3 (the SoapySDR module that bridges API v3 → SoapySDR)
+sudo apt-get install -y libsoapysdr-dev
+git clone https://github.com/pothosware/SoapySDRPlay3.git
+cd SoapySDRPlay3 && mkdir build && cd build
+cmake .. && make -j"$(nproc)" && sudo make install && sudo ldconfig
+cd ../..
+
+# 3. Verify
+SoapySDRUtil --probe   # should list your RSPdx / RSP1A / etc.
+```
+
+RTL-SDR, HackRF, BladeRF, and other SoapySDR devices work out of
+the box from the apt packages installed by `bootstrap.sh`. For any
+SDR, run `SoapySDRUtil --probe` to confirm the device is visible
+before launching `tv_tuner.py` — the channel scan fails fast with a
+"phase-1 sweep failed" message if no SDR is reachable.
 
 For a separate window per stream (so the picker stays clean), make
 sure one of `gnome-terminal`, `konsole`, `xfce4-terminal`, or
@@ -83,8 +106,13 @@ the streaming output inline — usable, just less pretty.
 
 The interactive picker shows every channel in your DMA grouped by RF
 frequency, with on-now show titles, ratings, and signal strength
-pulled live from PSIP / EIT. The default channel table covers
-DC/Baltimore — edit `tools/default_stations.py` for your region.
+pulled live from PSIP / EIT after a successful scan. **Before** the
+first scan succeeds (or if no SDR is plugged in), the picker falls
+back to a **static table** in `tools/default_stations.py` so you
+have something to look at — these names are hardcoded, not scraped
+from the air. The default table covers DC/Baltimore; edit it for
+your DMA. Real PSIP/EIT data (live show titles, ratings, signal %)
+populates only after the SDR successfully tunes a station.
 
 ## Run
 
