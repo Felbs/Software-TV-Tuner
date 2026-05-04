@@ -1846,6 +1846,7 @@ def interactive_pick(cfg: dict):
         "rf": rf, "program": prog, "callsign": call,
         "play": play, "stream_url": stream_url,
         "record_path": record_path,
+        "not_detected": bool(r.get("not_detected")),
     }
 
 
@@ -2149,7 +2150,8 @@ def run_pipeline(rf: int, callsign: str, play: bool,
                  stream_url: str | None, record_path: Path | None,
                  dry_run: bool = False, program: int = 1,
                  program_is_index: bool = True,
-                 player: str = "ffplay", viterbi: str = "stock") -> int:
+                 player: str = "ffplay", viterbi: str = "stock",
+                 fast_fail: bool = False) -> int:
     """
     `program_is_index` distinguishes the two callers:
       * CLI (`--rf X --program N`): user types a 1-based subchannel index
@@ -2158,6 +2160,12 @@ def run_pipeline(rf: int, callsign: str, play: bool,
       * Picker: row already has the broadcaster's program_id from PSIP.
         Pass it through directly — no probe-translate, since the user's
         already at the canonical PSIP-defined value.
+
+    `fast_fail` shortens the lock-acquisition retry loop for known-weak
+    "manual tune" picks (channels the scan didn't detect). Default 6
+    retries × 12 s ≈ 72 s of waiting before giving up; in fast_fail we
+    do 1 attempt at 8 s so the user gets a quick "can't tune this from
+    here" answer.
     """
     # The 'magic' player reads live.ts directly and decodes with decoupled
     # audio/video clocks, so audio keeps playing while video holds on a drift
@@ -2380,9 +2388,12 @@ def run_pipeline(rf: int, callsign: str, play: bool,
         # Convergence watchdog: the atscplus long equalizer locks
         # probabilistically. Spawn tv_live, wait, sample PAT count;
         # if convergence is bad, kill and retry. Up to MAX_RETRIES tries.
-        MAX_RETRIES = 6
-        CONVERGENCE_WINDOW_SEC = 12.0
+        MAX_RETRIES = 1 if fast_fail else 6
+        CONVERGENCE_WINDOW_SEC = 8.0 if fast_fail else 12.0
         MIN_GOOD_PAT = 5
+        if fast_fail:
+            print(f"[tv_tuner] manual-tune attempt for an undetected "
+                  f"channel — single 8 s try, no retries.")
         for attempt in range(1, MAX_RETRIES + 1):
             state.tv_proc = spawn_tv_live(rf, tv_log_fh, viterbi=viterbi)
             print(f"[tv_tuner] tv_live PID={state.tv_proc.pid} "
@@ -2395,7 +2406,14 @@ def run_pipeline(rf: int, callsign: str, play: bool,
                 if attempt < MAX_RETRIES:
                     time.sleep(2)
                     continue
-                print("[tv_tuner] giving up — check tv_live log:", tv_log)
+                if fast_fail:
+                    print(f"[tv_tuner] couldn't tune RF {rf} {callsign} "
+                          f"from this antenna — signal too weak. "
+                          f"(Try a mast LNA or a directional Yagi pointed "
+                          f"at the transmitter.)")
+                else:
+                    print("[tv_tuner] giving up — check tv_live log:",
+                          tv_log)
                 shutdown()
                 return 2
             t0 = time.time()
@@ -2677,6 +2695,7 @@ def main(argv: list[str] | None = None) -> int:
                             dry_run=False,
                             program=choice["program"],
                             program_is_index=False,  # picker has real PSIP id
+                            fast_fail=choice.get("not_detected", False),
                             player=args.player,
                             viterbi=args.viterbi)
 
