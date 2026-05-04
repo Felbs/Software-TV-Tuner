@@ -35,7 +35,7 @@ sys.path.insert(0, str(HERE))
 # identical between the picker and the remote.
 from tv_tuner import (  # noqa: E402
     load_scan, print_scan_table, expand_channels_from_scan,
-    PYTHON_EXE, NEW_PROCESS_GROUP, SCAN_PATH,
+    PYTHON_EXE, NEW_PROCESS_GROUP, SCAN_PATH, PID_PATH,
 )
 
 TV_TUNER_PY = HERE / "tv_tuner.py"
@@ -44,21 +44,20 @@ TV_TUNER_PY = HERE / "tv_tuner.py"
 REMOTE_BANNER = r"""
    .   *   ✦   .   *   .   ✦   *   .   *   ✦   .   *   .   *
 
-      ╔═══════════════════════════╗              ┌─────────┐
-      ║                           ║       ★      │   ⏻     │
-   *  ║   SOFTWARE TV REMOTE      ║              ├─────────┤
-      ║                           ║       .      │ 1  2  3 │       *
-      ╚═══════════════════════════╝              │ 4  5  6 │
-                                                  │ 7  8  9 │
-   ✦                  by                          │    0    │    ✦
-                                                  ├─────────┤
-                                                  │   ▲     │
-   .   *   .   ✦   *   .   *   .   ✦              │ ◀  ●  ▶ │       *
-                                                  │   ▼     │
-                                                  ├─────────┤
-                                                  │  vol ch │
-       *   .   *   ✦   *   .   *   ✦   .   *  .   └─────────┘   .
-                                                    F E L B S
+      ╔═══════════════════════════╗            ┌─────────┐
+      ║                           ║       ★    │    ⏻    │
+   *  ║   SOFTWARE TV REMOTE      ║            ├─────────┤
+      ║                           ║       .    │  1 2 3  │      *
+      ╚═══════════════════════════╝            │  4 5 6  │
+                                                │  7 8 9  │
+   ✦                 by Felbs                   │    0    │   ✦
+                                                ├─────────┤
+                                                │    ▲    │
+   .   *   .   ✦   *   .   *   .   ✦            │  ◀ ● ▶  │      *
+                                                │    ▼    │
+                                                ├─────────┤
+                                                │ vol  ch │
+       *   .   *   ✦   *   .   *   ✦   .   *  . └─────────┘  *
 """
 
 
@@ -82,16 +81,69 @@ def kill_subprocess(proc: subprocess.Popen | None):
         pass
 
 
+def kill_existing_tv_tuner():
+    """If there's a tv_tuner already running (e.g. from a separate
+    PowerShell window), shut it down so the remote owns the only TV
+    pipeline. Reads ~/.tv_tuner/tv_tuner.pid which tv_tuner writes
+    when run_pipeline starts and clears on graceful exit."""
+    if not PID_PATH.exists():
+        return
+    try:
+        pid = int(PID_PATH.read_text(encoding="utf-8").strip())
+    except (ValueError, OSError):
+        return
+    if pid == os.getpid():
+        return
+    try:
+        # Probe the PID — os.kill(pid, 0) raises if it's gone.
+        if sys.platform == "win32":
+            import ctypes
+            PROCESS_TERMINATE = 0x0001
+            PROCESS_QUERY_INFORMATION = 0x0400
+            handle = ctypes.windll.kernel32.OpenProcess(
+                PROCESS_TERMINATE | PROCESS_QUERY_INFORMATION, False, pid)
+            if not handle:
+                # Process is gone; clear stale lockfile.
+                try:
+                    PID_PATH.unlink()
+                except OSError:
+                    pass
+                return
+            print(f"[remote] closing existing tv_tuner (PID {pid})...")
+            ctypes.windll.kernel32.TerminateProcess(handle, 1)
+            ctypes.windll.kernel32.CloseHandle(handle)
+        else:
+            os.kill(pid, signal.SIGTERM)
+            print(f"[remote] closing existing tv_tuner (PID {pid})...")
+        # Wait for SDR + TV window to actually release.
+        for _ in range(20):
+            if not PID_PATH.exists():
+                break
+            time.sleep(0.25)
+        try:
+            PID_PATH.unlink()
+        except OSError:
+            pass
+        # Extra grace for SDR driver release after a force-kill.
+        time.sleep(2)
+    except Exception as e:
+        print(f"[remote] couldn't kill PID {pid}: {e}")
+
+
 def launch_channel(rf: int, program: int) -> subprocess.Popen:
     """Spawn `tv_tuner.py --rf X --program Y` for the given channel.
     Returns a Popen handle — caller is responsible for killing it
     before launching another."""
+    # `--program-id` tells tv_tuner the value is the canonical PSIP
+    # program_id, not a 1-based subchannel index — so it skips the
+    # probe_program_id translation that would otherwise pick the wrong
+    # subchannel (e.g. WTTG-DT 5.1's program_id is 3, not 1).
     cmd = [
         PYTHON_EXE, "-u", str(TV_TUNER_PY),
-        "--rf", str(rf), "--program", str(program),
+        "--rf", str(rf), "--program-id", str(program),
         "--player", "ffplay",
     ]
-    print(f"[remote] spawning: tv_tuner --rf {rf} --program {program}")
+    print(f"[remote] spawning: tv_tuner --rf {rf} --program-id {program}")
     return subprocess.Popen(
         cmd,
         creationflags=NEW_PROCESS_GROUP,
@@ -117,6 +169,9 @@ def resolve_channel(ans: str, rows: list[dict]) -> dict | None:
 
 def main() -> int:
     print(REMOTE_BANNER)
+    # Shut down any tv_tuner running from a previous session so we own
+    # the only TV pipeline.
+    kill_existing_tv_tuner()
     scan = load_scan()
     if scan is None:
         print(f"\nNo scan found at {SCAN_PATH}.")

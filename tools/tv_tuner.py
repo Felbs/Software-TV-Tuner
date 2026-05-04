@@ -59,6 +59,25 @@ LIVE_TS = HERE / "data" / "tv_live" / "live.ts"
 CONFIG_PATH = HERE / "tv_tuner_config.json"
 RECORD_DIR = HERE / "recordings"
 SCAN_PATH = Path(os.path.expanduser("~")) / ".tv_tuner" / "scan.json"
+# tv_remote.py reads this PID file on startup so it can shut down any
+# tv_tuner left running from a previous session (instead of opening a
+# second TV window). Cleared on graceful shutdown.
+PID_PATH = Path(os.path.expanduser("~")) / ".tv_tuner" / "tv_tuner.pid"
+
+
+def _write_pid_file():
+    try:
+        PID_PATH.parent.mkdir(parents=True, exist_ok=True)
+        PID_PATH.write_text(str(os.getpid()), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _clear_pid_file():
+    try:
+        PID_PATH.unlink()
+    except (FileNotFoundError, OSError):
+        pass
 
 # tv_live needs the radioconda Python (for gr-atscplus + soapy). Override
 # with $RADIOCONDA_PY if your install lives somewhere other than the
@@ -2235,6 +2254,10 @@ def run_pipeline(rf: int, callsign: str, play: bool,
         print("[tv_tuner] no outputs selected (no --play, --stream, --record)."
               " Pipeline will run with a /dev/null sink.")
 
+    # Record our PID so tv_remote.py can find and close us when the
+    # user picks a new channel. Cleared in the shutdown handler below.
+    _write_pid_file()
+
     log_dir = HERE / "data" / "tv_live"
     log_dir.mkdir(parents=True, exist_ok=True)
     tv_log = log_dir / "tv_tuner.tv_live.log"
@@ -2585,6 +2608,7 @@ def run_pipeline(rf: int, callsign: str, play: bool,
                 try: fh.close()
                 except OSError: pass
 
+    _clear_pid_file()
     print("[tv_tuner] clean exit.")
     return 0
 
@@ -2600,8 +2624,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--rf", type=int, default=None,
                    help="RF channel to tune (skips interactive picker)")
     p.add_argument("--program", type=int, default=1,
-                   help="ATSC program/sub-channel number to play (1 = main, "
-                        "2 = .2 sub, 3 = .3 sub, ...). Used with --rf.")
+                   help="ATSC sub-channel index, 1-based (1 = main, 2 = .2 "
+                        "sub, 3 = .3 sub, ...). The actual PMT program_id "
+                        "is looked up via probe_program_id at runtime.")
+    p.add_argument("--program-id", type=int, default=None,
+                   help="PSIP-canonical program_id to play. Skips the "
+                        "1-based-index translation — for tv_remote.py "
+                        "and other callers that already know the real id.")
     p.add_argument("--player", choices=["magic", "ffplay"], default="ffplay",
                    help="Playback engine. 'ffplay' (default) uses ffmpeg "
                         "re-encode + ffplay — single window, simpler UX. "
@@ -2735,7 +2764,10 @@ def main(argv: list[str] | None = None) -> int:
                             play=play, stream_url=stream_url,
                             record_path=record_path,
                             dry_run=args.dry_run,
-                            program=args.program,
+                            program=(args.program_id
+                                     if args.program_id is not None
+                                     else args.program),
+                            program_is_index=(args.program_id is None),
                             player=args.player,
                             viterbi=args.viterbi)
     else:
