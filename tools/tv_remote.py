@@ -45,19 +45,20 @@ REMOTE_BANNER = r"""
    .   *   ✦   .   *   .   ✦   *   .   *   ✦   .   *   .   *
 
       ╔═══════════════════════════╗            ┌─────────┐
-      ║                           ║       ★    │    ⏻    │
-   *  ║   SOFTWARE TV REMOTE      ║            ├─────────┤
-      ║                           ║       .    │  1 2 3  │      *
-      ╚═══════════════════════════╝            │  4 5 6  │
+      ║                           ║      ★     │   (O)   │
+   *  ║   SOFTWARE TV REMOTE      ║            ├─────────┤      *
+      ║                           ║      .     │  1 2 3  │
+      ╚═══════════════════════════╝            │  4 5 6  │   ✦
                                                 │  7 8 9  │
-   ✦                 by Felbs                   │    0    │   ✦
-                                                ├─────────┤
-                                                │    ▲    │
-   .   *   .   ✦   *   .   *   .   ✦            │  ◀ ● ▶  │      *
-                                                │    ▼    │
-                                                ├─────────┤
-                                                │ vol  ch │
-       *   .   *   ✦   *   .   *   ✦   .   *  . └─────────┘  *
+   ✦       ___                                  │    0    │
+          ( o o )         *                     ├─────────┤      *
+   .       \ - /                                │   /^\   │
+          _/ | \_                               │ < ( ) > │
+   *     /       \           .                  │   \v/   │
+         |  ~~~  |                              ├─────────┤   ✦
+   .     \_______/      ✦                       │ vol  ch │
+                                                └─────────┘     *
+       *   .   *   ✦   *   .   *   ✦   .   *   .   ✦   .   *
 """
 
 
@@ -83,51 +84,49 @@ def kill_subprocess(proc: subprocess.Popen | None):
 
 def kill_existing_tv_tuner():
     """If there's a tv_tuner already running (e.g. from a separate
-    PowerShell window), shut it down so the remote owns the only TV
-    pipeline. Reads ~/.tv_tuner/tv_tuner.pid which tv_tuner writes
-    when run_pipeline starts and clears on graceful exit."""
+    PowerShell window or a previous remote pick), shut down it AND its
+    children — tv_live, ffmpeg, ffplay — so the SDR is fully released
+    before we spawn a fresh tv_tuner. Reads ~/.tv_tuner/tv_tuner.pid.
+
+    Uses Windows `taskkill /F /T /PID` because TerminateProcess on the
+    parent leaves grandchildren (tv_live holding the SDR, ffmpeg,
+    ffplay) orphaned — the next tv_tuner then can't open the SDR and
+    crashes a few seconds in. /T terminates the whole process tree."""
     if not PID_PATH.exists():
-        return
+        return False
     try:
         pid = int(PID_PATH.read_text(encoding="utf-8").strip())
     except (ValueError, OSError):
-        return
+        return False
     if pid == os.getpid():
-        return
+        return False
+    print(f"[remote] closing existing tv_tuner (PID {pid}) and children...")
     try:
-        # Probe the PID — os.kill(pid, 0) raises if it's gone.
         if sys.platform == "win32":
-            import ctypes
-            PROCESS_TERMINATE = 0x0001
-            PROCESS_QUERY_INFORMATION = 0x0400
-            handle = ctypes.windll.kernel32.OpenProcess(
-                PROCESS_TERMINATE | PROCESS_QUERY_INFORMATION, False, pid)
-            if not handle:
-                # Process is gone; clear stale lockfile.
-                try:
-                    PID_PATH.unlink()
-                except OSError:
-                    pass
-                return
-            print(f"[remote] closing existing tv_tuner (PID {pid})...")
-            ctypes.windll.kernel32.TerminateProcess(handle, 1)
-            ctypes.windll.kernel32.CloseHandle(handle)
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                capture_output=True, timeout=10,
+            )
         else:
             os.kill(pid, signal.SIGTERM)
-            print(f"[remote] closing existing tv_tuner (PID {pid})...")
-        # Wait for SDR + TV window to actually release.
-        for _ in range(20):
-            if not PID_PATH.exists():
-                break
-            time.sleep(0.25)
-        try:
-            PID_PATH.unlink()
-        except OSError:
-            pass
-        # Extra grace for SDR driver release after a force-kill.
-        time.sleep(2)
     except Exception as e:
-        print(f"[remote] couldn't kill PID {pid}: {e}")
+        print(f"[remote] couldn't kill tree for PID {pid}: {e}")
+        return False
+    # Wait until the lockfile is cleared (tv_tuner removes it on exit)
+    # OR a few seconds have passed (taskkill /F is forced — lockfile
+    # may not get cleaned).
+    for _ in range(20):
+        if not PID_PATH.exists():
+            break
+        time.sleep(0.25)
+    try:
+        PID_PATH.unlink()
+    except OSError:
+        pass
+    # Give the SDRplay driver enough time to fully release the device
+    # before the next tv_live tries to open it.
+    time.sleep(3)
+    return True
 
 
 def launch_channel(rf: int, program: int) -> subprocess.Popen:
@@ -169,9 +168,9 @@ def resolve_channel(ans: str, rows: list[dict]) -> dict | None:
 
 def main() -> int:
     print(REMOTE_BANNER)
-    # Shut down any tv_tuner running from a previous session so we own
-    # the only TV pipeline.
-    kill_existing_tv_tuner()
+    # We do NOT kill any tv_tuner that's already running — let whatever
+    # the user is currently watching keep playing until they pick a new
+    # channel. The kill happens lazily in the channel-pick handler.
     scan = load_scan()
     if scan is None:
         print(f"\nNo scan found at {SCAN_PATH}.")
@@ -214,9 +213,14 @@ def main() -> int:
                 print(f"  ! {r['virtual']} {r['callsign']} wasn't "
                       f"detected by the last scan — tv_tuner will try "
                       f"and likely fail (signal too weak at this antenna).")
+            # Two cleanup paths: (a) we own the current subprocess and
+            # can terminate-and-wait it cleanly; (b) some OTHER tv_tuner
+            # is running (the user opened the remote while a TV was
+            # already playing) — find it via the PID lockfile and force-
+            # kill its whole process tree so the SDR is fully released.
             kill_subprocess(current)
             current = None
-            time.sleep(2)  # Let SDR fully release before re-opening.
+            kill_existing_tv_tuner()
             try:
                 current = launch_channel(r["rf"], r["program"])
                 last_label = (f"{r['virtual']} {r['callsign']}"
