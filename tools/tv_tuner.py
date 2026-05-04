@@ -1539,6 +1539,69 @@ def expand_channels_from_scan(scan: dict) -> list[dict]:
             "weak": True,
         })
 
+    # Gap-fill: any station in the static table whose virtual major
+    # channel isn't already represented in `rows` gets a "not detected"
+    # placeholder. The user can still pick it from the menu — tv_live
+    # will attempt to tune that RF; if the signal is below decode floor
+    # they'll see the lock fail, but at least the channel is visible.
+    stations, _ = _load_stations()
+    seen_majors = set()
+    for r in rows:
+        try:
+            seen_majors.add(int(r["virtual"].split(".")[0]))
+        except (ValueError, AttributeError):
+            pass
+    for entry in stations:
+        rf_, virtual, callsign, network, city, subs = entry
+        try:
+            major = int(virtual.split(".")[0])
+        except (ValueError, AttributeError):
+            continue
+        if major in seen_majors:
+            continue
+        # Add the main channel.
+        rows.append({
+            "rf": rf_,
+            "virtual": virtual,
+            "callsign": callsign,
+            "network": network,
+            "city": city,
+            "program": 1,
+            "is_sub": False,
+            "label": f"{callsign} {network}".strip(),
+            "quality": "not detected — manual tune",
+            "service_name": "",
+            "now_title": "",
+            "now_remaining_sec": 0,
+            "now_rating": "",
+            "now_description": "",
+            "channel_description": "",
+            "audio_streams": [],
+            "not_detected": True,
+        })
+        # Subchannels too.
+        for sub_virt, sub_name in subs:
+            rows.append({
+                "rf": rf_,
+                "virtual": sub_virt,
+                "callsign": callsign,
+                "network": sub_name,
+                "city": city,
+                "program": 1,
+                "is_sub": True,
+                "label": f"{callsign} {sub_name}",
+                "quality": "not detected — manual tune",
+                "service_name": "",
+                "now_title": "",
+                "now_remaining_sec": 0,
+                "now_rating": "",
+                "now_description": "",
+                "channel_description": "",
+                "audio_streams": [],
+                "not_detected": True,
+            })
+        seen_majors.add(major)
+
     # Sort by virtual major.minor when available so 4.1, 4.2, 4.3, 4.4
     # group naturally above 5.1, 7.1, etc.
     def sort_key(r):
@@ -1573,7 +1636,9 @@ def print_scan_table(scan: dict) -> list[dict]:
         major = r["virtual"].split(".")[0] if "." in r["virtual"] else None
         if last_major is not None and major != last_major:
             print(f"       {'─' * 65}")
-        if r.get("weak"):
+        if r.get("not_detected"):
+            marker = "? "  # known station, not detected this scan
+        elif r.get("weak"):
             marker = "≈ "  # weak signal marker
         else:
             marker = "└▸" if r["is_sub"] else "★ "
