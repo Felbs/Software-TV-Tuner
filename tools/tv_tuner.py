@@ -2728,22 +2728,20 @@ def _launch_streaming(rf: int, program: int, captions: bool) -> subprocess.Popen
 
 def _spawn_cc_window() -> subprocess.Popen | None:
     """Open a side console that reads the live TS and prints incoming
-    closed-caption text. Uses `ccextractor` (CCExtractor 0.94+) which
-    handles ATSC CEA-608 / 708 cleanly. Returns None silently if
-    ccextractor isn't on PATH — captions are an opt-in feature, the
-    player still works without them.
+    closed-caption text.
 
-    On Windows we install ccextractor from https://ccextractor.org or
-    via `winget install ccextractor` / `scoop install ccextractor`."""
+    Two backends, tried in this order:
+      1. `ccextractor` if installed on PATH — handles both CEA-608 and
+         CEA-708 cleanly. `winget install ccextractor` to add.
+      2. Bundled pure-Python decoder (tools/atsc_cc.py) — CEA-608 only
+         (which is what 99% of US ATSC actually broadcasts), no
+         external deps. Always available.
+
+    Either way, captions appear in their own console window beside the
+    TV. Caller is responsible for terminating the returned Popen at
+    shutdown."""
     import shutil
-    cc_exe = shutil.which("ccextractor") or shutil.which("ccextractorwin")
-    if not cc_exe:
-        print("[tv_tuner] --cc requested but `ccextractor` is not on PATH.")
-        print("           Install from https://ccextractor.org "
-              "(or `winget install ccextractor`).")
-        return None
-    # Wait briefly for live.ts to start growing so ccextractor has
-    # something to read.
+    # Wait briefly for live.ts to start growing.
     deadline = time.time() + 30
     while time.time() < deadline:
         try:
@@ -2755,11 +2753,17 @@ def _spawn_cc_window() -> subprocess.Popen | None:
     if not LIVE_TS.exists():
         print("[tv_tuner] --cc: live.ts didn't start; skipping captions.")
         return None
-    # `-stdout -out=ttxt` prints rolling caption text as it arrives,
-    # line by line — perfect for a side console. `-12` = CEA-608
-    # channel 1 (English primary).
-    print(f"[tv_tuner] launching ccextractor side window for captions...")
-    cmd = [cc_exe, "-stdout", "-out=ttxt", "-12", str(LIVE_TS)]
+
+    cc_exe = shutil.which("ccextractor") or shutil.which("ccextractorwin")
+    if cc_exe:
+        print(f"[tv_tuner] CC: launching ccextractor side window...")
+        cmd = [cc_exe, "-stdout", "-out=ttxt", "-12", str(LIVE_TS)]
+    else:
+        # Pure-Python fallback. Always available — ships with the repo.
+        print(f"[tv_tuner] CC: launching bundled CEA-608 decoder "
+              f"(install ccextractor for CEA-708 + better quality).")
+        atsc_cc_py = Path(__file__).resolve().parent / "atsc_cc.py"
+        cmd = [PYTHON_EXE, "-u", str(atsc_cc_py), str(LIVE_TS)]
     return subprocess.Popen(
         cmd,
         creationflags=NEW_PROCESS_GROUP | NEW_CONSOLE_FLAG,
