@@ -1664,7 +1664,7 @@ def interactive_pick(cfg: dict):
     while True:
         try:
             ans = input(
-                f"Pick channel # [1-{len(rows)}], "
+                f"Pick channel # [1-{len(rows)}] OR virtual ch (e.g. 5.1), "
                 f"i N=info, r=re-scan, q=quit: "
             ).strip().lower()
         except EOFError:
@@ -1686,6 +1686,39 @@ def interactive_pick(cfg: dict):
             except (ValueError, IndexError):
                 print("  invalid info command (use 'i 5' or 'info 5')")
             continue
+        # Virtual channel input: "5.1", "4", "44.2", etc. — stable across
+        # scans (row numbers shift when channels drop, virtual numbers
+        # don't). For "4" alone, match the major channel's main subchannel
+        # (.1) if available, else the first subchannel found.
+        if "." in ans or ans.replace(".", "").isdigit():
+            try:
+                if "." in ans:
+                    target = ans
+                else:
+                    target = f"{int(ans)}.1"
+                # Exact match first; if user typed bare major, fall back
+                # to the lowest-numbered minor.
+                match_idx = None
+                for i, r in enumerate(rows, start=1):
+                    if r["virtual"] == target:
+                        match_idx = i
+                        break
+                if match_idx is None and "." not in ans:
+                    major_prefix = f"{int(ans)}."
+                    for i, r in enumerate(rows, start=1):
+                        if r["virtual"].startswith(major_prefix):
+                            match_idx = i
+                            break
+                if match_idx is not None:
+                    n = match_idx
+                    print(f"  → row {n}: {rows[n-1]['virtual']} "
+                          f"{rows[n-1]['callsign']}")
+                    break
+                # If virtual didn't match anything, fall through to numeric
+                # row lookup (so plain "5" still works as a row index when
+                # there's no 5.* channel in the list).
+            except ValueError:
+                pass
         try:
             n = int(ans)
             if 1 <= n <= len(rows):
