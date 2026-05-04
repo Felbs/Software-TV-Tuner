@@ -1505,19 +1505,16 @@ def expand_channels_from_scan(scan: dict) -> list[dict]:
                     if fps_int in (24, 30, 60):
                         video_tag = f"{video_h}{video_tag[-1]}{fps_int}"
                 quality_bits.append(video_tag)
-            if video_codec:
-                quality_bits.append(video_codec)
-            # Audio: codec + channel-count tag.
-            audio_tag = audio_codec or ""
+            # Audio: human-readable channel count. Codec name (ac3 = Dolby
+            # Digital) is hidden — user cares whether it's stereo or
+            # surround, not the underlying compression format.
             if audio_channels:
                 if audio_channels == 1:
-                    audio_tag = f"{audio_tag} mono".strip()
+                    quality_bits.append("Mono")
                 elif audio_channels == 2:
-                    audio_tag = f"{audio_tag} 2.0".strip()
+                    quality_bits.append("Stereo")
                 elif audio_channels >= 6:
-                    audio_tag = f"{audio_tag} 5.1".strip()
-            if audio_tag:
-                quality_bits.append(audio_tag)
+                    quality_bits.append("5.1 Surround")
             # Multilingual hint if more than one audio language is present.
             langs = [a.get("lang", "") for a in audio_streams
                      if a.get("lang") and a.get("lang") != "und"]
