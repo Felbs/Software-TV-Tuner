@@ -51,9 +51,8 @@ sorted(b for b in dir(atscplus) if b.startswith('atsc_')))"
 # the install if pip isn't writable; the default ffplay path works
 # without them.
 echo "[bootstrap] installing tv_player.py runtime deps (optional)..."
-python3 -m pip install --user opencv-python sounddevice 2>/dev/null || \
-    echo "[bootstrap] (skipped — install opencv-python sounddevice yourself "
-    "if you want --player magic)"
+python3 -m pip install --user opencv-python sounddevice 2>/dev/null \
+    || echo "[bootstrap] (skipped — install opencv-python sounddevice yourself if you want --player magic)"
 
 # ── 5. Friendly next step ────────────────────────────────────────
 echo
