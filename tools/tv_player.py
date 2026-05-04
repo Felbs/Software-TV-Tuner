@@ -48,8 +48,8 @@ Run
         <source> = path to .ts/.mp4/.mkv, or - for stdin, or http(s)://...
 
     Examples:
-      python tv_player.py Z:/SDR_Agent_v2/soak_test.mp4
-      python tv_player.py Z:/SDR_Agent_v2/data/tv_live/live.ts
+      python tv_player.py path/to/recording.mp4
+      python tv_player.py data/tv_live/live.ts
       ffmpeg ... | python tv_player.py -
 
 Keys

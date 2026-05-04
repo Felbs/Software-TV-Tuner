@@ -409,11 +409,15 @@ ATSC encodes data with a **rate 2/3 trellis code**: every 2 input
 bits become 3 output bits, which then map to one 8-VSB symbol. The
 extra bit adds redundancy that lets the receiver correct errors.
 
-Specifically, ATSC uses a **4-state convolutional code** with 12
-parallel encoders interleaved across symbols. Symbol `n` is encoded
-by trellis encoder `n mod 12`. This spreads burst errors across
-multiple decoders, improving robustness against impulsive
-interference.
+Specifically, ATSC uses a **4-state convolutional code** (the lower
+input bit is fed through a rate-1/2 encoder; the upper bit goes
+through unchanged, expanding 2 bits → 3) with **12 parallel
+encoders** interleaved across symbols. Symbol `n` is encoded by
+trellis encoder `n mod 12`. This 12-way interleave spreads burst
+errors across multiple decoders, improving robustness against
+impulsive interference and NTSC co-channel residue (a real-world
+concern in the analog→digital transition era when ATSC was
+designed).
 
 ### The trellis as a graph
 
@@ -503,8 +507,60 @@ byte (0x47), each carrying one of:
 A single transmitter typically multiplexes 3-6 sub-channels — e.g.
 a "4.1" HD primary, "4.2" SD secondary, "4.3" 24/7 weather, etc.
 All share the same RF channel and bit budget. When you tune to "RF
-34", you receive ALL the sub-channels simultaneously; VLC's
-"Playback → Program" menu lets you pick which one to view.
+34", you receive ALL the sub-channels simultaneously; the
+`--program N` flag (or the `5.1` / `5.2` / `5.3` syntax in the
+interactive picker) selects which one to view.
+
+## 10.5 Closed captions — line 21 inside an MPEG-2 user_data
+
+Closed captions on ATSC inherit a wire format designed in 1980 for
+analog NTSC's line 21 (CEA-608, originally EIA-608). When the US
+went digital, the easiest path was to repackage the same byte
+pairs inside the digital video, so every ATSC stream still carries
+two CEA-608 channels (CC1, CC2) plus the newer CEA-708 captions.
+
+The repackaging path:
+
+1. Each MPEG-2 video picture (I/P/B frame) can carry an arbitrary
+   `user_data_start_code` section (`0x000001B2`).
+2. ATSC defines a magic identifier `'GA94'` followed by a
+   `user_data_type_code`. `0x03` means "this user_data is a
+   `cc_data()` structure".
+3. `cc_data()` carries N entries of `(cc_type, cc_data_1, cc_data_2)`
+   — each entry is two CEA-608 bytes (or DTVCC fragment for 708).
+   `cc_type == 0` means NTSC field 1 (CC1/CC2 multiplexed).
+
+CEA-608's three foundational rules (1980-era constraints that the
+decoder still has to honor):
+
+- **Odd parity** on each 7-bit character (cheap error detection
+  for noisy analog VBI).
+- **Doubled control codes**: every control pair is transmitted
+  twice on consecutive fields. The receiver discards the duplicate.
+  (Parity catches single-bit errors; doubling catches whole-field
+  dropouts. The cheap 1980s decoder hardware couldn't do FEC, so
+  they added redundancy at the protocol layer.)
+- **Channel multiplexing in field 1**: CC1 and CC2 share the same
+  byte stream. The channel of every CONTROL byte is bit-3 of byte 1
+  (`0x10–0x17` = CC1, `0x18–0x1F` = CC2). Printable bytes inherit
+  the channel of the most recent control. Without this rule, CC2
+  Spanish text leaks into CC1 English as gibberish.
+
+There's one more catch unique to digital ATSC: MPEG-2 stores
+pictures in **decode order** so B-frames can reference future
+P-frames. Captions, however, were written by the broadcaster in
+**display order**. A decoder that scans the elementary stream
+linearly will feed CC byte pairs to the CEA-608 state machine in
+the wrong order — words like "THE" arrive as "ETH". Both
+ccextractor and our `tools/atsc_cc.py` solve this by reading the
+10-bit `temporal_reference` from each `picture_start_code` and
+sorting captions by display order at every GOP boundary.
+
+The bundled `tools/atsc_cc.py` implements all four rules in pure
+Python (no external deps): TS demux (PAT → PMT → video PID),
+GOP-bounded display-order reorder, CC1/CC2 channel demux,
+duplicate-control suppression, and pop-on / roll-up / paint-on
+mode buffering.
 
 ## 11. Putting it all together: the pipeline
 
@@ -523,7 +579,8 @@ Frequency shift to put pilot at -2.691 MHz
        ↓
 SRRC matched filter (matches transmit pulse shape)
        ↓
-Resample to 6.25 MS/s = exactly 1.5 samples/symbol
+Polyphase resample 8 MS/s → 16.143 MS/s = 1.5 samples/symbol
+(symbol rate × 1.5 = 10.762238 × 1.5 ≈ 16.143 MHz)
        ↓
 FPLL — locks onto pilot tone, removes carrier rotation
        ↓
@@ -549,7 +606,9 @@ Depad — strips ATSC framing back to MPEG-TS 188-byte packets
        ↓
 TEI scrub — rewrites RS-failed packets to NULL (preserves continuity)
        ↓
-VLC — demuxes PSI, decodes H.262 video and AC-3 audio, displays
+ffmpeg + ffplay — demux PSI/PMT, select program, decode MPEG-2 video
+and AC-3 audio, render to a window. tv_tuner.py also forks copies
+to disk (record) and to RTMP (stream) without re-encoding twice.
 ```
 
 Every arrow has a way to silently fail. The instrumented

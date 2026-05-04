@@ -59,9 +59,9 @@ LIVE_TS = HERE / "data" / "tv_live" / "live.ts"
 CONFIG_PATH = HERE / "tv_tuner_config.json"
 RECORD_DIR = HERE / "recordings"
 SCAN_PATH = Path(os.path.expanduser("~")) / ".tv_tuner" / "scan.json"
-# tv_remote.py reads this PID file on startup so it can shut down any
-# tv_tuner left running from a previous session (instead of opening a
-# second TV window). Cleared on graceful shutdown.
+# Interactive picker writes its child tuner's PID here so the next
+# channel pick can shut it down before spawning the new one (instead
+# of stacking up a second TV window). Cleared on graceful shutdown.
 PID_PATH = Path(os.path.expanduser("~")) / ".tv_tuner" / "tv_tuner.pid"
 
 
@@ -2221,7 +2221,8 @@ def run_pipeline(rf: int, callsign: str, play: bool,
                  program_is_index: bool = True,
                  player: str = "ffplay", viterbi: str = "stock",
                  fast_fail: bool = False,
-                 captions: bool = False) -> int:
+                 captions: bool = False,
+                 cc_channel: int = 1) -> int:
     """
     `program_is_index` distinguishes the two callers:
       * CLI (`--rf X --program N`): user types a 1-based subchannel index
@@ -2252,8 +2253,8 @@ def run_pipeline(rf: int, callsign: str, play: bool,
         print("[tv_tuner] no outputs selected (no --play, --stream, --record)."
               " Pipeline will run with a /dev/null sink.")
 
-    # Record our PID so tv_remote.py can find and close us when the
-    # user picks a new channel. Cleared in the shutdown handler below.
+    # Record our PID so the picker can close us when the user picks
+    # a new channel. Cleared in the shutdown handler below.
     _write_pid_file()
 
     log_dir = HERE / "data" / "tv_live"
@@ -2599,7 +2600,7 @@ def run_pipeline(rf: int, callsign: str, play: bool,
             # input. Captions appear in their own console window
             # alongside the TV.
             if captions:
-                cc_proc = _spawn_cc_window()
+                cc_proc = _spawn_cc_window(cc_channel)
 
             status_loop(state, stop_event, record_path, stream_url,
                         recover_ffmpeg=recover_ffmpeg,
@@ -2639,8 +2640,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "is looked up via probe_program_id at runtime.")
     p.add_argument("--program-id", type=int, default=None,
                    help="PSIP-canonical program_id to play. Skips the "
-                        "1-based-index translation — for tv_remote.py "
-                        "and other callers that already know the real id.")
+                        "1-based-index translation — for the interactive "
+                        "picker and other callers that already know the "
+                        "real id.")
     p.add_argument("--player", choices=["magic", "ffplay"], default="ffplay",
                    help="Playback engine. 'ffplay' (default) uses ffmpeg "
                         "re-encode + ffplay — single window, simpler UX. "
@@ -2664,7 +2666,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "(or a literal rtmp:// URL)")
     p.add_argument("--record", default=None, metavar="FILE",
                    help="Record to this MP4 file (relative paths go under "
-                        "Z:\\SDR_Agent_v2)")
+                        "the repo's data directory)")
     p.add_argument("--list", action="store_true",
                    help="Print the channel table and exit")
     p.add_argument("--scan", action="store_true",
@@ -2676,11 +2678,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Seconds to wait per hot channel during phase 2 "
                         "(longer = more reliable lock on weak signals)")
     p.add_argument("--cc", action="store_true",
-                   help="Closed captions on. Adds CEA-608 caption "
-                        "extraction to the ffmpeg pipeline so ffplay "
-                        "shows on-screen captions when the broadcast "
-                        "carries them. Press 'c' in interactive mode "
-                        "to toggle without restarting.")
+                   help="Closed captions on. Spawns a side console with "
+                        "decoded CEA-608 captions from the live TS. "
+                        "Press 'c' in interactive mode to cycle "
+                        "OFF → English → Spanish.")
+    p.add_argument("--cc-channel", type=int, default=1, choices=[1, 2],
+                   help="Which CEA-608 channel to decode when --cc is on: "
+                        "1 = primary/English (default), 2 = SAP/Spanish.")
     p.add_argument("--thorough", action="store_true",
                    help="Also report weak ATSC carriers at HDHomeRun-class "
                         "marginal sensitivity. These won't pass the strict "
@@ -2708,25 +2712,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 NEW_CONSOLE_FLAG = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
 
 
-def _launch_streaming(rf: int, program: int, captions: bool) -> subprocess.Popen:
+def _launch_streaming(rf: int, program: int,
+                      caption_channel: int | None) -> subprocess.Popen:
     """Spawn `tv_tuner.py --rf X --program-id Y` in its own console
     window. The streaming output ([2s] tv=OK ff=OK ...) appears in
-    that window; the picker console stays clean for the next pick."""
+    that window; the picker console stays clean for the next pick.
+
+    `caption_channel` selects which CEA-608 channel the side window
+    decodes: 1 = primary (English), 2 = SAP/secondary (Spanish), or
+    None = captions off entirely."""
     cmd = [
         PYTHON_EXE, "-u", str(Path(__file__).resolve()),
         "--rf", str(rf),
         "--program-id", str(program),
         "--player", "ffplay",
     ]
-    if captions:
-        cmd.append("--cc")
+    if caption_channel is not None:
+        cmd.extend(["--cc", "--cc-channel", str(caption_channel)])
     return subprocess.Popen(
         cmd,
         creationflags=NEW_PROCESS_GROUP | NEW_CONSOLE_FLAG,
     )
 
 
-def _spawn_cc_window() -> subprocess.Popen | None:
+def _spawn_cc_window(channel: int = 1) -> subprocess.Popen | None:
     """Open a side console that reads the live TS and prints incoming
     closed-caption text.
 
@@ -2754,16 +2763,20 @@ def _spawn_cc_window() -> subprocess.Popen | None:
         print("[tv_tuner] --cc: live.ts didn't start; skipping captions.")
         return None
 
+    lang = "Spanish (CC2)" if channel == 2 else "English (CC1)"
     cc_exe = shutil.which("ccextractor") or shutil.which("ccextractorwin")
     if cc_exe:
-        print(f"[tv_tuner] CC: launching ccextractor side window...")
-        cmd = [cc_exe, "-stdout", "-out=ttxt", "-12", str(LIVE_TS)]
+        print(f"[tv_tuner] CC: launching ccextractor side window — {lang}.")
+        # ccextractor channel selection: -1 = CC1 (default), -2 = CC2.
+        cc_flag = "-2" if channel == 2 else "-1"
+        cmd = [cc_exe, "-stdout", "-out=ttxt", cc_flag, str(LIVE_TS)]
     else:
         # Pure-Python fallback. Always available — ships with the repo.
-        print(f"[tv_tuner] CC: launching bundled CEA-608 decoder "
+        print(f"[tv_tuner] CC: launching bundled CEA-608 decoder — {lang} "
               f"(install ccextractor for CEA-708 + better quality).")
         atsc_cc_py = Path(__file__).resolve().parent / "atsc_cc.py"
-        cmd = [PYTHON_EXE, "-u", str(atsc_cc_py), str(LIVE_TS)]
+        cmd = [PYTHON_EXE, "-u", str(atsc_cc_py),
+               "--channel", str(channel), str(LIVE_TS)]
     return subprocess.Popen(
         cmd,
         creationflags=NEW_PROCESS_GROUP | NEW_CONSOLE_FLAG,
@@ -2829,7 +2842,7 @@ def _nuke_streaming_orphans():
         if name == "python.exe":
             for marker in ("tv_tuner.py", "tv_live.py",
                            "tv_live_softvit.py", "sdr_sweep.py",
-                           "tv_remote.py", "tv_player.py"):
+                           "tv_player.py"):
                 if marker in cmdline_l:
                     is_ours = True
                     break
@@ -2875,7 +2888,10 @@ def interactive_loop(cfg: dict, args) -> int:
     rows = print_scan_table(scan)
     if not rows:
         return 1
-    captions = bool(getattr(args, "cc", False))
+    # Caption state cycles OFF → English (CC1) → Spanish (CC2) → OFF.
+    # None = off; 1 = CC1 (primary, English); 2 = CC2 (SAP, Spanish).
+    cc_channel: int | None = (getattr(args, "cc_channel", 1)
+                              if getattr(args, "cc", False) else None)
     current: subprocess.Popen | None = None
     last_label = ""
 
@@ -2889,22 +2905,26 @@ def interactive_loop(cfg: dict, args) -> int:
     except (ValueError, AttributeError):
         pass
 
+    cc_label = {None: "OFF", 1: "EN", 2: "ES"}
     try:
         while True:
-            cc_state = "ON" if captions else "OFF"
             try:
                 tag = f" — now: {last_label}" if last_label else ""
                 ans = input(
                     f"\n📺  Channel?{tag}  [row #, virt 5.1, "
-                    f"c=CC ({cc_state}), g=guide, q=quit]: "
+                    f"c=CC ({cc_label[cc_channel]}), g=guide, q=quit]: "
                 ).strip().lower()
             except EOFError:
                 break
             if ans in ("q", "quit", "exit"):
                 break
             if ans in ("c", "cc"):
-                captions = not captions
-                print(f"  closed captions: {'ON' if captions else 'OFF'} "
+                # Cycle: OFF → EN (CC1) → ES (CC2) → OFF
+                cc_channel = {None: 1, 1: 2, 2: None}[cc_channel]
+                msg = {None: "OFF",
+                       1: "ON — English (CC1)",
+                       2: "ON — Spanish (CC2)"}[cc_channel]
+                print(f"  closed captions: {msg} "
                       f"(takes effect on next channel pick)")
                 continue
             if ans in ("g", "guide", "list", "?"):
@@ -2928,7 +2948,7 @@ def interactive_loop(cfg: dict, args) -> int:
             _nuke_streaming_orphans()
             time.sleep(2)
             try:
-                current = _launch_streaming(r["rf"], r["program"], captions)
+                current = _launch_streaming(r["rf"], r["program"], cc_channel)
                 last_label = (f"{r['virtual']} {r['callsign']}"
                               + (f" {r.get('network', '')}"
                                  if r.get('network') and
@@ -3042,7 +3062,8 @@ def main(argv: list[str] | None = None) -> int:
                             program_is_index=(args.program_id is None),
                             player=args.player,
                             viterbi=args.viterbi,
-                            captions=args.cc)
+                            captions=args.cc,
+                            cc_channel=args.cc_channel)
     else:
         # Pure interactive mode — picker runs in this console; each
         # channel pick spawns a fresh tv_tuner --rf X --program-id Y

@@ -1,6 +1,6 @@
 @echo off
 setlocal
-cd /d Z:\src\magic-tv-decoder\gr-atscplus
+cd /d "%~dp0"
 
 call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
 if errorlevel 1 ( echo [build] vcvars64 failed & exit /b 1 )

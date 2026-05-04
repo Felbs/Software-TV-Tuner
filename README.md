@@ -1,12 +1,27 @@
 # Software TV Tuner (STVT)
 
-This is a software TV tuner for a software-defined radio. Watch TV on
-your SDR.
+**Free, open-source, software-defined TV tuner.** Watch over-the-air
+broadcast TV on your computer using a $100 SDR + a TV antenna — no
+cable subscription, no streaming service, no hardware tuner card.
+GPL-3.0; the entire pipeline (DSP, demodulator, picker, player) is
+inspectable code you can read, modify, and rebuild.
 
 A custom GNU Radio fork (`gr-atscplus`) decodes ATSC 1.0 broadcast TV
-from a $100 SDR + a TV antenna into a live MPEG-TS stream. Bundled with
-a CLI launcher (`tv_tuner.py`) that scans your area, picks a channel,
-tunes it, and plays it — also records to MP4 and re-streams to RTMP.
+into a live MPEG-TS stream. A CLI launcher (`tv_tuner.py`) scans your
+area, builds an on-screen TV guide from the broadcast PSIP/EIT data,
+picks a channel, tunes it, and plays it — also records to MP4,
+re-streams to RTMP (Twitch, YouTube), changes channels live, and
+overlays closed captions in English or Spanish.
+
+**Heavily tested in continuous operation — likely the most stable
+open-source software TV tuner available right now.** The pipeline
+runs hours of live TV on marginal indoor antennas without manual
+intervention: three independent watchdogs (decoder, ffmpeg, optional
+player) detect equalizer drift, ffmpeg stalls, and SDR dropouts and
+respawn the affected stage automatically. We've watched full sports
+games, news blocks, and overnight programming end-to-end on this
+stack. If your antenna can lock the carrier, the software keeps the
+picture up.
 
 ## Download & install (Windows, ~10 minutes)
 
@@ -40,13 +55,14 @@ python tools\tv_tuner.py
 ```
 
 The interactive picker shows every channel in your DMA grouped by RF
-frequency. The default channel table covers DC/Baltimore — edit
-`tools/default_stations.py` for your region.
+frequency, with on-now show titles, ratings, and signal strength
+pulled live from PSIP / EIT. The default channel table covers
+DC/Baltimore — edit `tools/default_stations.py` for your region.
 
 ## Run
 
 ```powershell
-# Interactive: banner + channel picker
+# Interactive: banner, channel picker, live channel-changer
 python tools\tv_tuner.py
 
 # Direct: tune RF36 (Fox 5 DC) and play locally
@@ -62,6 +78,9 @@ python tools\tv_tuner.py --rf 36 --no-play --record fox5_news.mp4
 python tools\tv_tuner.py --config-set twitch rtmp://live.twitch.tv/app/YOUR_KEY
 python tools\tv_tuner.py --rf 36 --stream twitch
 
+# Closed captions on (English by default, --cc-channel 2 for Spanish)
+python tools\tv_tuner.py --rf 36 --cc
+
 # Dry-run: print the planned subprocess commands without spawning
 python tools\tv_tuner.py --rf 36 --dry-run
 ```
@@ -69,6 +88,45 @@ python tools\tv_tuner.py --rf 36 --dry-run
 `tv_tuner.py` uses ffmpeg's `tee` muxer so one command can play
 locally, record, and push to RTMP simultaneously without re-encoding
 twice.
+
+## Live channel-changer
+
+The interactive picker doubles as a remote: pick a channel, watch
+it, then back at the picker prompt type another row number or
+virtual channel — the running TV instantly retunes to the new
+station without restarting from scratch. Single-keystroke commands
+at the prompt:
+
+| key | action |
+|-----|--------|
+| `5` | tune the 5th row in the guide |
+| `5.1` | tune virtual channel 5.1 (`WTTG` Fox) |
+| `g` | reprint the guide (refreshes show titles + signal %) |
+| `i 7` | inspect row 7 (signal detail, all PIDs, EIT-now/next) |
+| `c` | cycle captions: OFF → English (CC1) → Spanish (CC2) |
+| `q` | quit |
+
+Spanish captions on bilingual stations (Univision, Telemundo,
+WFDC, WZDC) come through on CC2 / SAP — the `c` cycle is the
+fastest way to switch.
+
+## Closed captioning
+
+Two backends, picked automatically:
+
+- **`ccextractor`** if installed on PATH — handles both CEA-608 and
+  CEA-708. `winget install ccextractor` to add. Recommended.
+- **Bundled pure-Python decoder** (`tools/atsc_cc.py`) — CEA-608
+  only, no external deps. Always available. Implements:
+  full TS demux (PAT → PMT → video PID), MPEG-2 picture
+  reorder by `temporal_reference` so B-frame captions arrive
+  in display order, CC1/CC2 channel demux, doubled-control-code
+  suppression, and pop-on / roll-up / paint-on mode buffering.
+
+Captions appear in their own console window beside the TV. If
+captions don't show, the broadcaster may simply not be transmitting
+them on that subchannel (rare for major networks, common for
+secondary subchannels and shopping channels).
 
 ## Watchdogs
 

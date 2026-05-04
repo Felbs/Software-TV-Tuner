@@ -67,12 +67,19 @@ Pipeline
      video PID (stream_type 0x02). Collect that PID's payload bytes.
      Demuxing matters: scanning the whole TS for 0x000001B2 hits
      audio PIDs and PSI tables and produces false matches.
-  2. Inside video PES: scan for mpeg2video user_data_start_code
-     (0x00 0x00 0x01 0xB2) followed by ATSC identifier 'GA94' and
-     user_data_type_code 0x03 (cc_data).
-  3. cc_data entries: filter cc_type == 0 (NTSC field 1 = CC1/CC2),
+  2. Inside video PES: scan for mpeg2video picture_start_code
+     (0x00 0x00 0x01 0x00) to capture each picture's temporal_reference,
+     then user_data_start_code (0x00 0x00 0x01 0xB2) followed by ATSC
+     identifier 'GA94' and user_data_type_code 0x03 (cc_data).
+  3. Reorder by temporal_reference at every group/sequence start so
+     captions arrive in DISPLAY order, not the elementary-stream's
+     DECODE order. MPEG-2 stores B-frames out of order so they can
+     reference future P-frames; without this reorder, the I-frame's
+     captions arrive before the B-frames that visually preceded it,
+     and "THE" comes out scrambled as "ETH".
+  4. cc_data entries: filter cc_type == 0 (NTSC field 1 = CC1/CC2),
      strip parity bits, drop invalid pairs.
-  4. Run byte pairs through a CEA-608 channel/mode state machine
+  5. Run byte pairs through a CEA-608 channel/mode state machine
      and emit complete lines on EOC / CR.
 """
 
@@ -346,40 +353,134 @@ class TSDemux:
             i += 5 + es_info_len
 
 
-def scan_userdata(blob: bytes, decoder: CC608Decoder) -> int:
-    """Scan video-stream bytes for ATSC cc_data sections, feed cc_type==0
-    byte pairs to the decoder. Returns the offset just past the last
-    fully-consumed cc_data section so the caller can keep an unparsed
-    tail for the next round (handles section spans across chunks)."""
-    pos = 0
-    n = len(blob)
-    last_consumed = 0
-    while pos + 8 < n:
-        idx = blob.find(b"\x00\x00\x01\xB2", pos)
-        if idx < 0:
-            return last_consumed
-        i = idx + 4
-        # ATSC ATSC_user_data identifier "GA94"
+class VideoStreamScanner:
+    """Scans MPEG-2 video stream bytes for cc_data, reorders byte pairs
+    by display order (picture temporal_reference), and feeds them to a
+    CC608Decoder.
+
+    Why the reorder matters:
+        MPEG-2 stores pictures in DECODE order so B-frames can reference
+        future P-frames. Captions are written by the broadcaster in
+        DISPLAY order. Feeding pairs to the CEA-608 decoder in decode
+        order scrambles words — a GOP of [I@2, B@0, B@1, P@5, B@3, B@4]
+        sends caption bytes in that order, so 'THE' (display 0,1,2)
+        arrives as E,T,H = 'ETH'.
+
+    What we do:
+        - On every picture_start_code (0x00 0x00 0x01 0x00) we read the
+          10-bit temporal_reference field and start a new per-picture
+          byte-pair bucket.
+        - On user_data_start_code (0x00 0x00 0x01 0xB2) we parse the
+          ATSC cc_data section and append cc_type==0 pairs to the
+          CURRENT picture's bucket.
+        - On group_start_code (0xB8) or sequence_start_code (0xB3) — the
+          GOP boundaries — we sort the buffered pictures by
+          temporal_reference and feed them to the CEA-608 decoder in
+          display order, then reset.
+
+    This is the same reorder that ccextractor and consumer TVs perform.
+    """
+
+    def __init__(self, decoder: CC608Decoder) -> None:
+        self.decoder = decoder
+        self.gop: list[tuple[int, list[tuple[int, int]]]] = []
+        self.cur_temp_ref: int | None = None
+        self.cur_pairs: list[tuple[int, int]] = []
+        self.max_pictures_buffered = 60  # safety bound (~2s @ 30fps)
+
+    def feed(self, blob: bytes) -> int:
+        """Parse a video-stream buffer, emit reordered pairs to the
+        decoder. Returns the offset just past the last fully-consumed
+        start code so the caller can keep an unparsed tail."""
+        n = len(blob)
+        if n < 8:
+            return 0
+        pos = 0
+        last = 0
+        while pos < n - 5:
+            idx = blob.find(b"\x00\x00\x01", pos)
+            if idx < 0 or idx + 4 >= n:
+                return last
+            code = blob[idx + 3]
+            if code == 0x00:                       # picture_start_code
+                if idx + 6 > n:
+                    return last
+                # temporal_reference: 10 bits, big-endian, top of byte 4
+                # then top 2 bits of byte 5.
+                tr = (blob[idx + 4] << 2) | (blob[idx + 5] >> 6)
+                self._begin_picture(tr)
+                pos = idx + 4
+                last = idx + 4
+            elif code == 0xB2:                     # user_data_start_code
+                consumed = self._consume_userdata(blob, idx + 4)
+                if consumed < 0:
+                    return last
+                pos = consumed
+                last = consumed
+            elif code in (0xB3, 0xB8):             # sequence_/group_start
+                self._flush_gop()
+                pos = idx + 4
+                last = idx + 4
+            else:
+                pos = idx + 4
+            # Safety: if the GOP gets weirdly long (no group_start_code
+            # ever arrives), flush periodically so memory + latency
+            # stay bounded.
+            if len(self.gop) >= self.max_pictures_buffered:
+                self._flush_gop()
+        return last
+
+    def finalize(self) -> None:
+        """Flush any pending pictures (call at shutdown)."""
+        self._flush_gop()
+
+    def _begin_picture(self, tr: int) -> None:
+        self._end_picture()
+        self.cur_temp_ref = tr
+        self.cur_pairs = []
+
+    def _end_picture(self) -> None:
+        if self.cur_temp_ref is not None:
+            self.gop.append((self.cur_temp_ref, self.cur_pairs))
+        self.cur_temp_ref = None
+        self.cur_pairs = []
+
+    def _flush_gop(self) -> None:
+        self._end_picture()
+        if not self.gop:
+            return
+        self.gop.sort(key=lambda p: p[0])
+        for _, pairs in self.gop:
+            for b1, b2 in pairs:
+                self.decoder.feed_pair(b1, b2)
+        self.gop = []
+
+    def _consume_userdata(self, blob: bytes, i: int) -> int:
+        """Parse one ATSC user_data section starting just past the
+        0x000001B2 start code. Returns the byte offset after the
+        section, or -1 if truncated (caller should keep tail and try
+        again next pass)."""
+        n = len(blob)
         if i + 5 > n:
-            return last_consumed
+            return -1
         if blob[i:i + 4] != b"GA94":
-            pos = idx + 4
-            continue
+            return i
         i += 4
         ud_type = blob[i]
         i += 1
-        if ud_type != 0x03:  # 0x03 == cc_data
-            pos = idx + 4
-            continue
-        # cc_data header: process_em_data_flag(1) + process_cc_data_flag(1)
-        # + reserved(1) + cc_count(5)
+        if ud_type != 0x03:           # 0x03 == cc_data
+            return i
         if i >= n:
-            return last_consumed
-        cc_count = blob[i] & 0x1F
+            return -1
+        # cc_data header: process_em_data_flag(1) + process_cc_data_flag(1)
+        # + additional_data_flag(1) + cc_count(5)
+        hdr = blob[i]
+        process_cc = (hdr & 0x40) != 0
+        cc_count = hdr & 0x1F
         i += 1
-        i += 1  # em_data byte (always 0xFF in ATSC)
+        i += 1                        # em_data byte (typically 0xFF)
         if i + cc_count * 3 > n:
-            return last_consumed
+            return -1
         for _ in range(cc_count):
             type_byte = blob[i]
             cc1 = blob[i + 1]
@@ -388,12 +489,15 @@ def scan_userdata(blob: bytes, decoder: CC608Decoder) -> int:
             cc_valid = (type_byte >> 2) & 0x01
             cc_type = type_byte & 0x03
             # cc_type 0 = NTSC field 1 (CC1/CC2), 1 = NTSC field 2 (CC3/CC4),
-            # 2/3 = DTVCC (CEA-708 packet fragments — not handled here).
-            if cc_valid and cc_type == 0:
-                decoder.feed_pair(cc1, cc2)
-        pos = i
-        last_consumed = i
-    return last_consumed
+            # 2/3 = DTVCC packet fragments (CEA-708 — out of scope here).
+            if process_cc and cc_valid and cc_type == 0:
+                if self.cur_temp_ref is not None:
+                    self.cur_pairs.append((cc1, cc2))
+                else:
+                    # cc_data outside a picture context — feed direct.
+                    # Shouldn't happen in well-formed streams.
+                    self.decoder.feed_pair(cc1, cc2)
+        return i
 
 
 def tail_follow(path: Path, chunk_size: int = 64 * 1024,
@@ -447,7 +551,6 @@ def main() -> int:
         candidates = [
             here.parent / "data" / "tv_live" / "live.ts",
             here / "data" / "tv_live" / "live.ts",
-            here.parent / "SDR_Agent_v2" / "data" / "tv_live" / "live.ts",
         ]
         path = next((c for c in candidates if c.exists()), candidates[0])
 
@@ -463,6 +566,7 @@ def main() -> int:
 
     decoder = CC608Decoder(write_text, target_channel=args.channel)
     demux = TSDemux()
+    scanner = VideoStreamScanner(decoder)
     video_buf = bytearray()
     announced_video_pid = False
 
@@ -475,10 +579,10 @@ def main() -> int:
                       file=sys.stderr)
                 announced_video_pid = True
             # Scan when there's enough to chew on; keep an overlap tail
-            # so cc_data sections that straddle chunks parse on the
+            # so user_data sections that straddle chunks parse on the
             # next pass.
             if len(video_buf) >= 8192:
-                consumed = scan_userdata(bytes(video_buf), decoder)
+                consumed = scanner.feed(bytes(video_buf))
                 if consumed > 0:
                     del video_buf[:consumed]
                 # Cap the buffer if the broadcaster is sending no CCs,
@@ -490,6 +594,8 @@ def main() -> int:
     except FileNotFoundError as e:
         print(f"[atsc_cc] {e}", file=sys.stderr)
         return 1
+    finally:
+        scanner.finalize()
     return 0
 
 
