@@ -34,7 +34,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-# Make our colocated helper modules (atsc_psip.py, fcc_dc_stations.py)
+# Make our colocated helper modules (atsc_psip.py, default_stations.py)
 # importable regardless of cwd or how this script was invoked.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -111,16 +111,16 @@ NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 
 # ── Channel table (read-only import) ─────────────────────────────
 def _load_stations():
-    """Import fcc_dc_stations dynamically so this script can still run
+    """Import default_stations dynamically so this script can still run
     `--help` / `--list` even if that module has a syntax problem."""
     sys.path.insert(0, str(HERE))
     try:
-        from fcc_dc_stations import DC_DMA_STATIONS, lookup  # type: ignore
+        from default_stations import DEFAULT_STATIONS, lookup  # type: ignore
     except Exception as e:
-        print(f"[tv_tuner] WARNING: failed to import fcc_dc_stations: {e}",
+        print(f"[tv_tuner] WARNING: failed to import default_stations: {e}",
               file=sys.stderr)
         return [], (lambda rf: None)
-    return DC_DMA_STATIONS, lookup
+    return DEFAULT_STATIONS, lookup
 
 
 # ── Config helpers ───────────────────────────────────────────────
@@ -149,22 +149,19 @@ def save_config(cfg: dict) -> None:
 
 # ── Channel listing ──────────────────────────────────────────────
 BANNER = r"""
-   .   *   ✦   .   *   .   ✦   *   .   *   ✦   .   *   .   *
+    .   *   ✦   .   *   .   ✦   *   .   *   ✦   .   *   .   *
 
-      ╔═══════════════════════════╗            ┌─────────┐
-      ║                           ║      ★     │   (O)   │
-   *  ║   SOFTWARE TV TUNER       ║            ├─────────┤      *
-      ║                           ║      .     │  1 2 3  │
-      ╚═══════════════════════════╝            │  4 5 6  │   ✦
-                                                │  7 8 9  │
-   ✦       ___                                  │    0    │
-          ( o o )         *                     ├─────────┤      *
-   .       \ - /                                │   /^\   │
-          _/ | \_                               │ < ( ) > │
-   *     /       \           .                  │   \v/   │
-         |  ~~~  |                              ├─────────┤   ✦
-   .     \_______/      ✦                       │ vol  ch │
-                                                └─────────┘     *
+         ╔═════════════════════════╗               /\
+         ║                         ║      ★       /✦ \         *
+   *     ║   SOFTWARE TV TUNER     ║             /  * \      .
+         ║                         ║      .     / ✦    \
+         ╚═════════════════════════╝           /________\        ✦
+                                                ( ◔ ‿ ◔ )
+   ✦                  by                        |   ▽   |    *
+                                               /| ┄┄┄┄┄ |\
+                                              /_|       |_\         .
+   .   *   .   ✦   *   .   *   .   ✦                ╲           *
+                                                  F E L B S
        *   .   *   ✦   *   .   *   ✦   .   *   .   ✦   .   *
 """
 
@@ -197,7 +194,7 @@ def expand_channels() -> list[dict]:
 def print_channel_list() -> list[dict]:
     rows = expand_channels()
     if not rows:
-        print("(no stations available — fcc_dc_stations.py not importable)")
+        print("(no stations available — default_stations.py not importable)")
         return []
     print()
     print(f"{'#':>3}  {'RF':>3}  {'Virtual':<7}  {'Callsign':<8}  "
@@ -747,26 +744,13 @@ def run_scan(region: dict | None = None,
              pilot_sharpness_threshold_db: float = 26.25,
              vsb_asymmetry_threshold_db: float = 2.4,
              rms_threshold_db: float = 4.0,
-             # `weak_*` thresholds activate only with --thorough / include_weak.
-             # Re-tuned 2026-05 against ground_truth_dc.json after RF 22 (MPT,
-             # Annapolis ~30 mi) and RF 25 (WDVM, Hagerstown ~70 mi) were
-             # promoted to must-detect.
-             #   - RF 22 has pilot_sharpness 9.75 dB (above noise floor) but
-             #     vsb_asymmetry -13.24 dB (the upper-sideband data energy is
-             #     attenuated relative to lower at this site / antenna). To
-             #     admit it we have to drop the asymmetry gate well below 0.
-             #   - RF 25 has pilot_sharpness 4.71 dB — below 10 of the 25
-             #     empties' sharpness. There is no threshold combination that
-             #     catches RF 25 without flagging ~14/25 empties as candidates,
-             #     so we deliberately do NOT chase it here. See
-             #     scan_lab/winning_recipe.json "thorough_thresholds" for the
-             #     analysis. RF 25 needs a different approach (multi-second
-             #     averaging, PN511 correlation at full symbol rate, or an
-             #     antenna upgrade).
-             # Result on the DC fixture set: 9/10 must-detect (catches RF 22,
-             # misses RF 25), 9/25 empties admitted as weak candidates.
-             # Worst-case detector margin: 0.76 dB (vsb_asym at RF 22), matching
-             # the strict-path margin philosophy.
+             # `weak_*` thresholds activate only with --thorough.
+             # Tuned to catch marginal-signal carriers (~30-70 mi distant
+             # transmitters) at the cost of admitting ~9/25 empty channels
+             # as candidates. Worst-case detector margin on must-detect:
+             # 0.76 dB. Truly noise-floor signals (sharpness < ~5 dB)
+             # cannot be caught without flooding the weak list with
+             # false positives — those need an antenna upgrade.
              weak_pilot_snr_db: float = 15.0,
              weak_pilot_sharpness_db: float = 8.0,
              weak_vsb_asymmetry_db: float = -14.0) -> dict:
@@ -1080,23 +1064,14 @@ def build_ffmpeg_cmd(play: bool, record_path: Path | None,
         "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
     ]
 
-    # Closed captions: ATSC carries CEA-608 captions in the mpeg2video
-    # user_data of every frame. ffmpeg auto-extracts them as a per-program
-    # subtitle stream when -fix_sub_duration is set; we then re-encode as
-    # mov_text so ffplay (or any downstream player) can show them as soft
-    # subs. Best-effort — depends on the broadcaster actually inserting
-    # captions, and on the local ffmpeg/ffplay build supporting display.
-    if captions:
-        # Insert -fix_sub_duration right before the input file flag.
-        try:
-            input_idx = cmd.index("-i")
-            cmd.insert(input_idx, "-fix_sub_duration")
-        except ValueError:
-            pass
-        cmd.extend([
-            "-map", f"0:p:{program}:s?",
-            "-c:s", "mov_text",
-        ])
+    # Closed captions: ATSC's CEA-608 captions live inside mpeg2video
+    # user_data, not as a real mpegts subtitle stream. Getting them
+    # through a re-encode + stdin/stdout pipe + ffplay's limited
+    # soft-sub support reliably is a known-tricky combo. The actual CC
+    # rendering is done by an out-of-process `ccextractor` window
+    # spawned alongside this pipeline (see _spawn_cc_window), not by
+    # an ffmpeg flag here. We leave the ffmpeg cmd unchanged so the
+    # video/audio path stays simple.
 
     sinks = []
     if record_path is not None:
@@ -1455,7 +1430,7 @@ def expand_channels_from_scan(scan: dict) -> list[dict]:
 
     Prefers ATSC PSIP data (broadcast-authoritative virtual channels +
     EIT show schedule) when available. Falls back to ffprobe program
-    info + the static fcc_dc_stations table for unmapped channels.
+    info + the static default_stations table for unmapped channels.
 
     Each row is the picker entry for one (rf, program_number) tuple.
     """
@@ -1524,7 +1499,7 @@ def expand_channels_from_scan(scan: dict) -> list[dict]:
                         now_description = cur.get("description") or ""
 
             if not virt and info is not None:
-                # Fall back to static fcc_dc_stations table.
+                # Fall back to static default_stations table.
                 callsign = callsign or info.get("callsign", "") or ""
                 if sub_idx == 1:
                     virt = info.get("virtual", "") or ""
@@ -1585,7 +1560,7 @@ def expand_channels_from_scan(scan: dict) -> list[dict]:
     # Append weak ATSC carriers — channels where phase-1 detected a real
     # ATSC carrier but at marginal signal. Phase 2 was skipped, so these
     # have no PSIP / program info; user can attempt to tune from the
-    # picker. Labeled with the static fcc_dc_stations table when known.
+    # picker. Labeled with the static default_stations table when known.
     for w in scan.get("weak_atsc1_carriers", []) or []:
         rf = w["rf"]
         info = lookup(rf)
@@ -2308,6 +2283,7 @@ def run_pipeline(rf: int, callsign: str, play: bool,
 
     stop_event = threading.Event()
     state = PipelineState()
+    cc_proc: subprocess.Popen | None = None
 
     tv_log_fh = open(tv_log, "ab")
     ff_log_fh = open(ff_log, "ab")
@@ -2325,6 +2301,7 @@ def run_pipeline(rf: int, callsign: str, play: bool,
         kill_proc(state.tv_proc, "tv_live")
         kill_proc(state.ffmpeg_proc, "ffmpeg")
         kill_proc(state.ffplay_proc, "ffplay")
+        kill_proc(cc_proc, "ccextractor")
 
     signal.signal(signal.SIGINT, shutdown)
 
@@ -2616,6 +2593,14 @@ def run_pipeline(rf: int, callsign: str, play: bool,
 
             state.tail = TailWorker(state.ffmpeg_proc.stdin, stop_event)
             state.tail.start()
+
+            # Spawn ccextractor side window for closed captions, if
+            # requested AND ccextractor is on PATH. Uses live.ts as
+            # input. Captions appear in their own console window
+            # alongside the TV.
+            if captions:
+                cc_proc = _spawn_cc_window()
+
             status_loop(state, stop_event, record_path, stream_url,
                         recover_ffmpeg=recover_ffmpeg,
                         recover_ffplay=recover_ffplay,
@@ -2735,6 +2720,46 @@ def _launch_streaming(rf: int, program: int, captions: bool) -> subprocess.Popen
     ]
     if captions:
         cmd.append("--cc")
+    return subprocess.Popen(
+        cmd,
+        creationflags=NEW_PROCESS_GROUP | NEW_CONSOLE_FLAG,
+    )
+
+
+def _spawn_cc_window() -> subprocess.Popen | None:
+    """Open a side console that reads the live TS and prints incoming
+    closed-caption text. Uses `ccextractor` (CCExtractor 0.94+) which
+    handles ATSC CEA-608 / 708 cleanly. Returns None silently if
+    ccextractor isn't on PATH — captions are an opt-in feature, the
+    player still works without them.
+
+    On Windows we install ccextractor from https://ccextractor.org or
+    via `winget install ccextractor` / `scoop install ccextractor`."""
+    import shutil
+    cc_exe = shutil.which("ccextractor") or shutil.which("ccextractorwin")
+    if not cc_exe:
+        print("[tv_tuner] --cc requested but `ccextractor` is not on PATH.")
+        print("           Install from https://ccextractor.org "
+              "(or `winget install ccextractor`).")
+        return None
+    # Wait briefly for live.ts to start growing so ccextractor has
+    # something to read.
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        try:
+            if LIVE_TS.exists() and LIVE_TS.stat().st_size > 1_000_000:
+                break
+        except OSError:
+            pass
+        time.sleep(0.5)
+    if not LIVE_TS.exists():
+        print("[tv_tuner] --cc: live.ts didn't start; skipping captions.")
+        return None
+    # `-stdout -out=ttxt` prints rolling caption text as it arrives,
+    # line by line — perfect for a side console. `-12` = CEA-608
+    # channel 1 (English primary).
+    print(f"[tv_tuner] launching ccextractor side window for captions...")
+    cmd = [cc_exe, "-stdout", "-out=ttxt", "-12", str(LIVE_TS)]
     return subprocess.Popen(
         cmd,
         creationflags=NEW_PROCESS_GROUP | NEW_CONSOLE_FLAG,

@@ -41,7 +41,7 @@ python tools\tv_tuner.py
 
 The interactive picker shows every channel in your DMA grouped by RF
 frequency. The default channel table covers DC/Baltimore — edit
-`tools/fcc_dc_stations.py` for your region.
+`tools/default_stations.py` for your region.
 
 ## Run
 
@@ -120,12 +120,13 @@ gr-atscplus/                  GNU Radio OOT module (custom C++ blocks)
   _build.bat                  Windows VS 2022 + NMake build
   _rebuild.bat                Windows incremental rebuild
 tools/
-  tv_tuner.py                 Channel picker / player / recorder / streamer
+  tv_tuner.py                 Channel picker, player, recorder, streamer,
+                              and live channel changer all in one CLI
   tv_live.py                  Continuous SDR → MPEG-TS pipeline
   tv_live_softvit.py          Same pipeline, soft-Viterbi variant
   sdr_sweep.py                Fast carrier-presence pre-scanner
   atsc_psip.py                PSIP parser (virtual channels + EIT)
-  fcc_dc_stations.py          Sample channel table (edit for your DMA)
+  default_stations.py         Sample channel table (edit for your DMA)
   config.py                   Default tuner/antenna/gain config
   tv_player.py                Resilient video player (decoupled A/V clocks)
 docs/                         Science explainer, capture recipe, session log
