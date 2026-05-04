@@ -226,6 +226,7 @@ def main():
         "pn511_corr":      np.linspace(0,  30, 31).tolist(),
         "spectral_mask":   np.linspace(-0.2, 1.0, 31).tolist(),
         "field_autocorr":  np.linspace(-30, 0,  31).tolist(),
+        "pilot_coherent":  np.linspace(0,  60, 61).tolist(),
     }
 
     # Per-detector best.

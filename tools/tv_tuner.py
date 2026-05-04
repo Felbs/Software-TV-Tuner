@@ -697,7 +697,6 @@ def run_scan(region: dict | None = None,
              dwell_sec: float = 8.0,
              save: bool = True,
              include_weak: bool = False,
-             deep_scan: bool = False,
              # Thresholds tuned by tools/scan_lab/harness.py for max-margin F1=1.0
              # against HDHomeRun ground truth on the DC fixture set
              # (winning_recipe.json). Worst-case slack on must-detect channels:
@@ -772,18 +771,12 @@ def run_scan(region: dict | None = None,
         n = len(all_freqs)
         print(f"[scan] region: {region['name']}")
         print(f"[scan] standard: {region['standard']}")
-        if deep_scan:
-            est = int(n * (1.5 + 0.1) + 5)  # capture + retune overhead
-            print(f"[scan] phase 1 (DEEP — Welch averaging) — sweep across "
-                  f"{n} frequencies (~{est}s)...")
-        else:
-            print(f"[scan] phase 1 — power sniff across {n} frequencies "
-                  f"(~{n * 0.5:.0f}s)...")
+        print(f"[scan] phase 1 — power sniff across {n} frequencies "
+              f"(~{n * 0.5:.0f}s)...")
         try:
             sweep_in = [f for _atsc_rf, f, _label in all_freqs]
-            phase1_dwell = 1.5 if deep_scan else 0.10
             sweep_out = run_power_sweep(sweep_in, log_fh=log_fh,
-                                          dwell_sec=phase1_dwell)
+                                          dwell_sec=0.10)
         except Exception as e:
             print(f"[scan] phase-1 sweep failed ({e}); aborting.",
                   file=sys.stderr)
@@ -2350,13 +2343,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "marginal sensitivity. These won't pass the strict "
                         "lock test (won't auto-play), but the picker will "
                         "list them so you can manually try tuning each one.")
-    p.add_argument("--deep-scan", action="store_true",
-                   help="Capture 1.5 s per channel during phase 1 (vs the "
-                        "default 0.1 s) and average the FFT spectra (Welch "
-                        "method). Pulls ~12 dB more pilot SNR out of the "
-                        "noise floor — finds distant / weak ATSC carriers "
-                        "(70+ mi transmitters) the fast scan misses. Adds "
-                        "~50 s to the scan total.")
+    # `--deep-scan` was an experiment that didn't pan out: Welch averaging
+    # reduces noise variance but not the *expected* ratio of pilot to
+    # noise, so it gave no meaningful sensitivity gain. Removed; the
+    # finding lives in the session log. Real coherent integration would
+    # work but requires PLL-style pilot tracking we don't currently have.
     p.add_argument("--region", default=None,
                    help=f"Region key (skips the interactive picker). "
                         f"Options: {', '.join(r['key'] for r in REGIONS)}")
@@ -2403,8 +2394,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             region = prompt_region()
         run_scan(region=region, dwell_sec=args.scan_dwell,
-                 include_weak=args.thorough,
-                 deep_scan=args.deep_scan)
+                 include_weak=args.thorough)
         return 0
 
     # Resolve stream URL: NAME from config, else literal URL, else None
