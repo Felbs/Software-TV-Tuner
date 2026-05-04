@@ -149,19 +149,22 @@ def save_config(cfg: dict) -> None:
 
 # ── Channel listing ──────────────────────────────────────────────
 BANNER = r"""
-    .   *   ✦   .   *   .   ✦   *   .   *   ✦   .   *   .   *
+   .   *   ✦   .   *   .   ✦   *   .   *   ✦   .   *   .   *
 
-         ╔═════════════════════════╗               /\
-         ║                         ║      ★       /✦ \         *
-   *     ║   SOFTWARE TV TUNER     ║             /  * \      .
-         ║                         ║      .     / ✦    \
-         ╚═════════════════════════╝           /________\        ✦
-                                                ( ◔ ‿ ◔ )
-   ✦                  by                        |   ▽   |    *
-                                               /| ┄┄┄┄┄ |\
-                                              /_|       |_\         .
-   .   *   .   ✦   *   .   *   .   ✦                ╲           *
-                                                  F E L B S
+      ╔═══════════════════════════╗            ┌─────────┐
+      ║                           ║      ★     │   (O)   │
+   *  ║   SOFTWARE TV TUNER       ║            ├─────────┤      *
+      ║                           ║      .     │  1 2 3  │
+      ╚═══════════════════════════╝            │  4 5 6  │   ✦
+                                                │  7 8 9  │
+   ✦       ___                                  │    0    │
+          ( o o )         *                     ├─────────┤      *
+   .       \ - /                                │   /^\   │
+          _/ | \_                               │ < ( ) > │
+   *     /       \           .                  │   \v/   │
+         |  ~~~  |                              ├─────────┤   ✦
+   .     \_______/      ✦                       │ vol  ch │
+                                                └─────────┘     *
        *   .   *   ✦   *   .   *   ✦   .   *   .   ✦   .   *
 """
 
@@ -1020,7 +1023,8 @@ def load_scan() -> dict | None:
 
 def build_ffmpeg_cmd(play: bool, record_path: Path | None,
                      stream_url: str | None,
-                     program: int = 1) -> list[str]:
+                     program: int = 1,
+                     captions: bool = False) -> list[str]:
     """Build the central ffmpeg command line.
 
     Always re-encodes — passthrough exposes raw 1080i interlace combing
@@ -1075,6 +1079,24 @@ def build_ffmpeg_cmd(play: bool, record_path: Path | None,
         # silence on stereo outputs).
         "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
     ]
+
+    # Closed captions: ATSC carries CEA-608 captions in the mpeg2video
+    # user_data of every frame. ffmpeg auto-extracts them as a per-program
+    # subtitle stream when -fix_sub_duration is set; we then re-encode as
+    # mov_text so ffplay (or any downstream player) can show them as soft
+    # subs. Best-effort — depends on the broadcaster actually inserting
+    # captions, and on the local ffmpeg/ffplay build supporting display.
+    if captions:
+        # Insert -fix_sub_duration right before the input file flag.
+        try:
+            input_idx = cmd.index("-i")
+            cmd.insert(input_idx, "-fix_sub_duration")
+        except ValueError:
+            pass
+        cmd.extend([
+            "-map", f"0:p:{program}:s?",
+            "-c:s", "mov_text",
+        ])
 
     sinks = []
     if record_path is not None:
@@ -2223,7 +2245,8 @@ def run_pipeline(rf: int, callsign: str, play: bool,
                  dry_run: bool = False, program: int = 1,
                  program_is_index: bool = True,
                  player: str = "ffplay", viterbi: str = "stock",
-                 fast_fail: bool = False) -> int:
+                 fast_fail: bool = False,
+                 captions: bool = False) -> int:
     """
     `program_is_index` distinguishes the two callers:
       * CLI (`--rf X --program N`): user types a 1-based subchannel index
@@ -2265,7 +2288,8 @@ def run_pipeline(rf: int, callsign: str, play: bool,
     play_log = log_dir / "tv_tuner.ffplay.log"
 
     cmd = build_ffmpeg_cmd(play=play, record_path=record_path,
-                           stream_url=stream_url, program=program)
+                           stream_url=stream_url, program=program,
+                           captions=captions)
 
     if dry_run:
         print("── DRY RUN ──")
@@ -2572,7 +2596,8 @@ def run_pipeline(rf: int, callsign: str, play: bool,
                           f"program_id {actual_pid}")
                     cmd = build_ffmpeg_cmd(
                         play=play, record_path=record_path,
-                        stream_url=stream_url, program=actual_pid)
+                        stream_url=stream_url, program=actual_pid,
+                        captions=captions)
                 elif actual_pid is None:
                     print(f"[tv_tuner] WARN: could not probe program list; "
                           f"using --program {program} as program_id "
@@ -2665,6 +2690,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--scan-dwell", type=float, default=8.0,
                    help="Seconds to wait per hot channel during phase 2 "
                         "(longer = more reliable lock on weak signals)")
+    p.add_argument("--cc", action="store_true",
+                   help="Closed captions on. Adds CEA-608 caption "
+                        "extraction to the ffmpeg pipeline so ffplay "
+                        "shows on-screen captions when the broadcast "
+                        "carries them. Press 'c' in interactive mode "
+                        "to toggle without restarting.")
     p.add_argument("--thorough", action="store_true",
                    help="Also report weak ATSC carriers at HDHomeRun-class "
                         "marginal sensitivity. These won't pass the strict "
@@ -2686,6 +2717,218 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--config-show", action="store_true",
                    help="Print the current config and exit")
     return p.parse_args(argv)
+
+
+# ── Interactive loop (picker → spawn streaming subprocess) ────────
+NEW_CONSOLE_FLAG = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+
+
+def _launch_streaming(rf: int, program: int, captions: bool) -> subprocess.Popen:
+    """Spawn `tv_tuner.py --rf X --program-id Y` in its own console
+    window. The streaming output ([2s] tv=OK ff=OK ...) appears in
+    that window; the picker console stays clean for the next pick."""
+    cmd = [
+        PYTHON_EXE, "-u", str(Path(__file__).resolve()),
+        "--rf", str(rf),
+        "--program-id", str(program),
+        "--player", "ffplay",
+    ]
+    if captions:
+        cmd.append("--cc")
+    return subprocess.Popen(
+        cmd,
+        creationflags=NEW_PROCESS_GROUP | NEW_CONSOLE_FLAG,
+    )
+
+
+def _kill_streaming(proc: subprocess.Popen | None):
+    """Best-effort terminate of a streaming subprocess + its tree."""
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True, timeout=10,
+            )
+        else:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+    except Exception:
+        pass
+
+
+def _nuke_streaming_orphans():
+    """Sweep for tv_live / ffmpeg / ffplay orphans from a previous
+    crashed session. Catches children that survive the parent's kill
+    because they were spawned in their own console."""
+    if sys.platform != "win32":
+        return
+    ps_cmd = (
+        "Get-CimInstance Win32_Process -Filter "
+        "\"Name='python.exe' or Name='ffmpeg.exe' or Name='ffplay.exe'\" "
+        "| Select-Object ProcessId, Name, CommandLine "
+        "| ConvertTo-Json -Compress"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_cmd],
+            capture_output=True, text=True, timeout=15,
+        )
+    except Exception:
+        return
+    if result.returncode != 0 or not result.stdout.strip():
+        return
+    try:
+        items = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return
+    if isinstance(items, dict):
+        items = [items]
+    me = os.getpid()
+    target_pids: list[int] = []
+    for it in items:
+        pid = it.get("ProcessId")
+        if not pid or int(pid) == me:
+            continue
+        name = (it.get("Name") or "").lower()
+        cmdline_l = (it.get("CommandLine") or "").lower()
+        is_ours = False
+        if name == "python.exe":
+            for marker in ("tv_tuner.py", "tv_live.py",
+                           "tv_live_softvit.py", "sdr_sweep.py",
+                           "tv_remote.py", "tv_player.py"):
+                if marker in cmdline_l:
+                    is_ours = True
+                    break
+            # Don't kill ourselves (the interactive picker process)
+            if "--rf" not in cmdline_l and "--program-id" not in cmdline_l:
+                # The picker runs without --rf — protect it.
+                if int(pid) == me:
+                    is_ours = False
+        elif name in ("ffmpeg.exe", "ffplay.exe"):
+            if (("-f mpegts -i pipe:0" in cmdline_l) or
+                ("tv_tuner" in cmdline_l) or
+                ("data\\tv_live" in cmdline_l) or
+                ("tv_live\\live.ts" in cmdline_l)):
+                is_ours = True
+        if is_ours:
+            target_pids.append(int(pid))
+    for pid in target_pids:
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                capture_output=True, timeout=5,
+            )
+        except Exception:
+            pass
+    if target_pids:
+        time.sleep(2)
+    try:
+        PID_PATH.unlink()
+    except OSError:
+        pass
+
+
+def interactive_loop(cfg: dict, args) -> int:
+    """Picker → channel pick → spawn streaming → return to picker.
+    Repeats until user types 'q'. Each new pick kills the previous
+    streaming subprocess (and any orphaned tv_live / ffmpeg / ffplay)
+    before spawning the new one."""
+    print(BANNER)
+    scan = maybe_first_run_scan(cfg)
+    if scan is None:
+        print("[tv_tuner] no scan available — exiting")
+        return 1
+    rows = print_scan_table(scan)
+    if not rows:
+        return 1
+    captions = bool(getattr(args, "cc", False))
+    current: subprocess.Popen | None = None
+    last_label = ""
+
+    def _shutdown(*_):
+        _kill_streaming(current)
+        _nuke_streaming_orphans()
+        sys.exit(0)
+    try:
+        signal.signal(signal.SIGINT, _shutdown)
+        signal.signal(signal.SIGTERM, _shutdown)
+    except (ValueError, AttributeError):
+        pass
+
+    try:
+        while True:
+            cc_state = "ON" if captions else "OFF"
+            try:
+                tag = f" — now: {last_label}" if last_label else ""
+                ans = input(
+                    f"\n📺  Channel?{tag}  [row #, virt 5.1, "
+                    f"c=CC ({cc_state}), g=guide, q=quit]: "
+                ).strip().lower()
+            except EOFError:
+                break
+            if ans in ("q", "quit", "exit"):
+                break
+            if ans in ("c", "cc"):
+                captions = not captions
+                print(f"  closed captions: {'ON' if captions else 'OFF'} "
+                      f"(takes effect on next channel pick)")
+                continue
+            if ans in ("g", "guide", "list", "?"):
+                rows = print_scan_table(scan)
+                continue
+            if not ans:
+                continue
+            r = _resolve_picker_row(ans, rows)
+            if r is None:
+                print("  invalid — type a row #, a virtual channel "
+                      "(e.g. 5.1), c to toggle CC, g for guide, q to quit")
+                continue
+            if r.get("not_detected"):
+                print(f"  ! {r['virtual']} {r['callsign']} wasn't "
+                      f"detected — tuning will likely fail (signal too "
+                      f"weak at this antenna).")
+            print(f"  → tuning RF {r['rf']} {r['virtual']} "
+                  f"{r['callsign']}...")
+            _kill_streaming(current)
+            current = None
+            _nuke_streaming_orphans()
+            time.sleep(2)
+            try:
+                current = _launch_streaming(r["rf"], r["program"], captions)
+                last_label = (f"{r['virtual']} {r['callsign']}"
+                              + (f" {r.get('network', '')}"
+                                 if r.get('network') and
+                                    r['network'].upper() != r['callsign'].upper()
+                                 else ""))
+            except Exception as e:
+                print(f"  spawn failed: {e}")
+                last_label = ""
+    finally:
+        _kill_streaming(current)
+    print("\n[tv_tuner] goodbye.")
+    return 0
+
+
+def _resolve_picker_row(ans: str, rows: list[dict]) -> dict | None:
+    """Same input rules as interactive_pick: bare integer = row index,
+    dotted = virtual channel."""
+    if "." in ans:
+        for r in rows:
+            if r["virtual"] == ans:
+                return r
+        return None
+    try:
+        n = int(ans)
+        if 1 <= n <= len(rows):
+            return rows[n - 1]
+    except ValueError:
+        pass
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2769,20 +3012,15 @@ def main(argv: list[str] | None = None) -> int:
                                      else args.program),
                             program_is_index=(args.program_id is None),
                             player=args.player,
-                            viterbi=args.viterbi)
+                            viterbi=args.viterbi,
+                            captions=args.cc)
     else:
-        # Pure interactive mode
-        choice = interactive_pick(cfg)
-        return run_pipeline(rf=choice["rf"], callsign=choice["callsign"],
-                            play=choice["play"],
-                            stream_url=choice["stream_url"],
-                            record_path=choice["record_path"],
-                            dry_run=False,
-                            program=choice["program"],
-                            program_is_index=False,  # picker has real PSIP id
-                            fast_fail=choice.get("not_detected", False),
-                            player=args.player,
-                            viterbi=args.viterbi)
+        # Pure interactive mode — picker runs in this console; each
+        # channel pick spawns a fresh tv_tuner --rf X --program-id Y
+        # in its own console window so the streaming output doesn't
+        # spam the picker prompt. Picker stays alive for the next
+        # channel pick.
+        return interactive_loop(cfg, args)
 
 
 if __name__ == "__main__":
