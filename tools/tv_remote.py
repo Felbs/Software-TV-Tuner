@@ -214,10 +214,17 @@ def kill_existing_tv_tuner():
     return True
 
 
+NEW_CONSOLE_FLAG = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+
+
 def launch_channel(rf: int, program: int) -> subprocess.Popen:
-    """Spawn `tv_tuner.py --rf X --program Y` for the given channel.
-    Returns a Popen handle — caller is responsible for killing it
-    before launching another."""
+    """Spawn `tv_tuner.py --rf X --program Y` in its own console window.
+
+    CREATE_NEW_CONSOLE detaches the child's stdout/stderr from the
+    remote's terminal: tv_tuner's status loop ([2s] tv=OK ff=OK ...)
+    prints in a separate window where it doesn't fight the user's
+    channel-change typing in the remote prompt. The TV picture itself
+    still pops up in the ffplay window as usual."""
     # `--program-id` tells tv_tuner the value is the canonical PSIP
     # program_id, not a 1-based subchannel index — so it skips the
     # probe_program_id translation that would otherwise pick the wrong
@@ -230,7 +237,7 @@ def launch_channel(rf: int, program: int) -> subprocess.Popen:
     print(f"[remote] spawning: tv_tuner --rf {rf} --program-id {program}")
     return subprocess.Popen(
         cmd,
-        creationflags=NEW_PROCESS_GROUP,
+        creationflags=NEW_PROCESS_GROUP | NEW_CONSOLE_FLAG,
     )
 
 
