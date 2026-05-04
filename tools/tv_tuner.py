@@ -1642,19 +1642,35 @@ def print_scan_table(scan: dict) -> list[dict]:
         print("(scan.json contains no locked channels — try --scan again)")
         return []
     has_now = any(r.get("now_title") for r in rows)
+
+    def name_str(r: dict) -> str:
+        """Combine callsign + network when they're different and both
+        are useful labels — so 5.1 reads "WTTG-DT Fox" but 5.2 stays
+        just "BUZZR" (because the sub-network IS the callsign-equivalent
+        for subchannels)."""
+        cs = (r["callsign"] or "").strip()
+        net = (r.get("network") or "").strip()
+        if not cs:
+            return net
+        if not net or net.upper() == cs.upper():
+            return cs
+        # Strip "-DT" / "-HD" suffix from PSIP callsigns when joining.
+        cs_clean = cs.replace("-DT", "").replace("-HD", "").strip()
+        return f"{cs_clean} {net}"
+
     print()
     if has_now:
-        print(f"  {'#':>3}  {'Ch':<5}  {'Callsign':<8}  "
+        print(f"  {'#':>3}  {'Ch':<5}  {'Callsign':<14}  "
               f"{'Sig':>4}  {'Quality':<14}  Now playing")
     else:
-        print(f"  {'#':>3}  {'Ch':<5}  {'Callsign':<8}  "
-              f"{'Sig':>4}  {'Network':<14}  Quality")
-    print("  " + "-" * 76)
+        print(f"  {'#':>3}  {'Ch':<5}  {'Callsign':<14}  "
+              f"{'Sig':>4}  Quality")
+    print("  " + "-" * 78)
     last_major = None
     for i, r in enumerate(rows, start=1):
         major = r["virtual"].split(".")[0] if "." in r["virtual"] else None
         if last_major is not None and major != last_major:
-            print(f"       {'─' * 71}")
+            print(f"       {'─' * 73}")
         if r.get("not_detected"):
             marker = "? "  # known station, not detected this scan
         elif r.get("weak"):
@@ -1662,27 +1678,24 @@ def print_scan_table(scan: dict) -> list[dict]:
         else:
             marker = "└▸" if r["is_sub"] else "★ "
         q = r.get("quality", "") or ""
-        # Signal strength: real % for detected channels, "—" for stations
-        # the scan didn't see (no metric available).
         if r.get("not_detected") or r.get("weak"):
             sig_str = "  — "
         else:
             sig_str = f"{r.get('signal_pct', 0):>3}%"
+        nm = name_str(r)
         if has_now:
             now = r.get("now_title") or ""
             rem = r.get("now_remaining_sec") or 0
             rating = r.get("now_rating") or ""
             rating_tag = f" [{rating}]" if rating else ""
-            # Trim title to fit; rating goes in brackets after.
-            title_max = 32
+            title_max = 30
             now_str = (f"{now[:title_max]}{'…' if len(now) > title_max else ''}"
                        f"{rating_tag} ({rem // 60}m)") if now else ""
             print(f"  {i:>3}  {marker} {r['virtual']:<3}  "
-                  f"{r['callsign']:<8}  {sig_str:>4}  {q:<24}  {now_str}")
+                  f"{nm:<14}  {sig_str:>4}  {q:<24}  {now_str}")
         else:
             print(f"  {i:>3}  {marker} {r['virtual']:<3}  "
-                  f"{r['callsign']:<8}  {sig_str:>4}  "
-                  f"{r['network']:<14}  {q}")
+                  f"{nm:<14}  {sig_str:>4}  {q}")
         last_major = major
     print()
     return rows
