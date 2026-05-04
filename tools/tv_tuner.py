@@ -2042,7 +2042,17 @@ def status_loop(state: PipelineState, stop_event: threading.Event,
 def run_pipeline(rf: int, callsign: str, play: bool,
                  stream_url: str | None, record_path: Path | None,
                  dry_run: bool = False, program: int = 1,
+                 program_is_index: bool = True,
                  player: str = "ffplay", viterbi: str = "stock") -> int:
+    """
+    `program_is_index` distinguishes the two callers:
+      * CLI (`--rf X --program N`): user types a 1-based subchannel index
+        (1 = main, 2 = first sub, ...). We probe the PMT to look up the
+        broadcaster's actual program_id at runtime.
+      * Picker: row already has the broadcaster's program_id from PSIP.
+        Pass it through directly — no probe-translate, since the user's
+        already at the canonical PSIP-defined value.
+    """
     # The 'magic' player reads live.ts directly and decodes with decoupled
     # audio/video clocks, so audio keeps playing while video holds on a drift
     # event — what produced our best real-RF result. Recording / RTMP need
@@ -2348,18 +2358,25 @@ def run_pipeline(rf: int, callsign: str, play: bool,
                         recover_decoder=recover_decoder)
         else:
             # Legacy ffplay path: ffmpeg re-encode → optional tee fan-out.
-            # Now that live.ts is converged, translate the user's 1-based
-            # subchannel index to the actual ATSC program_id by probing
-            # the PMT — broadcasters number programs arbitrarily (RF34's
-            # 4.1 NBC isn't program_id=1).
-            actual_pid = probe_program_id(program)
-            if actual_pid is not None and actual_pid != program:
-                print(f"[tv_tuner] subchannel {program} → program_id {actual_pid}")
-                cmd = build_ffmpeg_cmd(play=play, record_path=record_path,
-                                       stream_url=stream_url, program=actual_pid)
-            elif actual_pid is None:
-                print(f"[tv_tuner] WARN: could not probe program list; "
-                      f"using --program {program} as program_id directly.")
+            # Translate `program` to a real PMT program_id only if the
+            # caller signalled it's a 1-based index (CLI). Picker rows
+            # already carry the canonical program_id from PSIP/ffprobe
+            # and must NOT be re-translated, or we'd land on the wrong
+            # subchannel (this was a real bug — picking 5.1 WTTG (id=3)
+            # caused probe_program_id to read "third program" and tune
+            # 5.3 START instead).
+            if program_is_index:
+                actual_pid = probe_program_id(program)
+                if actual_pid is not None and actual_pid != program:
+                    print(f"[tv_tuner] subchannel {program} → "
+                          f"program_id {actual_pid}")
+                    cmd = build_ffmpeg_cmd(
+                        play=play, record_path=record_path,
+                        stream_url=stream_url, program=actual_pid)
+                elif actual_pid is None:
+                    print(f"[tv_tuner] WARN: could not probe program list; "
+                          f"using --program {program} as program_id "
+                          f"directly.")
             state.ffmpeg_proc = spawn_ffmpeg(cmd, ff_log_fh,
                                              want_stdout_pipe=play)
             print(f"[tv_tuner] ffmpeg PID={state.ffmpeg_proc.pid}")
@@ -2553,6 +2570,7 @@ def main(argv: list[str] | None = None) -> int:
                             record_path=choice["record_path"],
                             dry_run=False,
                             program=choice["program"],
+                            program_is_index=False,  # picker has real PSIP id
                             player=args.player,
                             viterbi=args.viterbi)
 
