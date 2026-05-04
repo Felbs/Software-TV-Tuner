@@ -1,10 +1,8 @@
 # Software TV Tuner (STVT)
 
-**Free, open-source, software-defined TV tuner.** Watch over-the-air
-broadcast TV on your computer using a $100 SDR + a TV antenna — no
-cable subscription, no streaming service, no hardware tuner card.
-GPL-3.0; the entire pipeline (DSP, demodulator, picker, player) is
-inspectable code you can read, modify, and rebuild.
+A free and open source software TV tuner. Watch free over-the-air
+television on an SDR (Software Defined Radio). This is the most
+stable open source software TV decoder on the Internet right now.
 
 A custom GNU Radio fork (`gr-atscplus`) decodes ATSC 1.0 broadcast TV
 into a live MPEG-TS stream. A CLI launcher (`tv_tuner.py`) scans your
@@ -13,15 +11,13 @@ picks a channel, tunes it, and plays it — also records to MP4,
 re-streams to RTMP (Twitch, YouTube), changes channels live, and
 overlays closed captions in English or Spanish.
 
-**Heavily tested in continuous operation — likely the most stable
-open-source software TV tuner available right now.** The pipeline
-runs hours of live TV on marginal indoor antennas without manual
-intervention: three independent watchdogs (decoder, ffmpeg, optional
-player) detect equalizer drift, ffmpeg stalls, and SDR dropouts and
-respawn the affected stage automatically. We've watched full sports
-games, news blocks, and overnight programming end-to-end on this
-stack. If your antenna can lock the carrier, the software keeps the
-picture up.
+The pipeline runs hours of live TV on marginal indoor antennas
+without manual intervention: three independent watchdogs (decoder,
+ffmpeg, optional player) detect equalizer drift, ffmpeg stalls, and
+SDR dropouts and respawn the affected stage automatically. We've
+watched full sports games, news blocks, and overnight programming
+end-to-end on this stack. If your antenna can lock the carrier, the
+software keeps the picture up.
 
 ## Download & install (Windows, ~10 minutes)
 
