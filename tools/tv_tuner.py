@@ -911,7 +911,15 @@ def run_scan(region: dict | None = None,
                       f"{rec['pilot_sharpness_db']:+4.0f} / VSB "
                       f"{rec['vsb_asymmetry_db']:+4.0f} dB) … ",
                       end="", flush=True)
-                res = scan_one_rf(rf, dwell_sec=dwell_sec, log_fh=log_fh)
+                # Phase-2 lock test, with one retry. The atscplus equalizer
+                # cold-starts probabilistically (~80% success rate per
+                # attempt); a single retry catches the misses without
+                # paying for retries on the strong channels that lock
+                # immediately. WTTG RF 36 was the canonical example —
+                # phase-1 metrics identical to channels that locked, but
+                # the equalizer just didn't converge on first try.
+                res = scan_one_rf_with_retry(rf, dwell_sec=dwell_sec,
+                                              log_fh=log_fh, retries=1)
                 res["rms_dbfs"] = rec["rms_dbfs"]
                 res["hot"] = True
                 if res.get("lock"):
