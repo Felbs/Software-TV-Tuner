@@ -79,15 +79,41 @@ def _clear_pid_file():
     except (FileNotFoundError, OSError):
         pass
 
-# tv_live needs the radioconda Python (for gr-atscplus + soapy). Override
-# with $RADIOCONDA_PY if your install lives somewhere other than the
-# default radioconda location under the user profile.
-PYTHON_EXE = os.environ.get("RADIOCONDA_PY") or str(
-    Path(os.path.expanduser("~")) / "radioconda" / "python.exe")
-FFMPEG = r"C:\ffmpeg\bin\ffmpeg.exe"
-FFPLAY = r"C:\ffmpeg\bin\ffplay.exe"
+# tv_live needs a Python that has gr-atscplus + SoapySDR available.
+#   Windows: radioconda's bundled Python (override with $RADIOCONDA_PY).
+#   Linux/Mac: system Python that imported `gnuradio` from apt /
+#     `apt install gnuradio gr-osmosdr python3-soapysdr` etc., which is
+#     usually whatever `python3` resolves to on PATH.
+def _resolve_python_exe() -> str:
+    override = os.environ.get("RADIOCONDA_PY") or os.environ.get("STVT_PYTHON")
+    if override:
+        return override
+    if sys.platform == "win32":
+        return str(Path(os.path.expanduser("~")) / "radioconda" / "python.exe")
+    # Linux/Mac: use the same interpreter we're running under. Users who
+    # need a different one can set $STVT_PYTHON.
+    return sys.executable or "python3"
+
+
+def _resolve_binary(name: str, win_default: str) -> str:
+    """Find an external binary by name. On Linux/Mac falls back to
+    PATH lookup; on Windows falls back to the canonical install dir."""
+    import shutil
+    found = shutil.which(name)
+    if found:
+        return found
+    return win_default
+
+
+PYTHON_EXE = _resolve_python_exe()
+FFMPEG = _resolve_binary("ffmpeg", r"C:\ffmpeg\bin\ffmpeg.exe")
+FFPLAY = _resolve_binary("ffplay", r"C:\ffmpeg\bin\ffplay.exe")
 TV_PLAYER = HERE / "tv_player.py"   # bundled with the repo
-SDRPLAY_API_DIR = r"C:\Program Files\SDRplay\API\x64"
+# SDRplay API install dir (Windows-only — on Linux the API drops a
+# .so into /usr/local/lib and SoapySDRPlay finds it via the runtime
+# linker, no env tweak needed).
+SDRPLAY_API_DIR = (r"C:\Program Files\SDRplay\API\x64"
+                   if sys.platform == "win32" else "")
 
 # A NULL transport-stream packet (PID 0x1FFF). VLC/ffmpeg ignore these
 # but they keep the bytestream moving when live.ts has no fresh data,
@@ -220,8 +246,12 @@ def print_channel_list() -> list[dict]:
 
 # ── Pipeline plumbing ────────────────────────────────────────────
 def env_with_sdrplay() -> dict:
-    """Return a copy of os.environ with the SDRplay API DLL dir on PATH."""
+    """Return os.environ + SDRplay API DLL dir on PATH (Windows only).
+    On Linux the SDRplay API installs system-wide and the runtime
+    linker finds it without a PATH tweak."""
     env = os.environ.copy()
+    if not SDRPLAY_API_DIR:
+        return env
     path = env.get("PATH", "")
     if SDRPLAY_API_DIR.lower() not in path.lower():
         env["PATH"] = SDRPLAY_API_DIR + os.pathsep + path
@@ -238,10 +268,14 @@ def spawn_tv_live(rf: int, log_fh, viterbi: str = "stock") -> subprocess.Popen:
     script = (HERE / "tv_live_softvit.py") if viterbi == "soft" else TV_LIVE_PY
     if not script.exists():
         raise FileNotFoundError(f"tv_live script not found at {script}")
-    if not Path(PYTHON_EXE).exists():
+    # Validate PYTHON_EXE: accept either an absolute path that exists
+    # OR a bare command that resolves on PATH (Linux: "python3").
+    import shutil as _sh
+    if not (Path(PYTHON_EXE).exists() or _sh.which(PYTHON_EXE)):
         raise FileNotFoundError(
-            f"radioconda python not found at {PYTHON_EXE}. "
-            "Install radioconda or update PYTHON_EXE in tv_tuner.py.")
+            f"Python interpreter not found at {PYTHON_EXE}. "
+            "Set $RADIOCONDA_PY (Windows) or $STVT_PYTHON (Linux/Mac), "
+            "or install Python 3 with the gnuradio module on PATH.")
 
     return subprocess.Popen(
         [PYTHON_EXE, "-u", str(script), "--rf", str(rf)],
@@ -2712,6 +2746,57 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 NEW_CONSOLE_FLAG = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
 
 
+def _spawn_in_new_console(cmd: list[str]) -> subprocess.Popen:
+    """Cross-platform "open a new terminal window for this command".
+
+    Windows: subprocess flags create the new console directly.
+    Linux:   wrap the command in the first available terminal emulator
+             (gnome-terminal / konsole / xfce4-terminal / xterm).
+             If no emulator is found, fall through and the command
+             runs inline (output mixes with the picker — usable but
+             not pretty).
+    """
+    import shutil
+    if sys.platform == "win32":
+        return subprocess.Popen(
+            cmd,
+            creationflags=NEW_PROCESS_GROUP | NEW_CONSOLE_FLAG,
+        )
+    # Linux/Mac: pick whichever terminal emulator is present and tell
+    # it to run our command. Each emulator has its own argv shape.
+    quoted = " ".join(_shell_quote(a) for a in cmd)
+    for emu, wrap in (
+        ("gnome-terminal", ["gnome-terminal", "--", "bash", "-c",
+                            f"{quoted}; exec bash"]),
+        ("konsole",        ["konsole", "-e", "bash", "-c",
+                            f"{quoted}; exec bash"]),
+        ("xfce4-terminal", ["xfce4-terminal", "-e",
+                            f"bash -c '{quoted}; exec bash'"]),
+        ("x-terminal-emulator",
+                           ["x-terminal-emulator", "-e",
+                            "bash", "-c", f"{quoted}; exec bash"]),
+        ("xterm",          ["xterm", "-e", "bash", "-c",
+                            f"{quoted}; exec bash"]),
+    ):
+        if shutil.which(emu):
+            return subprocess.Popen(wrap, start_new_session=True)
+    # Fallback: no terminal emulator on the system (headless / WSL).
+    # Run inline; output goes to the picker's terminal.
+    print(f"[tv_tuner] no terminal emulator found — output will appear "
+          f"in this window (install gnome-terminal or xterm for a "
+          f"separate window).")
+    return subprocess.Popen(cmd, start_new_session=True)
+
+
+def _shell_quote(s: str) -> str:
+    """Minimal POSIX single-quote escape for embedding in a `bash -c`
+    string. Stdlib shlex.quote does the same thing — re-implementing
+    here so we don't add an import for one call site."""
+    if s and all(c.isalnum() or c in "@%+=:,./-_" for c in s):
+        return s
+    return "'" + s.replace("'", "'\\''") + "'"
+
+
 def _launch_streaming(rf: int, program: int,
                       caption_channel: int | None) -> subprocess.Popen:
     """Spawn `tv_tuner.py --rf X --program-id Y` in its own console
@@ -2729,10 +2814,7 @@ def _launch_streaming(rf: int, program: int,
     ]
     if caption_channel is not None:
         cmd.extend(["--cc", "--cc-channel", str(caption_channel)])
-    return subprocess.Popen(
-        cmd,
-        creationflags=NEW_PROCESS_GROUP | NEW_CONSOLE_FLAG,
-    )
+    return _spawn_in_new_console(cmd)
 
 
 def _spawn_cc_window(channel: int = 1) -> subprocess.Popen | None:
@@ -2777,14 +2859,17 @@ def _spawn_cc_window(channel: int = 1) -> subprocess.Popen | None:
         atsc_cc_py = Path(__file__).resolve().parent / "atsc_cc.py"
         cmd = [PYTHON_EXE, "-u", str(atsc_cc_py),
                "--channel", str(channel), str(LIVE_TS)]
-    return subprocess.Popen(
-        cmd,
-        creationflags=NEW_PROCESS_GROUP | NEW_CONSOLE_FLAG,
-    )
+    return _spawn_in_new_console(cmd)
 
 
 def _kill_streaming(proc: subprocess.Popen | None):
-    """Best-effort terminate of a streaming subprocess + its tree."""
+    """Best-effort terminate of a streaming subprocess + its whole tree.
+
+    Windows: taskkill /T walks the tree.
+    Linux:   we spawned with start_new_session=True so the child got
+             its own process group; sending SIGTERM/SIGKILL to the
+             group reaches everything spawned by it (terminal emulator
+             wrapper, python child, ffmpeg, ffplay)."""
     if proc is None or proc.poll() is not None:
         return
     try:
@@ -2794,12 +2879,97 @@ def _kill_streaming(proc: subprocess.Popen | None):
                 capture_output=True, timeout=10,
             )
         else:
-            proc.terminate()
+            import signal as _sig
+            try:
+                pgid = os.getpgid(proc.pid)
+                os.killpg(pgid, _sig.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                proc.terminate()
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                try:
+                    pgid = os.getpgid(proc.pid)
+                    os.killpg(pgid, _sig.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    proc.kill()
     except Exception:
+        pass
+
+
+def _nuke_streaming_orphans_posix():
+    """Linux/Mac orphan sweep. Uses pgrep to find pythons running
+    tv_tuner-family scripts and ffmpeg/ffplay processes pointed at
+    our live.ts, then kills their process groups. Skips the picker
+    itself (the process that's calling us)."""
+    import signal as _sig
+    me = os.getpid()
+    targets: set[int] = set()
+    # Python helpers + tv_player.
+    for marker in ("tv_tuner.py", "tv_live.py", "tv_live_softvit.py",
+                   "sdr_sweep.py", "tv_player.py"):
+        try:
+            out = subprocess.run(
+                ["pgrep", "-af", marker],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+        for line in out.stdout.splitlines():
+            try:
+                pid_s, _, cmdline = line.partition(" ")
+                pid = int(pid_s)
+            except ValueError:
+                continue
+            if pid == me:
+                continue
+            # Don't kill picker invocations (they have no --rf/--program-id).
+            cl = cmdline.lower()
+            if (marker == "tv_tuner.py" and "--rf" not in cl
+                    and "--program-id" not in cl):
+                continue
+            targets.add(pid)
+    # ffmpeg / ffplay touching our live.ts.
+    for name in ("ffmpeg", "ffplay"):
+        try:
+            out = subprocess.run(
+                ["pgrep", "-af", name],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+        for line in out.stdout.splitlines():
+            try:
+                pid_s, _, cmdline = line.partition(" ")
+                pid = int(pid_s)
+            except ValueError:
+                continue
+            if pid == me:
+                continue
+            cl = cmdline.lower()
+            if ("tv_live" in cl) or ("data/tv_live" in cl) or ("live.ts" in cl):
+                targets.add(pid)
+    for pid in targets:
+        try:
+            pgid = os.getpgid(pid)
+            os.killpg(pgid, _sig.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            try:
+                os.kill(pid, _sig.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+    if targets:
+        time.sleep(1.5)
+        # Hard-kill anything still alive.
+        for pid in targets:
+            try:
+                pgid = os.getpgid(pid)
+                os.killpg(pgid, _sig.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+    try:
+        PID_PATH.unlink()
+    except OSError:
         pass
 
 
@@ -2808,6 +2978,7 @@ def _nuke_streaming_orphans():
     crashed session. Catches children that survive the parent's kill
     because they were spawned in their own console."""
     if sys.platform != "win32":
+        _nuke_streaming_orphans_posix()
         return
     ps_cmd = (
         "Get-CimInstance Win32_Process -Filter "

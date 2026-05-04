@@ -53,6 +53,34 @@ python -c "from gnuradio import atscplus; print(dir(atscplus))"
 python tools\tv_tuner.py
 ```
 
+## Download & install (Linux, ~5 minutes)
+
+Tested on Ubuntu 22.04 / 24.04. The `bootstrap.sh` script does all
+of this in one shot — apt-installs GNU Radio + ffmpeg + SoapySDR,
+builds and installs the gr-atscplus OOT module, and pip-installs
+the optional player extras.
+
+```bash
+git clone https://github.com/Felbs/Software-TV-Tuner.git
+cd Software-TV-Tuner
+chmod +x bootstrap.sh && ./bootstrap.sh
+
+# Run it
+python3 tools/tv_tuner.py
+```
+
+If you have an SDRplay device, install the [SDRplay API for Linux
+v3](https://www.sdrplay.com/api/) before running `bootstrap.sh` —
+it drops a `.so` into `/usr/local/lib` that `soapysdr-module-all`
+binds to. RTL-SDR, HackRF, BladeRF, and other SoapySDR devices
+work out of the box from the apt packages above.
+
+For a separate window per stream (so the picker stays clean), make
+sure one of `gnome-terminal`, `konsole`, `xfce4-terminal`, or
+`xterm` is installed; the launcher detects whichever is available.
+Headless / WSL2 environments without a terminal emulator just print
+the streaming output inline — usable, just less pretty.
+
 The interactive picker shows every channel in your DMA grouped by RF
 frequency, with on-now show titles, ratings, and signal strength
 pulled live from PSIP / EIT. The default channel table covers
