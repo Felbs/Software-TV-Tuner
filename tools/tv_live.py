@@ -110,12 +110,14 @@ def rf_to_freq_hz(rf: int) -> int:
 
 
 class LiveTVTopBlock(gr.top_block):
-    def __init__(self, rf_channel: int, ts_path: Path):
+    def __init__(self, rf_channel: int, ts_path: Path,
+                 soapy_args: str = "driver=sdrplay"):
         super().__init__("tv_live")
         freq = rf_to_freq_hz(rf_channel)
         LOG.info(f"Tuning RF {rf_channel} = {freq/1e6:.3f} MHz "
                  f"(antenna={ATSC_ANTENNA}, IFGR={ATSC_IF_GAIN_REDUCTION}, "
                  f"rfgain_sel={ATSC_RFGAIN_SEL})")
+        LOG.info(f"SoapySDR device: {soapy_args}")
 
         # SDR source — retry on "no available RSP devices" since SDRplay's
         # API service can take a few seconds to release after a prior process
@@ -128,7 +130,7 @@ class LiveTVTopBlock(gr.top_block):
                 time.sleep(settle)
             try:
                 src = soapy.source(
-                    "driver=sdrplay", "fc32", 1, "", "",
+                    soapy_args, "fc32", 1, "", "",
                     [""], [""],
                 )
                 break
@@ -266,6 +268,14 @@ def main():
     # avoids VLC seeing a truncation that would force it to seek back to
     # byte 0 mid-watch (looking like the show "restarted").
     ap.add_argument("--rotate-gb", type=float, default=50.0)
+    ap.add_argument("--soapy-args",
+                    default=os.environ.get("STVT_SOAPY_ARGS", "driver=sdrplay"),
+                    help="SoapySDR device specifier. Default 'driver=sdrplay'. "
+                         "For SoapyRemote (e.g. WSL2 -> Windows host) use "
+                         "'driver=remote,remote=<host>:55132,"
+                         "remote:driver=sdrplay'. Can also be set via the "
+                         "$STVT_SOAPY_ARGS env var so subprocess callers "
+                         "(tv_tuner.py scan + lock-test) inherit it.")
     args = ap.parse_args()
 
     out = Path(args.out)
@@ -286,7 +296,7 @@ def main():
     LOG.info(f"Live TV starting — RF {args.rf}, TCP port {ATSC_LIVE_TCP_PORT}")
     LOG.info(f"Writing TS to {out}")
 
-    tb = LiveTVTopBlock(args.rf, out)
+    tb = LiveTVTopBlock(args.rf, out, soapy_args=args.soapy_args)
 
     def _stop(signum, frame):
         LOG.info("Stopping live TV flowgraph...")
