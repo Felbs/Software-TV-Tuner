@@ -53,13 +53,19 @@ def main() -> int:
     ap.add_argument("--antenna", default="Antenna A")
     ap.add_argument("--ifgr", type=float, default=59)
     ap.add_argument("--rfgain-sel", type=int, default=5)
+    ap.add_argument("--soapy-args", default="driver=sdrplay",
+                    help="SoapySDR device specifier. Default 'driver=sdrplay'. "
+                         "For SoapyRemote (e.g. WSL2 -> Windows host), use "
+                         "'driver=remote,remote=<host>:55132,"
+                         "remote:driver=sdrplay'.")
     args = ap.parse_args()
 
     freq = rf_to_hz(args.rf)
     print(f"[probe-tp] RF {args.rf} -> {freq/1e6:.3f} MHz "
           f"(center, equivalent to channel center)")
+    print(f"[probe-tp] SoapySDR device: {args.soapy_args}")
 
-    sdr = SoapySDR.Device("driver=sdrplay")
+    sdr = SoapySDR.Device(args.soapy_args)
     sdr.setSampleRate(SOAPY_SDR_RX, 0, args.sample_rate)
     sdr.setAntenna(SOAPY_SDR_RX, 0, args.antenna)
     try:
