@@ -36,6 +36,10 @@ echo [soapy_server] starting SoapySDRServer on 0.0.0.0:55132
 echo [soapy_server]   (any host on your LAN can connect; bind 127.0.0.1
 echo [soapy_server]    only if you want to restrict to local clients)
 echo.
-"%SOAPY_SERVER%" --bind=":55132"
+REM Bind explicitly to 0.0.0.0:55132 (all IPv4 interfaces). The bare
+REM ":55132" form silently binds to ONE IPv6 interface only — clients
+REM connecting via IPv4 (e.g. WSL2 over the Hyper-V NAT bridge) then
+REM time out. 0.0.0.0 catches all IPv4 traffic.
+"%SOAPY_SERVER%" --bind="0.0.0.0:55132"
 
 endlocal
