@@ -127,6 +127,99 @@ from the air. The default table covers DC/Baltimore; edit it for
 your DMA. Real PSIP/EIT data (live show titles, ratings, signal %)
 populates only after the SDR successfully tunes a station.
 
+## Configure for your SDR + antenna
+
+The defaults assume an **SDRplay RSPdx with the TV antenna on
+"Antenna A"**. If you have a different SDR or your feed is on a
+different physical port, edit a few constants in `tools/config.py`.
+
+### What SDRs work
+
+This project decodes anything **SoapySDR** supports. Tested in-house:
+
+| SDR | Notes |
+|---|---|
+| **SDRplay RSPdx** | reference setup. 8 MS/s, 14-bit, three antenna ports |
+| **SDRplay RSP1A / RSPduo** | works; one antenna port (RSP1A) or two (RSPduo) |
+| **RTL-SDR (R820T2 dongle)** | works for strong stations only; max sample rate is ~2.4 MS/s, which is below ATSC's full bandwidth so SNR margin shrinks. Fine for nearby transmitters. |
+| **HackRF One** | works; 8 MS/s available; gain naming differs (no IFGR — uses LNA + VGA gain stages) |
+| **Airspy R2 / Mini** | works; 10 MS/s; gain ladder names differ |
+| **BladeRF** | works; expensive but excellent SNR |
+
+To check what SoapySDR sees on your machine:
+
+```bash
+SoapySDRUtil --probe       # Linux / Mac
+SoapySDRUtil.exe --probe   # Windows (in radioconda's terminal)
+```
+
+That should print at minimum a `driver=...` line and list of antennas
++ sample-rate ranges. If it prints nothing or "No supported devices
+found", your SoapySDR drivers aren't installed for that SDR — see
+your SDR vendor's docs (e.g. SoapySDRPlay3 for SDRplay,
+SoapyHackRF for HackRF).
+
+For deep diagnostics, we ship two helper scripts:
+
+```bash
+python tools/probe_sdr.py            # antennas, sample-rate, gain elements
+python tools/probe_throughput.py     # streaming sustained-rate test
+```
+
+### Pick the right antenna port
+
+In `tools/config.py`:
+
+```python
+ATSC_ANTENNA = "Antenna A"   # SDRplay RSPdx port label
+```
+
+The string must match what your SDR's driver advertises. Run
+`tools/probe_sdr.py` to see the exact names. Examples:
+
+- **SDRplay RSPdx**: `Antenna A`, `Antenna B`, `Antenna C`, or `HiZ`
+- **SDRplay RSP1A**: just `RX` (single port)
+- **HackRF**: `TX/RX` (single port)
+- **RTL-SDR**: `RX` (single port)
+
+If your SDR has only one port, the value doesn't matter much — but
+it does have to be a string the driver recognizes, or the call
+fails silently. If `tools/probe_sdr.py` prints `('A', 'B', 'C')`
+instead of `('Antenna A', 'Antenna B', 'Antenna C')`, use the
+short-form names.
+
+### Gain settings
+
+The two knobs in `tools/config.py`:
+
+```python
+ATSC_IF_GAIN_REDUCTION = 59   # SDRplay-specific; range 20-59 dB
+ATSC_RFGAIN_SEL        = 5    # SDRplay-specific; LNA stage selector
+```
+
+Both are SDRplay terminology. Other SDRs use different names:
+
+- **HackRF**: replace with `LNA` (0–40 dB, 8 dB steps) and `VGA`
+  (0–62 dB, 2 dB steps).
+- **RTL-SDR**: a single `TUNER` gain (0–49 dB), and AGC bool.
+- **Airspy**: `LNA`, `MIX`, `VGA` (0–15 each), or `linearity` /
+  `sensitivity` presets.
+
+Rule of thumb: **start with a strong UHF station (RF 14–36)**, set
+gain so the raw signal sits at about 60–80% of the ADC's range, and
+verify lock. Too high → clipping → equalizer fails. Too low →
+quantization noise → no lock. The included `tools/probe_sdr.py`
+prints the device's full gain range so you can pick a starting
+point.
+
+### Configure for non-DC markets
+
+Edit `tools/default_stations.py` to match your area's RF channels +
+callsigns. The format is documented in the file. The first scan
+(`python tools/tv_tuner.py --scan`) populates real PSIP data for any
+channel that locks, but the static table is what shows up in the
+picker before that.
+
 ## Run
 
 ```powershell
@@ -195,6 +288,68 @@ Captions appear in their own console window beside the TV. If
 captions don't show, the broadcaster may simply not be transmitting
 them on that subchannel (rare for major networks, common for
 secondary subchannels and shopping channels).
+
+## Troubleshooting
+
+### `SoapySDRUtil --probe` shows no devices
+
+Your SoapySDR driver for that SDR isn't installed. Install the
+vendor module:
+
+- **SDRplay**: API v3 from sdrplay.com + SoapySDRPlay3 from source
+  (see Linux install steps above).
+- **HackRF**: `apt install soapysdr-module-hackrf` (Linux) or
+  `radioconda` already includes it (Windows).
+- **RTL-SDR**: `apt install soapysdr-module-rtlsdr` or via radioconda.
+
+After install, replug the SDR and re-run `SoapySDRUtil --probe`.
+
+### `[scan] phase-1 sweep failed` / "no SDR detected"
+
+Same root cause: SoapySDR can't open the device. Verify with
+`SoapySDRUtil --probe` first; if that works but the scan still
+fails, another process is holding the SDR open (a stray `tv_live`
+or another SoapySDR app — `pkill -f tv_live.py` to clear).
+
+### Scan finds carriers but every channel says "no live.ts growth"
+
+The decoder pipeline started but didn't produce output. Check the
+log at `data/tv_live/tv_tuner.tv_live.log` for errors. Common cause:
+the antenna port in `config.py` doesn't match what your physical
+feed is connected to (silent failure — driver accepts the antenna
+name but the port has no signal).
+
+### Carriers found but lock fails ("PAT=0 in 5MB")
+
+Equalizer convergence is probabilistic on weak signals. Try:
+1. Re-aim the antenna (point at the transmitter; horizontal-V for
+   indoor rabbit ears).
+2. Run `python tools/tv_tuner.py --rf <strongest_channel>` and let
+   it retry up to 6 times — convergence sometimes needs multiple
+   cold-starts.
+3. Set `STVT_CONVERGENCE_SEC=30` and `STVT_MIN_PAT=3` env vars to
+   give weaker signals more time + lower the lock threshold.
+
+### Video stutters / picture freezes briefly
+
+This is normal on marginal signals. The three watchdogs (decoder,
+ffmpeg, optional player) auto-respawn the failing stage. If freezes
+last more than 10s and don't recover, your SNR is too low — better
+antenna or closer to the transmitter.
+
+### "Unknown codec / PID 0x30" when piping live.ts to ffmpeg
+
+You're either reading the file before the equalizer converged
+(wait ~30 seconds after `tv_live` starts), or sample loss in the
+SDR-to-decoder path is breaking RS decoding (WSL2 caveat — see
+the Linux section above).
+
+### No window pops up on Linux
+
+ffplay needs an X server. Ubuntu Desktop has one by default; Ubuntu
+Server doesn't. If you're SSH'd in, run `ssh -Y` from your local
+machine (X11 forwarding) or install a desktop environment on the
+server. WSLg (WSL2 on Windows 11) provides X11 automatically.
 
 ## Watchdogs
 
