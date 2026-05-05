@@ -2525,6 +2525,18 @@ def run_pipeline(rf: int, callsign: str, play: bool,
         MAX_RETRIES = 1 if fast_fail else 6
         CONVERGENCE_WINDOW_SEC = 8.0 if fast_fail else 12.0
         MIN_GOOD_PAT = 5
+        # Override knobs for slower SDR paths (e.g. SoapyRemote over WSL2):
+        # set $STVT_CONVERGENCE_SEC to extend the per-attempt wait, and
+        # $STVT_MIN_PAT to relax the lock threshold.
+        try:
+            CONVERGENCE_WINDOW_SEC = float(os.environ.get(
+                "STVT_CONVERGENCE_SEC", CONVERGENCE_WINDOW_SEC))
+        except ValueError:
+            pass
+        try:
+            MIN_GOOD_PAT = int(os.environ.get("STVT_MIN_PAT", MIN_GOOD_PAT))
+        except ValueError:
+            pass
         if fast_fail:
             print(f"[tv_tuner] manual-tune attempt for an undetected "
                   f"channel — single 8 s try, no retries.")
