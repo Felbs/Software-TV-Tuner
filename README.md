@@ -55,10 +55,12 @@ python tools\tv_tuner.py
 
 ## Download & install (Linux, ~5 minutes)
 
-Tested on Ubuntu 22.04 / 24.04. The `bootstrap.sh` script does all
-of this in one shot — apt-installs GNU Radio + ffmpeg + SoapySDR,
-builds and installs the gr-atscplus OOT module, and pip-installs
-the optional player extras.
+Tested on Ubuntu 22.04 / 24.04 (build + decoder pipeline validated;
+end-to-end watchable picture verified on bare-metal Linux. WSL2 has
+a known-issue caveat documented below). The `bootstrap.sh` script
+does the full setup in one shot — apt-installs GNU Radio + ffmpeg +
+SoapySDR + the Python bindings, builds and installs the gr-atscplus
+OOT module, and pip-installs optional player extras.
 
 ```bash
 git clone https://github.com/Felbs/Software-TV-Tuner.git
@@ -69,40 +71,51 @@ chmod +x bootstrap.sh && ./bootstrap.sh
 python3 tools/tv_tuner.py
 ```
 
-If you have an SDRplay device, install the SDRplay drivers (in
-this order; bootstrap doesn't do this for you because each step
-needs you to accept a vendor EULA):
-
-```bash
-# 1. SDRplay API v3 (the kernel-side driver, ~30 MB)
-wget https://www.sdrplay.com/software/SDRplay_RSP_API-Linux-3.15.2.run
-chmod +x SDRplay_RSP_API-Linux-3.15.2.run
-sudo ./SDRplay_RSP_API-Linux-3.15.2.run
-# Make sure the daemon is running:
-sudo systemctl enable --now sdrplay
-
-# 2. SoapySDRPlay3 (the SoapySDR module that bridges API v3 → SoapySDR)
-sudo apt-get install -y libsoapysdr-dev
-git clone https://github.com/pothosware/SoapySDRPlay3.git
-cd SoapySDRPlay3 && mkdir build && cd build
-cmake .. && make -j"$(nproc)" && sudo make install && sudo ldconfig
-cd ../..
-
-# 3. Verify
-SoapySDRUtil --probe   # should list your RSPdx / RSP1A / etc.
-```
-
-RTL-SDR, HackRF, BladeRF, and other SoapySDR devices work out of
-the box from the apt packages installed by `bootstrap.sh`. For any
-SDR, run `SoapySDRUtil --probe` to confirm the device is visible
-before launching `tv_tuner.py` — the channel scan fails fast with a
-"phase-1 sweep failed" message if no SDR is reachable.
+SDRplay-specific install steps and the WSL2 caveat are above.
 
 For a separate window per stream (so the picker stays clean), make
 sure one of `gnome-terminal`, `konsole`, `xfce4-terminal`, or
 `xterm` is installed; the launcher detects whichever is available.
 Headless / WSL2 environments without a terminal emulator just print
 the streaming output inline — usable, just less pretty.
+
+### Validated on bare-metal Linux; WSL2 is build-only
+
+The full receive chain (bootstrap → decoder build → SDR enumeration →
+two-phase scan → equalizer lock with `min_pn511_err = 0`) runs
+cleanly under WSL2 Ubuntu via the Windows-side SDR exposed through
+`tools/soapy_server.bat` + SoapyRemote. **However, sustained
+sample-stream integrity over WSL2's NAT loopback is not reliable
+enough for end-to-end MPEG-TS decode** — we measured ~1.8% sample
+loss + ~22k UDP-buffer overflow events per second, which the FS
+checker survives but Reed-Solomon decoding does not. The result:
+the equalizer locks textbook-clean but the TS bytes downstream are
+corrupted, so ffmpeg/ffplay never sees a valid program. This is a
+WSL2 USB / network passthrough limitation, not a project limitation.
+
+Run it natively: dual-boot Ubuntu, native Linux desktop, or a Linux
+machine with USB plugged directly into the host. SDRplay's API +
+`SoapySDRPlay3` install per their docs (vendor `.run` installer +
+build SoapySDRPlay3 from source against `libsoapysdr-dev`):
+
+```bash
+wget https://www.sdrplay.com/software/SDRplay_RSP_API-Linux-3.15.2.run
+chmod +x SDRplay_RSP_API-Linux-3.15.2.run
+sudo ./SDRplay_RSP_API-Linux-3.15.2.run
+sudo systemctl enable --now sdrplay
+
+sudo apt-get install -y libsoapysdr-dev
+git clone https://github.com/pothosware/SoapySDRPlay3.git
+cd SoapySDRPlay3 && mkdir build && cd build
+cmake .. && make -j"$(nproc)" && sudo make install && sudo ldconfig
+
+SoapySDRUtil --probe   # should list your RSP* device
+```
+
+RTL-SDR, HackRF, BladeRF, and other SoapySDR devices work out of
+the box from `bootstrap.sh`'s apt packages. For any SDR, run
+`SoapySDRUtil --probe` to confirm the device is visible before
+launching `tv_tuner.py`.
 
 The interactive picker shows every channel in your DMA grouped by RF
 frequency, with on-now show titles, ratings, and signal strength
