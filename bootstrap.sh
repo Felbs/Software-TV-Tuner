@@ -19,10 +19,12 @@ if ! command -v gnuradio-config-info >/dev/null 2>&1 \
     sudo apt-get install -y -qq \
         build-essential cmake git pkg-config \
         python3 python3-pip python3-numpy python3-yaml python3-scipy \
+        python3-soapysdr \
         gnuradio gnuradio-dev gr-osmosdr libvolk-dev pybind11-dev \
         libfftw3-dev \
         soapysdr-tools soapysdr-module-all \
-        ffmpeg
+        ffmpeg \
+        usbutils
 fi
 
 # ── 2. Build & install gr-atscplus ────────────────────────────────
