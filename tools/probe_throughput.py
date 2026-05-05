@@ -88,8 +88,10 @@ def main() -> int:
 
     if args.stream_args:
         print(f"[probe-tp] stream args: {args.stream_args}")
-        rx = sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32, [0],
-                             args.stream_args)
+        # SoapySDR's Python bindings want a dict for stream args, not the
+        # comma-separated string the CLI accepts. Parse here.
+        kw = dict(p.split("=", 1) for p in args.stream_args.split(",") if "=" in p)
+        rx = sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32, [0], kw)
     else:
         rx = sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32)
     sdr.activateStream(rx)
