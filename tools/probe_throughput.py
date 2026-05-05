@@ -58,6 +58,11 @@ def main() -> int:
                          "For SoapyRemote (e.g. WSL2 -> Windows host), use "
                          "'driver=remote,remote=<host>:55132,"
                          "remote:driver=sdrplay'.")
+    ap.add_argument("--stream-args", default="",
+                    help="SoapySDR stream args (passed to setupStream). "
+                         "For SoapyRemote use 'prot=tcp' to force TCP "
+                         "transport (slower, but guaranteed lossless — fixes "
+                         "RS-decode failures from UDP drops).")
     args = ap.parse_args()
 
     freq = rf_to_hz(args.rf)
@@ -81,7 +86,12 @@ def main() -> int:
     print(f"[probe-tp] sample rate: requested {args.sample_rate/1e6:.3f} -> "
           f"got {actual_rate/1e6:.6f} MS/s")
 
-    rx = sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32)
+    if args.stream_args:
+        print(f"[probe-tp] stream args: {args.stream_args}")
+        rx = sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32, [0],
+                             args.stream_args)
+    else:
+        rx = sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32)
     sdr.activateStream(rx)
     buf = np.zeros(8192, np.complex64)
     expected = int(actual_rate * args.seconds)
