@@ -108,6 +108,24 @@ def _resolve_binary(name: str, win_default: str) -> str:
 PYTHON_EXE = _resolve_python_exe()
 FFMPEG = _resolve_binary("ffmpeg", r"C:\ffmpeg\bin\ffmpeg.exe")
 FFPLAY = _resolve_binary("ffplay", r"C:\ffmpeg\bin\ffplay.exe")
+FFPROBE = _resolve_binary("ffprobe", r"C:\ffmpeg\bin\ffprobe.exe")
+# ffmpeg analyzeduration / probesize for the live-TS pipeline.
+# Linux/Mac get larger values because USB throughput jitter on those
+# platforms produces a noisier MPEG-TS that ffmpeg needs more headroom
+# to discover programs in. Windows defaults stay small (clean stream,
+# fast picture-up). ffmpeg uses these as upper bounds — clean signals
+# return as soon as codec params are known, so the bigger Linux cap
+# doesn't slow Linux down when the stream is good.
+if sys.platform == "win32":
+    FFMPEG_ANALYZE_DURATION = "2000000"   # 2 s
+    FFMPEG_PROBE_SIZE       = "3000000"   # 3 MB
+    FFPLAY_ANALYZE_DURATION = "3000000"   # 3 s
+    FFPLAY_PROBE_SIZE       = "3000000"   # 3 MB
+else:
+    FFMPEG_ANALYZE_DURATION = "10000000"  # 10 s
+    FFMPEG_PROBE_SIZE       = "50000000"  # 50 MB
+    FFPLAY_ANALYZE_DURATION = "10000000"  # 10 s
+    FFPLAY_PROBE_SIZE       = "50000000"  # 50 MB
 TV_PLAYER = HERE / "tv_player.py"   # bundled with the repo
 # SDRplay API install dir (Windows-only — on Linux the API drops a
 # .so into /usr/local/lib and SoapySDRPlay finds it via the runtime
@@ -326,7 +344,7 @@ def probe_program_id(program_index: int = 1, timeout_sec: float = 8.0) -> int | 
         time.sleep(0.5)
     try:
         result = subprocess.run(
-            [r"C:\ffmpeg\bin\ffprobe.exe",
+            [FFPROBE,
              "-v", "error", "-of", "json", "-show_programs",
              "-analyzeduration", "5000000", "-probesize", "5000000",
              "-f", "mpegts", "-i", str(LIVE_TS)],
@@ -587,7 +605,7 @@ def ffprobe_programs(timeout_sec: float = 12.0) -> list[dict]:
     video_height, audio_codec. Empty list if probe fails."""
     try:
         result = subprocess.run(
-            [r"C:\ffmpeg\bin\ffprobe.exe",
+            [FFPROBE,
              "-v", "error", "-of", "json",
              "-show_programs", "-show_streams",
              "-analyzeduration", "5000000", "-probesize", "5000000",
@@ -1071,8 +1089,8 @@ def build_ffmpeg_cmd(play: bool, record_path: Path | None,
         # favor inter-prediction. Smooths the visible breakage from TEI
         # scrubs that the FS-validator can't catch.
         "-ec", "favor_inter+deblock+guess_mvs",
-        "-analyzeduration", "2000000",
-        "-probesize", "3000000",
+        "-analyzeduration", FFMPEG_ANALYZE_DURATION,
+        "-probesize", FFMPEG_PROBE_SIZE,
         "-thread_queue_size", "4096",
         "-f", "mpegts",
         "-i", "pipe:0",
@@ -1171,8 +1189,8 @@ def spawn_ffplay(window_title: str, log_fh):
          "-window_title", window_title,
          "-fflags", "+genpts+igndts+discardcorrupt",
          "-err_detect", "ignore_err",
-         "-analyzeduration", "3000000",
-         "-probesize", "3000000",
+         "-analyzeduration", FFPLAY_ANALYZE_DURATION,
+         "-probesize", FFPLAY_PROBE_SIZE,
          "-f", "mpegts",
          "-i", "pipe:0",
          "-sync", "audio",
@@ -2798,19 +2816,24 @@ def _spawn_in_new_console(cmd: list[str]) -> subprocess.Popen:
         )
     # Linux/Mac: pick whichever terminal emulator is present and tell
     # it to run our command. Each emulator has its own argv shape.
+    # Tee subprocess output so a crash in the popup window leaves a
+    # readable trace in ~/stvt_stream.log instead of vanishing when the
+    # window scrolls past or closes. `exec bash` keeps the window alive
+    # after the inner command exits so the user can still read it.
     quoted = " ".join(_shell_quote(a) for a in cmd)
+    tee_suffix = " 2>&1 | tee ~/stvt_stream.log; exec bash"
     for emu, wrap in (
         ("gnome-terminal", ["gnome-terminal", "--", "bash", "-c",
-                            f"{quoted}; exec bash"]),
+                            f"{quoted}{tee_suffix}"]),
         ("konsole",        ["konsole", "-e", "bash", "-c",
-                            f"{quoted}; exec bash"]),
+                            f"{quoted}{tee_suffix}"]),
         ("xfce4-terminal", ["xfce4-terminal", "-e",
-                            f"bash -c '{quoted}; exec bash'"]),
+                            f"bash -c '{quoted}{tee_suffix}'"]),
         ("x-terminal-emulator",
                            ["x-terminal-emulator", "-e",
-                            "bash", "-c", f"{quoted}; exec bash"]),
+                            "bash", "-c", f"{quoted}{tee_suffix}"]),
         ("xterm",          ["xterm", "-e", "bash", "-c",
-                            f"{quoted}; exec bash"]),
+                            f"{quoted}{tee_suffix}"]),
     ):
         if shutil.which(emu):
             return subprocess.Popen(wrap, start_new_session=True)

@@ -12,12 +12,19 @@ description here (python/__init__.py).
 '''
 import os
 
-# import pybind11 generated symbols into the howto namespace
+# import pybind11 generated symbols. The compiled module is named
+# atscplus_python on modern builds (cookiecutter renamed in gr-modtool
+# >= 3.10), but earlier builds and Windows radioconda installs may
+# still produce howto_python from the legacy template. Try the modern
+# name first, fall back to the legacy one. Either way, an unbuilt
+# python-only checkout has neither — that's also fine.
 try:
-    # this might fail if the module is python-only
-    from .howto_python import *
+    from .atscplus_python import *
 except ModuleNotFoundError:
-    pass
+    try:
+        from .howto_python import *
+    except ModuleNotFoundError:
+        pass
 
 # import any pure python here
 #
