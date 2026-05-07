@@ -110,22 +110,22 @@ FFMPEG = _resolve_binary("ffmpeg", r"C:\ffmpeg\bin\ffmpeg.exe")
 FFPLAY = _resolve_binary("ffplay", r"C:\ffmpeg\bin\ffplay.exe")
 FFPROBE = _resolve_binary("ffprobe", r"C:\ffmpeg\bin\ffprobe.exe")
 # ffmpeg analyzeduration / probesize for the live-TS pipeline.
-# Linux/Mac get larger values because USB throughput jitter on those
-# platforms produces a noisier MPEG-TS that ffmpeg needs more headroom
-# to discover programs in. Windows defaults stay small (clean stream,
-# fast picture-up). ffmpeg uses these as upper bounds — clean signals
-# return as soon as codec params are known, so the bigger Linux cap
-# doesn't slow Linux down when the stream is good.
+# ffmpeg sees the raw noisy TS straight from the GR flowgraph, so on
+# Linux/Mac it needs a larger probe budget to find programs through
+# the USB-jitter corruption. Windows clean signal needs much less.
+# ffplay, in contrast, reads ffmpeg's *already-extracted* single-program
+# output — that input is clean on both platforms, so ffplay's probe
+# stays small everywhere. (A too-large ffplay probesize on a slow Linux
+# data rate caused ffplay to buffer past the decoder-restart cycle and
+# never start playing — see commit history.)
 if sys.platform == "win32":
     FFMPEG_ANALYZE_DURATION = "2000000"   # 2 s
     FFMPEG_PROBE_SIZE       = "3000000"   # 3 MB
-    FFPLAY_ANALYZE_DURATION = "3000000"   # 3 s
-    FFPLAY_PROBE_SIZE       = "3000000"   # 3 MB
 else:
     FFMPEG_ANALYZE_DURATION = "10000000"  # 10 s
     FFMPEG_PROBE_SIZE       = "50000000"  # 50 MB
-    FFPLAY_ANALYZE_DURATION = "10000000"  # 10 s
-    FFPLAY_PROBE_SIZE       = "50000000"  # 50 MB
+FFPLAY_ANALYZE_DURATION = "3000000"       # 3 s — both platforms
+FFPLAY_PROBE_SIZE       = "3000000"       # 3 MB — both platforms
 TV_PLAYER = HERE / "tv_player.py"   # bundled with the repo
 # SDRplay API install dir (Windows-only — on Linux the API drops a
 # .so into /usr/local/lib and SoapySDRPlay finds it via the runtime
