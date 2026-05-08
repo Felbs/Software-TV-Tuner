@@ -1776,12 +1776,12 @@ def print_scan_table(scan: dict) -> list[dict]:
 
     print()
     if has_now:
-        print(f"  {'#':>3}  {'Ch':<5}  {'Callsign':<14}  "
+        print(f"  {'#':>3}  {'RF':>3}  {'Ch':<5}  {'Callsign':<14}  "
               f"{'Sig':>4}  {'Quality':<14}  Now playing")
     else:
-        print(f"  {'#':>3}  {'Ch':<5}  {'Callsign':<14}  "
+        print(f"  {'#':>3}  {'RF':>3}  {'Ch':<5}  {'Callsign':<14}  "
               f"{'Sig':>4}  Quality")
-    print("  " + "-" * 78)
+    print("  " + "-" * 83)
     last_major = None
     for i, r in enumerate(rows, start=1):
         major = r["virtual"].split(".")[0] if "." in r["virtual"] else None
@@ -1807,10 +1807,10 @@ def print_scan_table(scan: dict) -> list[dict]:
             title_max = 30
             now_str = (f"{now[:title_max]}{'…' if len(now) > title_max else ''}"
                        f"{rating_tag} ({rem // 60}m)") if now else ""
-            print(f"  {i:>3}  {marker} {r['virtual']:<3}  "
+            print(f"  {i:>3}  {r['rf']:>3}  {marker} {r['virtual']:<3}  "
                   f"{nm:<14}  {sig_str:>4}  {q:<24}  {now_str}")
         else:
-            print(f"  {i:>3}  {marker} {r['virtual']:<3}  "
+            print(f"  {i:>3}  {r['rf']:>3}  {marker} {r['virtual']:<3}  "
                   f"{nm:<14}  {sig_str:>4}  {q}")
         last_major = major
     print()
