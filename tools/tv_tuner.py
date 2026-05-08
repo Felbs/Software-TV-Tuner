@@ -2337,21 +2337,47 @@ def run_pipeline(rf: int, callsign: str, play: bool,
     ff_log = log_dir / "tv_tuner.ffmpeg.log"
     play_log = log_dir / "tv_tuner.ffplay.log"
 
-    cmd = build_ffmpeg_cmd(play=play, record_path=record_path,
-                           stream_url=stream_url, program=program,
-                           captions=captions)
+    # Linux fast-play path: when the user is just watching live (no record,
+    # no stream, no caption transcode embedded in ffmpeg), bypass ffmpeg
+    # entirely and have the TailWorker write live.ts directly to ffplay's
+    # stdin. ffmpeg's transcoding pipeline is fragile against the corrupt
+    # MPEG-TS that USB-fed Linux pipelines produce — it fails to establish
+    # codec parameters and dies before video reaches ffplay. ffplay handles
+    # the same noisy input fine on its own. Windows uses the legacy path
+    # (NVENC re-encode) since its clean stream doesn't trigger the bug and
+    # the transcode gives nicer output. Opt-out: STVT_LINUX_FAST_PLAY=0.
+    linux_fast_play = (
+        sys.platform != "win32"
+        and play
+        and record_path is None
+        and stream_url is None
+        and player == "ffplay"
+        and os.environ.get("STVT_LINUX_FAST_PLAY", "1") != "0"
+    )
+
+    if linux_fast_play:
+        cmd: list[str] = []  # unused — we skip ffmpeg
+    else:
+        cmd = build_ffmpeg_cmd(play=play, record_path=record_path,
+                               stream_url=stream_url, program=program,
+                               captions=captions)
 
     if dry_run:
         print("── DRY RUN ──")
         print("tv_live cmd: ", " ".join(
             [PYTHON_EXE, "-u", str(TV_LIVE_PY), "--rf", str(rf)]))
-        print("ffmpeg cmd : ", " ".join(cmd))
-        if play:
+        if linux_fast_play:
+            print("ffmpeg cmd : (skipped — Linux fast-play)")
             print("ffplay cmd : ", " ".join(
-                [FFPLAY, "-f", "mpegts", "-i", "pipe:0", "..."]))
+                [FFPLAY, "-f", "mpegts", "-i", "pipe:0", "(reads live.ts via TailWorker)"]))
+        else:
+            print("ffmpeg cmd : ", " ".join(cmd))
+            if play:
+                print("ffplay cmd : ", " ".join(
+                    [FFPLAY, "-f", "mpegts", "-i", "pipe:0", "..."]))
         return 0
 
-    if not Path(FFMPEG).exists():
+    if not linux_fast_play and not Path(FFMPEG).exists():
         raise SystemExit(f"ffmpeg not found at {FFMPEG}")
     if play and not Path(FFPLAY).exists():
         raise SystemExit(f"ffplay not found at {FFPLAY}")
@@ -2431,9 +2457,28 @@ def run_pipeline(rf: int, callsign: str, play: bool,
         return True
 
     def recover_ffplay() -> bool:
-        """Respawn ffplay (and its relay) without touching ffmpeg."""
+        """Respawn ffplay (and its relay) without touching ffmpeg.
+        In Linux fast-play mode there is no ffmpeg in the chain — we
+        respawn ffplay and rebuild the TailWorker pointed at its stdin."""
         if stop_event.is_set() or not play:
             return False
+        if linux_fast_play:
+            kill_proc(state.ffplay_proc, "ffplay")
+            state.ffplay_proc = None
+            if state.tail is not None:
+                state.tail.stop_local()
+                state.tail = None
+            try:
+                new_play = spawn_ffplay(
+                    f"Software TV Tuner — {callsign} (RF{rf})", play_log_fh)
+                state.ffplay_proc = new_play
+                state.tail = TailWorker(new_play.stdin, stop_event)
+                state.tail.start()
+            except Exception as e:
+                print(f"[tv_tuner] ffplay respawn failed: {e}",
+                      file=sys.stderr)
+                return False
+            return True
         ff = state.ffmpeg_proc
         if ff is None or ff.poll() is not None:
             return False
@@ -2509,6 +2554,21 @@ def run_pipeline(rf: int, callsign: str, play: bool,
             print("[tv_tuner] decoder restart could not re-acquire lock")
             return False
         state.tv_proc = new_tv
+
+        if linux_fast_play:
+            # Linux fast-play: no ffmpeg in the chain — just respawn
+            # ffplay and a fresh TailWorker pointed at its stdin.
+            try:
+                new_play = spawn_ffplay(
+                    f"Software TV Tuner — {callsign} (RF{rf})", play_log_fh)
+                state.ffplay_proc = new_play
+                state.tail = TailWorker(new_play.stdin, stop_event)
+                state.tail.start()
+            except Exception as e:
+                print(f"[tv_tuner] ffplay respawn failed: {e}",
+                      file=sys.stderr)
+                return False
+            return True
 
         # Respawn ffmpeg + tail + ffplay with clean state.
         try:
@@ -2643,6 +2703,28 @@ def run_pipeline(rf: int, callsign: str, play: bool,
             status_loop(state, stop_event, record_path, stream_url,
                         recover_ffmpeg=None,
                         recover_ffplay=None,
+                        recover_decoder=recover_decoder)
+        elif linux_fast_play:
+            # Linux fast-play path: skip ffmpeg, TailWorker writes live.ts
+            # directly to ffplay's stdin. ffplay handles the noisy MPEG-TS
+            # input fine on its own — what was breaking on Linux was
+            # ffmpeg's transcoder failing to establish codec parameters
+            # before EOF and dying. By skipping the transcode entirely we
+            # get picture (and audio, since ac3 errors don't kill the
+            # whole pipeline anymore) without that fragility.
+            state.ffplay_proc = spawn_ffplay(
+                f"Software TV Tuner — {callsign} (RF{rf})", play_log_fh)
+            print(f"[tv_tuner] ffplay PID={state.ffplay_proc.pid} "
+                  f"(Linux fast-play — ffmpeg bypassed)")
+            state.tail = TailWorker(state.ffplay_proc.stdin, stop_event)
+            state.tail.start()
+
+            if captions:
+                cc_proc = _spawn_cc_window(cc_channel)
+
+            status_loop(state, stop_event, record_path, stream_url,
+                        recover_ffmpeg=None,
+                        recover_ffplay=recover_ffplay,
                         recover_decoder=recover_decoder)
         else:
             # Legacy ffplay path: ffmpeg re-encode → optional tee fan-out.
