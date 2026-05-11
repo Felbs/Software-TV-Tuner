@@ -197,7 +197,9 @@ class LiveTVTopBlock(gr.top_block):
         dcr  = gr_filter.dc_blocker_ff(32)
         # Slower AGC (1e-6) lets the long equalizer settle on stable amplitude.
         agc  = analog.agc_ff(1e-6, 4.0)
-        sync = dtv.atsc_sync(output_rate)
+        # Soft sync with tunable lock/sticky/emit env vars (ATSC_SYNC_SOFT_*).
+        # Sweep-tuned via overnight_sticky_pipeline.sh on 2026-05-11.
+        sync = atscplus.atsc_sync_soft(output_rate)
         fs_check = atscplus.atsc_fs_checker_inst()
         # 256-tap LMS equalizer from the gr-atscplus fork — drops PAT count
         # from 2/14MB → 97/14MB, distinct PIDs 7841 → 29, TEI 100% → 0%.
