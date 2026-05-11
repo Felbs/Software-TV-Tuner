@@ -197,12 +197,12 @@ class LiveTVTopBlock(gr.top_block):
         dcr  = gr_filter.dc_blocker_ff(32)
         # Slower AGC (1e-6) lets the long equalizer settle on stable amplitude.
         agc  = analog.agc_ff(1e-6, 4.0)
-        sync = dtv.atsc_sync(output_rate)
+        sync = atscplus.atsc_sync_soft(output_rate)
         fs_check = atscplus.atsc_fs_checker_inst()
         # 256-tap LMS equalizer from the gr-atscplus fork — drops PAT count
         # from 2/14MB → 97/14MB, distinct PIDs 7841 → 29, TEI 100% → 0%.
         # Convergence is probabilistic (~1 in 3 cold-starts); see watchdog.
-        equalizer = atscplus.atsc_equalizer_long()
+        equalizer = atscplus.atsc_equalizer_pilot_multifs_dd()
         viterbi = dtv.atsc_viterbi_decoder()
         deinterleaver = dtv.atsc_deinterleaver()
         rs = dtv.atsc_rs_decoder()
@@ -232,7 +232,16 @@ class LiveTVTopBlock(gr.top_block):
             self.connect((blk_in, 0), (blk_out, 0))
             self.connect((blk_in, 1), (blk_out, 1))
         self.connect(derand, depad)
-        self.connect(depad, ts_file)
+        # TEI-scrub: pack depad's byte stream into 188-byte TS packets,
+        # rewrite RS-uncorrectable packets to NULL packets (preserves CC),
+        # then back to a byte stream into the file sink.
+        # Hold strong refs on `self` — Python sync_block instances must
+        # outlive top_block.start(); otherwise GR's block_executor crashes
+        # when its weakref to the deallocated Python wrapper is cleared.
+        self._v2s_in   = blocks.stream_to_vector(gr.sizeof_char, 188)
+        self._teiscrub = TEIScrub()
+        self._v2s_out  = blocks.vector_to_stream(gr.sizeof_char, 188)
+        self.connect(depad, self._v2s_in, self._teiscrub, self._v2s_out, ts_file)
 
 
 def main():
