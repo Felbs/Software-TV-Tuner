@@ -13,12 +13,22 @@ include(GrPlatform) #define LIB_SUFFIX
 
 list(APPEND atscplus_sources
     atsc_equalizer_long_impl.cc
+    atsc_equalizer_pilot_impl.cc
+    atsc_equalizer_pilot_dd_impl.cc
+    atsc_equalizer_pilot_dd_soft_impl.cc
+    atsc_equalizer_pilot_multifs_impl.cc
+    atsc_equalizer_pilot_multifs_dd_impl.cc
     atsc_equalizer_cma_impl.cc
     atsc_single_viterbi_soft.cc
     atsc_viterbi_soft_impl.cc
     atsc_fs_checker_inst_impl.cc
     atsc_fpll_tight_impl.cc
     atsc_sync_tunable_impl.cc
+    atsc_sync_soft_impl.cc
+    atsc_sync_kalman_impl.cc
+    atsc_sync_fieldlock_impl.cc
+    atsc_sync_slidefs_impl.cc
+    atsc_sync_pathA_impl.cc
 )
 
 set(atscplus_sources
@@ -30,6 +40,15 @@ if(NOT atscplus_sources)
 endif(NOT atscplus_sources)
 
 add_library(gnuradio-atscplus SHARED ${atscplus_sources})
+find_package(Eigen3 3.3 QUIET NO_MODULE)
+if(NOT Eigen3_FOUND)
+    # Fallback: header-only, just point at the system include path.
+    find_path(EIGEN3_INCLUDE_DIR NAMES Eigen/Dense PATH_SUFFIXES eigen3)
+    if(NOT EIGEN3_INCLUDE_DIR)
+        message(FATAL_ERROR "Eigen3 headers not found (required by atsc_equalizer_pilot)")
+    endif()
+    target_include_directories(gnuradio-atscplus PRIVATE ${EIGEN3_INCLUDE_DIR})
+endif()
 target_link_libraries(gnuradio-atscplus
     gnuradio::gnuradio-runtime
     gnuradio::gnuradio-dtv
@@ -37,6 +56,9 @@ target_link_libraries(gnuradio-atscplus
     gnuradio::gnuradio-analog
     Volk::volk
 )
+if(Eigen3_FOUND)
+    target_link_libraries(gnuradio-atscplus Eigen3::Eigen)
+endif()
 target_include_directories(
     gnuradio-atscplus
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include>
