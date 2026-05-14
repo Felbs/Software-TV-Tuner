@@ -19,6 +19,15 @@ set(CMAKE_BUILD_TYPE
 cmake_minimum_required(VERSION 3.8)
 project(gr-atscplus CXX C)
 enable_testing()
+########################################################################
+# Eco-mode equalizer (NTAPS=128)
+########################################################################
+option(ATSC_EQ_ECO "Eco-mode equalizer: NTAPS=128 instead of 256" OFF)
+if(ATSC_EQ_ECO)
+    add_definitions(-DATSC_EQ_ECO)
+    message(STATUS "ATSC_EQ_ECO enabled: equalizer NTAPS=128")
+endif()
+
 
 # Install to PyBOMBS target prefix if defined
 if(DEFINED ENV{PYBOMBS_PREFIX})

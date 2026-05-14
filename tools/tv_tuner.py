@@ -1210,19 +1210,49 @@ def spawn_ffmpeg(cmd: list[str], log_fh, want_stdout_pipe: bool):
 
 
 def spawn_ffplay(window_title: str, log_fh):
+    # Optional alternative player — mpv has a more robust mpegts demuxer than
+    # ffplay's (better recovery from PES corruption, larger built-in buffer).
+    # On marginal/CPU-bound systems where ffplay drops the window with
+    # "could not find codec parameters", mpv often still renders. Activate
+    # via STVT_PLAYER=mpv. Default remains ffplay (Windows runtime).
+    if os.environ.get("STVT_PLAYER", "ffplay") == "mpv":
+        cmd = ["mpv",
+               "--no-terminal",
+               "--keep-open=yes",
+               f"--title={window_title}",
+               "--demuxer=lavf",
+               "--demuxer-lavf-format=mpegts",
+               "--demuxer-lavf-analyzeduration=3",
+               "--demuxer-lavf-probesize=3000000",
+               "--cache=yes",
+               "--cache-secs=4",
+               "-"]
+        return subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=log_fh,
+            stderr=log_fh,
+            creationflags=NEW_PROCESS_GROUP,
+        )
+    cmd = [FFPLAY,
+           "-hide_banner", "-loglevel", "warning",
+           "-window_title", window_title,
+           "-fflags", "+genpts+igndts+discardcorrupt",
+           "-err_detect", "ignore_err",
+           "-analyzeduration", FFPLAY_ANALYZE_DURATION,
+           "-probesize", FFPLAY_PROBE_SIZE]
+    # Linux: hardware MPEG-2 decode via NVDEC frees CPU for the flowgraph,
+    # which closes the gap with Windows on older CPUs (Ryzen 1600X-class).
+    # Opt-out: STVT_FFPLAY_HWACCEL=none. Windows untouched.
+    if sys.platform != "win32" and os.environ.get("STVT_FFPLAY_HWACCEL", "cuda") != "none":
+        cmd += ["-hwaccel", os.environ.get("STVT_FFPLAY_HWACCEL", "cuda")]
+    cmd += ["-f", "mpegts",
+            "-i", "pipe:0",
+            "-sync", "audio",
+            "-framedrop",
+            "-infbuf"]
     return subprocess.Popen(
-        [FFPLAY,
-         "-hide_banner", "-loglevel", "warning",
-         "-window_title", window_title,
-         "-fflags", "+genpts+igndts+discardcorrupt",
-         "-err_detect", "ignore_err",
-         "-analyzeduration", FFPLAY_ANALYZE_DURATION,
-         "-probesize", FFPLAY_PROBE_SIZE,
-         "-f", "mpegts",
-         "-i", "pipe:0",
-         "-sync", "audio",
-         "-framedrop",
-         "-infbuf"],
+        cmd,
         stdin=subprocess.PIPE,
         stdout=log_fh,
         stderr=log_fh,
@@ -2871,19 +2901,26 @@ def _spawn_in_new_console(cmd: list[str]) -> subprocess.Popen:
     # window scrolls past or closes. `exec bash` keeps the window alive
     # after the inner command exits so the user can still read it.
     quoted = " ".join(_shell_quote(a) for a in cmd)
+    # Wayland-native terminals (gnome-terminal under GNOME-Wayland) strip
+    # DISPLAY/XAUTHORITY when spawned, leaving the X11 child (ffplay) with
+    # no place to draw. Re-export from the picker's own env into the popup
+    # bash so ffplay can find the X server.
+    _display = os.environ.get("DISPLAY", ":0")
+    _xauth = os.environ.get("XAUTHORITY", "")
+    _display_prefix = f"export DISPLAY={_display}; export XAUTHORITY={_xauth}; "
     tee_suffix = " 2>&1 | tee ~/stvt_stream.log; exec bash"
     for emu, wrap in (
         ("gnome-terminal", ["gnome-terminal", "--", "bash", "-c",
-                            f"{quoted}{tee_suffix}"]),
+                            f"{_display_prefix}{quoted}{tee_suffix}"]),
         ("konsole",        ["konsole", "-e", "bash", "-c",
-                            f"{quoted}{tee_suffix}"]),
+                            f"{_display_prefix}{quoted}{tee_suffix}"]),
         ("xfce4-terminal", ["xfce4-terminal", "-e",
-                            f"bash -c '{quoted}{tee_suffix}'"]),
+                            f"bash -c '{_display_prefix}{quoted}{tee_suffix}'"]),
         ("x-terminal-emulator",
                            ["x-terminal-emulator", "-e",
-                            "bash", "-c", f"{quoted}{tee_suffix}"]),
+                            "bash", "-c", f"{_display_prefix}{quoted}{tee_suffix}"]),
         ("xterm",          ["xterm", "-e", "bash", "-c",
-                            f"{quoted}{tee_suffix}"]),
+                            f"{_display_prefix}{quoted}{tee_suffix}"]),
     ):
         if shutil.which(emu):
             return subprocess.Popen(wrap, start_new_session=True)

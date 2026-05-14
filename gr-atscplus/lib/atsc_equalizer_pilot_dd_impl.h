@@ -28,6 +28,8 @@ private:
     void filterN(const float* input_samples, float* output_samples, int nsamples);
     void estimate_taps_LS(const float* input_samples,
                           const float* training_pattern);
+    void fs_lms_adapt(const float* input_samples,
+                      const float* training_pattern);
     void filter_and_dd_update(const float* input_samples,
                               float* output_samples,
                               int nsamples);
@@ -42,6 +44,12 @@ private:
 
     bool d_buff_not_filled = true;
     float d_last_residual_rms = 0.0f;
+
+    // DD warmup: gate DD adaptation until FS residual RMS drops below
+    // threshold for N consecutive field syncs. Prevents divergence from
+    // cold-start delta init.
+    bool d_dd_enabled = false;
+    int  d_warmup_good_fs = 0;
 
     // DD knobs (loaded once in ctor from env vars).
     float d_mu;

@@ -161,6 +161,10 @@ void atsc_equalizer_pilot_dd_impl::filter_and_dd_update(const float* input_sampl
         output_samples[j] = y;
 
         if (mu <= 0.0f) continue;
+        // Don't run DD until equalizer has converged at FS (residual_rms
+        // below WARMUP threshold for N consecutive FSes). Prevents cold-start
+        // divergence from delta-init.
+        if (!d_dd_enabled) { n_gat++; continue; }
 
         float s = slice_vsb(y);
         float e = y - s;
@@ -195,6 +199,75 @@ void atsc_equalizer_pilot_dd_impl::filter_and_dd_update(const float* input_sampl
             d_taps[NPRETAPS] = 1.0f;
         }
         d_n_dd_diverge++;
+    }
+}
+
+// Fast LMS adaptation at field-sync — drop-in replacement for the O(N^3)
+// LS solve, which can't keep up with real-time at NTAPS=256. Same algorithm
+// as atsc_equalizer_long's adaptN, plus snapshots taps for divergence-bail.
+// BETA configurable via PILOT_DD_FS_BETA env var.
+//
+// Also tracks DD-warmup state: DD adaptation between FSes is gated until
+// residual RMS at FS drops below threshold for N consecutive FSes (cold
+// start from delta-init otherwise diverges DD via wrong slicer decisions).
+void atsc_equalizer_pilot_dd_impl::fs_lms_adapt(const float* input_samples,
+                                                  const float* training_pattern)
+{
+    static const float BETA = env_f("PILOT_DD_FS_BETA", 5e-5f);
+    static const float WARMUP_RMS_THRESHOLD = env_f("PILOT_DD_WARMUP_RMS", 2.0f);
+    static const int   WARMUP_GOOD_FS_REQ  = env_i("PILOT_DD_WARMUP_FS",  3);
+    static constexpr int M = KNOWN_FIELD_SYNC_LENGTH;
+    static constexpr float DIVERGENCE_BAIL = 50.0f;
+
+    for (int j = 0; j < M; j++) {
+        float y = 0.0f;
+        volk_32f_x2_dot_prod_32f(&y, &input_samples[j], &d_taps[0], NTAPS);
+        float e = y - training_pattern[j];
+        float tmp[NTAPS];
+        volk_32f_s32f_multiply_32f(tmp, &input_samples[j], BETA * e, NTAPS);
+        volk_32f_x2_subtract_32f(&d_taps[0], &d_taps[0], tmp, NTAPS);
+    }
+
+    // Compute residual RMS for monitoring (one filter pass on the FS segment).
+    double sse = 0.0;
+    for (int j = 0; j < M; j++) {
+        float y = 0.0f;
+        volk_32f_x2_dot_prod_32f(&y, &input_samples[j], &d_taps[0], NTAPS);
+        double e = y - (double)training_pattern[j];
+        sse += e * e;
+    }
+    d_last_residual_rms = (float)std::sqrt(sse / (double)M);
+
+    // Warmup tracker: count consecutive good FSes. When count >= req, allow DD.
+    if (d_last_residual_rms < WARMUP_RMS_THRESHOLD) {
+        d_warmup_good_fs++;
+        if (d_warmup_good_fs >= WARMUP_GOOD_FS_REQ) {
+            if (!d_dd_enabled && d_debug) {
+                std::fprintf(stderr,
+                    "[pilot_dd] DD enabled after %d good FS (rms=%.3f<%.2f)\n",
+                    d_warmup_good_fs, d_last_residual_rms, WARMUP_RMS_THRESHOLD);
+            }
+            d_dd_enabled = true;
+        }
+    } else {
+        // Bad FS — reset the warmup counter and disable DD.
+        if (d_dd_enabled && d_debug) {
+            std::fprintf(stderr,
+                "[pilot_dd] DD DISABLED (rms=%.3f>=%.2f, resetting warmup)\n",
+                d_last_residual_rms, WARMUP_RMS_THRESHOLD);
+        }
+        d_warmup_good_fs = 0;
+        d_dd_enabled = false;
+    }
+
+    // Tap-energy bail (same as adaptN in _long).
+    double tap_e = 0.0;
+    for (int k = 0; k < NTAPS; k++) tap_e += (double)d_taps[k] * (double)d_taps[k];
+    if (!std::isfinite(tap_e) || tap_e > (double)DIVERGENCE_BAIL * DIVERGENCE_BAIL) {
+        for (int k = 0; k < NTAPS; k++) d_taps[k] = 0.0f;
+        d_taps[NPRETAPS] = 1.0f;
+        d_dd_enabled = false;
+        d_warmup_good_fs = 0;
     }
 }
 
@@ -309,7 +382,14 @@ int atsc_equalizer_pilot_dd_impl::general_work(int noutput_items,
             const float* train = (d_flags & 0x0010)
                 ? training_sequence2
                 : training_sequence1;
-            estimate_taps_LS(data_mem, train);
+            // PILOT_DD_USE_LS=1 keeps original (slow) LS path for comparison.
+            static const int USE_LS = env_i("PILOT_DD_USE_LS", 0);
+            if (USE_LS) {
+                estimate_taps_LS(data_mem, train);
+            } else {
+                fs_lms_adapt(data_mem, train);
+            }
+            d_taps_lastfs = d_taps;   // snapshot for DD divergence-bail
             d_n_fs++;
             if (d_reset_fs) d_n_dd_resets++;
             // FS not emitted on stream 0.

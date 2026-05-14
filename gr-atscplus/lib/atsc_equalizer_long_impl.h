@@ -21,7 +21,11 @@ namespace atscplus {
 class atsc_equalizer_long_impl : public atsc_equalizer_long
 {
 private:
+#ifdef ATSC_EQ_ECO
+    static constexpr int NTAPS = 128;
+#else
     static constexpr int NTAPS = 256;
+#endif
     static constexpr int NPRETAPS = (int)(NTAPS * 0.2);
 
     static constexpr int KNOWN_FIELD_SYNC_LENGTH = 4 + 511 + 3 * 63;
