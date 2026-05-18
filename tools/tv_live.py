@@ -143,20 +143,26 @@ class LiveTVTopBlock(gr.top_block):
                     raise
         if src is None:
             raise RuntimeError(f"SDR open gave up: {last_err}")
+        # Gain knobs: STVT_IFGR, STVT_RFGAIN_SEL, STVT_ANTENNA env vars override config defaults.
+        _ifgr    = int(os.environ.get("STVT_IFGR",        ATSC_IF_GAIN_REDUCTION))
+        _rfgsel  = int(os.environ.get("STVT_RFGAIN_SEL",  ATSC_RFGAIN_SEL))
+        _antenna = os.environ.get("STVT_ANTENNA",         ATSC_ANTENNA)
+        LOG.info(f"gain knobs: IFGR={_ifgr} rfgain_sel={_rfgsel} antenna={_antenna}")
+
         src.set_sample_rate(0, ATSC_NATIVE_SAMPLE_RATE)
         src.set_frequency(0, freq)
-        src.set_antenna(0, ATSC_ANTENNA)
+        src.set_antenna(0, _antenna)
         # Disable AGC so manual IFGR/RFGR settings stick.
         try:
             src.set_gain_mode(0, False)
         except Exception:
             pass
         try:
-            src.set_gain(0, "IFGR", float(ATSC_IF_GAIN_REDUCTION))
+            src.set_gain(0, "IFGR", float(_ifgr))
         except Exception:
-            src.set_gain(0, float(ATSC_IF_GAIN_REDUCTION))
+            src.set_gain(0, float(_ifgr))
         try:
-            src.write_setting("rfgain_sel", str(ATSC_RFGAIN_SEL))
+            src.write_setting("rfgain_sel", str(_rfgsel))
         except Exception:
             pass
 
@@ -181,31 +187,68 @@ class LiveTVTopBlock(gr.top_block):
         # to the offline chain's input (and AGC will trim per-block anyway).
         scaler = blocks.multiply_const_cc(32768.0)
 
-        # Software resample 8 MS/s -> 6.25 MS/s with the proven 25/32 ratio.
-        resamp = gr_filter.rational_resampler_ccc(
-            interpolation=RESAMP_INTERP, decimation=RESAMP_DECIM,
-        )
+        # Software resample to 6.25 MS/s. If STVT_SKIP_RESAMP=1, the SDR
+        # is already running at the right rate (set STVT_NATIVE_RATE=6250000)
+        # and we omit the resampler entirely — saves a CPU stage that was
+        # contributing to OsO sample-overflow bursts.
+        if int(os.environ.get("STVT_SKIP_RESAMP", "0")):
+            resamp = None
+            LOG.info("resampler: SKIPPED (STVT_SKIP_RESAMP=1)")
+        else:
+            resamp = gr_filter.rational_resampler_ccc(
+                interpolation=RESAMP_INTERP, decimation=RESAMP_DECIM,
+            )
+            LOG.info(f"resampler: {RESAMP_INTERP}/{RESAMP_DECIM}")
         # Front-end matched filter; outputs samples at output_rate (16.14 MS/s).
         rxf  = atsc_rx_filter(ATSC_RX_SAMPLE_RATE, SPS)
-        # Tight-FPLL — the unlock. Operates at output_rate. Tightened
-        # from (0.002, 20.0) to (0.001, 50.0) per Tier 7 finding: the
-        # post-t=60s "equalizer drift" was actually FPLL margin loss.
-        # 90s real-RF test: PAT=97 distinct=34 TEI=0% zero CC jumps.
-        fpll = atscplus.atsc_fpll_tight(output_rate, 0.001, 50.0)
-        # Smaller DC blocker (32 taps vs 4096) — cuts CPU significantly
-        # while still removing residual DC at 16.14 MS/s.
-        dcr  = gr_filter.dc_blocker_ff(32)
-        # Slower AGC (1e-6) lets the long equalizer settle on stable amplitude.
-        agc  = analog.agc_ff(1e-6, 4.0)
-        sync = dtv.atsc_sync(output_rate)
+        # FPLL knobs via STVT_FPLL_ALPHA / STVT_FPLL_AFC_TAU env vars.
+        _fpll_alpha   = float(os.environ.get("STVT_FPLL_ALPHA",   "0.001"))
+        _fpll_afc_tau = float(os.environ.get("STVT_FPLL_AFC_TAU", "25"))
+        fpll = atscplus.atsc_fpll_tight(output_rate, _fpll_alpha, _fpll_afc_tau)
+        LOG.info(f"fpll: alpha={_fpll_alpha} afc_tau_us={_fpll_afc_tau}")
+
+        # DC blocker tap count via STVT_DCR_TAPS env var.
+        _dcr_taps = int(os.environ.get("STVT_DCR_TAPS", "32"))
+        dcr  = gr_filter.dc_blocker_ff(_dcr_taps)
+
+        # AGC knobs via STVT_AGC_ALPHA / STVT_AGC_REFERENCE env vars.
+        _agc_alpha = float(os.environ.get("STVT_AGC_ALPHA",     "1e-6"))
+        _agc_ref   = float(os.environ.get("STVT_AGC_REFERENCE", "4.0"))
+        agc  = analog.agc_ff(_agc_alpha, _agc_ref)
+        LOG.info(f"agc: alpha={_agc_alpha} ref={_agc_ref}  dc_blocker_taps={_dcr_taps}")
+        sync = atscplus.atsc_sync_soft(output_rate)
         fs_check = atscplus.atsc_fs_checker_inst()
-        # 256-tap LMS equalizer from the gr-atscplus fork — drops PAT count
-        # from 2/14MB → 97/14MB, distinct PIDs 7841 → 29, TEI 100% → 0%.
-        # Convergence is probabilistic (~1 in 3 cold-starts); see watchdog.
-        equalizer = atscplus.atsc_equalizer_long()
-        viterbi = dtv.atsc_viterbi_decoder()
+        # Equalizer selected by STVT_EQ env var. Menu in run_ab.sh.
+        _eq_name = os.environ.get("STVT_EQ", "long")
+        if   _eq_name == "long":          equalizer = atscplus.atsc_equalizer_long()
+        elif _eq_name == "pilot":         equalizer = atscplus.atsc_equalizer_pilot()
+        elif _eq_name == "pilot_dd":      equalizer = atscplus.atsc_equalizer_pilot_dd()
+        elif _eq_name == "pilot_dd_soft": equalizer = atscplus.atsc_equalizer_pilot_dd_soft()
+        elif _eq_name == "cma":           equalizer = atscplus.atsc_equalizer_cma()
+        elif _eq_name == "multifs":       equalizer = atscplus.atsc_equalizer_pilot_multifs()
+        elif _eq_name == "multifs_dd":    equalizer = atscplus.atsc_equalizer_pilot_multifs_dd()
+        elif _eq_name == "stock":         equalizer = dtv.atsc_equalizer()
+        else: raise ValueError(f"Unknown STVT_EQ={_eq_name}")
+        LOG.info(f"equalizer: {_eq_name} (STVT_EQ)")
+
+        # Viterbi: hard (gr-dtv default) or soft (atscplus fork, ~1-2 dB BER gain)
+        _vit_name = os.environ.get("STVT_VITERBI", "hard")
+        if   _vit_name == "hard": viterbi = dtv.atsc_viterbi_decoder()
+        elif _vit_name == "soft": viterbi = atscplus.atsc_viterbi_soft()
+        else: raise ValueError(f"Unknown STVT_VITERBI={_vit_name}")
+        LOG.info(f"viterbi: {_vit_name} (STVT_VITERBI)")
         deinterleaver = dtv.atsc_deinterleaver()
-        rs = dtv.atsc_rs_decoder()
+        # STVT_RS=erasure switches to the empirical-erasure RS decoder.
+        _rs_kind = os.environ.get("STVT_RS", "stock")
+        if _rs_kind == "erasure":
+            _rs_eras = int(os.environ.get("STVT_RS_ERASURES", "14"))
+            rs = atscplus.atsc_rs_decoder_erasure(_rs_eras)
+            _rs_is_2port = False
+            LOG.info(f"rs: erasure (max_erasures={_rs_eras}) (STVT_RS)")
+        else:
+            rs = dtv.atsc_rs_decoder()
+            _rs_is_2port = True
+            LOG.info("rs: stock dtv.atsc_rs_decoder (STVT_RS)")
         derand = dtv.atsc_derandomizer()
         depad = dtv.atsc_depad()
 
@@ -223,14 +266,28 @@ class LiveTVTopBlock(gr.top_block):
         #   src -> scaler(*32768) -> resamp -> rxf -> fpll -> dcr -> agc -> sync -> fs_check
         # fs_checker through rs_decoder carry TWO streams (data + tag);
         # derandomizer collapses to one, then depad emits raw TS bytes.
-        self.connect(src, scaler, resamp, rxf, fpll, dcr, agc, sync, fs_check)
-        for blk_in, blk_out in [(fs_check, equalizer),
-                                 (equalizer, viterbi),
-                                 (viterbi, deinterleaver),
-                                 (deinterleaver, rs),
-                                 (rs, derand)]:
-            self.connect((blk_in, 0), (blk_out, 0))
-            self.connect((blk_in, 1), (blk_out, 1))
+        # Skip the resampler stage when STVT_SKIP_RESAMP=1 (SDR runs at 6.25 MS/s).
+        if resamp is None:
+            self.connect(src, scaler, rxf, fpll, dcr, agc, sync, fs_check)
+        else:
+            self.connect(src, scaler, resamp, rxf, fpll, dcr, agc, sync, fs_check)
+        if _rs_is_2port:
+            for blk_in, blk_out in [(fs_check, equalizer),
+                                     (equalizer, viterbi),
+                                     (viterbi, deinterleaver),
+                                     (deinterleaver, rs),
+                                     (rs, derand)]:
+                self.connect((blk_in, 0), (blk_out, 0))
+                self.connect((blk_in, 1), (blk_out, 1))
+        else:
+            for blk_in, blk_out in [(fs_check, equalizer),
+                                     (equalizer, viterbi),
+                                     (viterbi, deinterleaver)]:
+                self.connect((blk_in, 0), (blk_out, 0))
+                self.connect((blk_in, 1), (blk_out, 1))
+            self.connect((deinterleaver, 0), (rs, 0))
+            self.connect((rs, 0), (derand, 0))
+            self.connect((deinterleaver, 1), (derand, 1))
         self.connect(derand, depad)
         # TEI-scrub: pack depad's byte stream into 188-byte TS packets,
         # rewrite RS-uncorrectable packets to NULL packets (preserves CC),
@@ -242,6 +299,47 @@ class LiveTVTopBlock(gr.top_block):
         self._teiscrub = TEIScrub()
         self._v2s_out  = blocks.vector_to_stream(gr.sizeof_char, 188)
         self.connect(depad, self._v2s_in, self._teiscrub, self._v2s_out, ts_file)
+
+        # Diagnostic taps — capture bytes at 5 decode-chain points.
+        # OFF by default (2026-05-16): a multi-hour chain run filled /tmp
+        # tmpfs with 6.1 GB of diag data and broke the system with
+        # "Disk quota exceeded". Set STVT_DIAG=1 to re-enable during
+        # algorithm tuning; for normal viewing the chain doesn't need them.
+        if os.environ.get("STVT_DIAG"):
+            diag_dir = "/tmp/diag_taps"
+            os.makedirs(diag_dir, exist_ok=True)
+
+            # RS input bytes (post-deinterleaver, 207-byte RS code blocks).
+            self._diag_dei_v2s  = blocks.vector_to_stream(gr.sizeof_char, 207)
+            self._diag_dei_sink = blocks.file_sink(gr.sizeof_char, f"{diag_dir}/dei_out.bin")
+            self._diag_dei_sink.set_unbuffered(True)
+            self.connect((deinterleaver, 0), self._diag_dei_v2s, self._diag_dei_sink)
+
+            # RS output bytes (corrected, 188-byte packets, sync 0x47 at offset 0).
+            self._diag_rs_v2s   = blocks.vector_to_stream(gr.sizeof_char, 188)
+            self._diag_rs_sink  = blocks.file_sink(gr.sizeof_char, f"{diag_dir}/rs_out.bin")
+            self._diag_rs_sink.set_unbuffered(True)
+            self.connect((rs, 0), self._diag_rs_v2s, self._diag_rs_sink)
+
+            # RS metadata stream (4 bytes per packet — plinfo: sync, errors, ...).
+            # Erasure RS variant has no plinfo port; skip when in use.
+            if _rs_is_2port:
+                self._diag_rs_meta_sink = blocks.file_sink(4, f"{diag_dir}/rs_meta.bin")
+                self._diag_rs_meta_sink.set_unbuffered(True)
+                self.connect((rs, 1), self._diag_rs_meta_sink)
+
+            # Derand output (descrambled, 188-byte packets).
+            self._diag_derand_v2s  = blocks.vector_to_stream(gr.sizeof_char, 188)
+            self._diag_derand_sink = blocks.file_sink(gr.sizeof_char, f"{diag_dir}/derand_out.bin")
+            self._diag_derand_sink.set_unbuffered(True)
+            self.connect(derand, self._diag_derand_v2s, self._diag_derand_sink)
+
+            # Depad output — raw TS bytes BEFORE TEIScrub rewrites failed packets.
+            # This is the real RS failure rate (live.ts hides it because scrub
+            # converts TEI=1 packets into NULL packets, hiding the loss rate).
+            self._diag_depad_sink = blocks.file_sink(gr.sizeof_char, f"{diag_dir}/depad_out.bin")
+            self._diag_depad_sink.set_unbuffered(True)
+            self.connect(depad, self._diag_depad_sink)
 
 
 def main():

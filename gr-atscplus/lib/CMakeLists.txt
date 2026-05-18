@@ -29,6 +29,7 @@ list(APPEND atscplus_sources
     atsc_sync_fieldlock_impl.cc
     atsc_sync_slidefs_impl.cc
     atsc_sync_pathA_impl.cc
+    atsc_rs_decoder_erasure_impl.cc
 )
 
 set(atscplus_sources
@@ -52,6 +53,7 @@ endif()
 target_link_libraries(gnuradio-atscplus
     gnuradio::gnuradio-runtime
     gnuradio::gnuradio-dtv
+    gnuradio::gnuradio-fec
     gnuradio::gnuradio-filter
     gnuradio::gnuradio-analog
     Volk::volk

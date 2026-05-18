@@ -40,6 +40,18 @@ private:
                 int nsamples);
 
     std::vector<float> d_taps;
+    // Last-known-good snapshot: saved when taps look healthy (low energy,
+    // finite, not in a divergence-induced delta-reset state). On
+    // divergence, restored from snapshot instead of cold-resetting to a
+    // delta function — which is what previously caused 30+s reconvergence
+    // windows during channel walks.
+    std::vector<float> d_taps_lkg;
+    bool   d_lkg_valid = false;
+    int    d_lkg_save_counter = 0;          // packets since last save
+    double d_last_tap_e = 1.0;
+    int    d_lkg_restore_count = 0;
+    int    d_lkg_save_count = 0;
+    int    d_divergence_count = 0;
 
     float data_mem[gr::dtv::ATSC_DATA_SEGMENT_LENGTH + NTAPS];
     float data_mem2[gr::dtv::ATSC_DATA_SEGMENT_LENGTH];

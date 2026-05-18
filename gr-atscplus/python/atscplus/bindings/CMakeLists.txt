@@ -41,6 +41,7 @@ list(APPEND atscplus_python_files
     atsc_sync_fieldlock_python.cc
     atsc_sync_slidefs_python.cc
     atsc_sync_pathA_python.cc
+    atsc_rs_decoder_erasure_python.cc
     python_bindings.cc)
 
 gr_pybind_make_oot(atscplus ../../.. gr::atscplus "${atscplus_python_files}")

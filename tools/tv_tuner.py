@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -1216,16 +1217,39 @@ def spawn_ffplay(window_title: str, log_fh):
     # "could not find codec parameters", mpv often still renders. Activate
     # via STVT_PLAYER=mpv. Default remains ffplay (Windows runtime).
     if os.environ.get("STVT_PLAYER", "ffplay") == "mpv":
+        # 2026-05-15: bumped cache-secs 4→20 and added demuxer-max-bytes
+        # so the cache absorbs the ~25-30s drought windows we observed
+        # in the chain log. Tradeoff: ~20s startup delay (cache must
+        # fill before play starts) and ~20s live latency. Tune via
+        # $STVT_MPV_CACHE_SECS if startup feels too long.
+        cache_secs = os.environ.get("STVT_MPV_CACHE_SECS", "20")
+        # 2026-05-17: reverted experimental psi_repair wrap + audio-stream-
+        # silence flags. They broke mpv probe (couldn't find codec params)
+        # and caused 20+s freezes during user test. Going back to the
+        # config that worked overnight last week — accepts some audio
+        # skipping but actually plays.
         cmd = ["mpv",
                "--no-terminal",
                "--keep-open=yes",
                f"--title={window_title}",
                "--demuxer=lavf",
                "--demuxer-lavf-format=mpegts",
-               "--demuxer-lavf-analyzeduration=3",
-               "--demuxer-lavf-probesize=3000000",
+               "--demuxer-lavf-analyzeduration=15",
+               "--demuxer-lavf-probesize=20000000",
                "--cache=yes",
-               "--cache-secs=4",
+               f"--cache-secs={cache_secs}",
+               "--demuxer-max-bytes=200MiB",
+               "--demuxer-max-back-bytes=200MiB",
+               # 2026-05-17 (try #2, single-flag): fill silence on audio
+               # underrun instead of skipping. The earlier multi-flag
+               # experiment broke mpv probe; this one ONLY adds this flag
+               # alongside the proven baseline config.
+               "--audio-stream-silence=yes",
+               # 2026-05-17 try #3 REVERTED: --vd-lavc-show-all=yes and
+               # --vd-lavc-skip-loop-filter=nonref caused mpv to crash on
+               # spawn (11 recoveries in 3 min). tv_tuner ended up in a
+               # spawn-die-respawn loop. Removed; staying on bare config
+               # plus the proven --audio-stream-silence=yes only.
                "-"]
         return subprocess.Popen(
             cmd,
@@ -2119,12 +2143,27 @@ def status_loop(state: PipelineState, stop_event: threading.Event,
     # tv_live to grab a fresh equalizer convergence. This is what makes
     # playback usable indefinitely instead of permafreezing after drift.
     DECODER_CHECK_INTERVAL_SEC = 5.0
-    DECODER_BAD_PAT = 3        # PAT in 5MB; below this = lost lock
-    # 3 consecutive bad checks (~15s) before forcing a restart. Tier 21's
-    # FS-spacing validator means real drifts are rare; brief PAT dips
-    # are usually atmospheric / RF transients that recover on their own,
-    # so we tolerate them rather than flashing the player window.
-    DECODER_BAD_GRACE = 3
+    # Was PAT_min=3 with 3 strikes (~15s). Observed: with the patched
+    # libsdrplay ring (32 MiB) the chain holds lock for ~2 min then has
+    # brief PAT droughts that the player rides through fine; old
+    # threshold flashed the screen with restarts every ~2min. Relax:
+    # only count PAT=0 (true loss) as bad, and demand 6 consecutive
+    # (~30s) before restarting.
+    DECODER_BAD_PAT = 1        # need <1 PAT in 5MB window = true loss
+    # 2026-05-14: bumped 6→12 (~30s → ~60s tolerance). Observation: eq
+    # naturally drifts into fs_mse=0.15 islands then recovers on its own
+    # (one run sustained 599s with these dips). Old grace caused user-
+    # visible freezes from restarts during recoverable drift events.
+    # 2026-05-16: env-overridable via STVT_BAD_GRACE; default bumped to 36
+    # (3 min) because long-EQ runs at 1.7 MB/s with lock=YES were getting
+    # killed at 60s of PAT=0 even though bytes were flowing (PAT/PMT just
+    # RS-corrupted, ts_psi_repair injects cached copies for the player).
+    DECODER_BAD_GRACE = 36
+    try:
+        DECODER_BAD_GRACE = int(os.environ.get(
+            "STVT_BAD_GRACE", DECODER_BAD_GRACE))
+    except ValueError:
+        pass
     last_decoder_check_t = start
     decoder_bad_count = 0
 
@@ -2247,7 +2286,18 @@ def status_loop(state: PipelineState, stop_event: threading.Event,
                 pat = measure_convergence()
             except Exception:
                 pat = -1
-            if pat >= 0 and pat < DECODER_BAD_PAT:
+            # Skip striking if bytes are flowing through to the player.
+            # Two regimes:
+            #   - long/cma at nominal: locked (rate>500KB) → 1.5-1.7 MB/s
+            #   - multifs sparse-but-locked: ~0.35 MB/s (lock=no per the
+            #     500KB threshold, but the equalizer IS locked, it's just
+            #     dropping ~80% of TS packets by design)
+            # In both, if rate > 200KB/s, the chain is alive. ffmpeg_freeze
+            # detection (above) catches truly-dead chains via fwd stalling.
+            # PAT droughts alone shouldn't kill — RS can corrupt PSI while
+            # video bytes still flow, and ts_psi_repair injects cached PAT.
+            chain_healthy = rate > 200_000
+            if pat >= 0 and pat < DECODER_BAD_PAT and not chain_healthy:
                 decoder_bad_count += 1
                 print(f"[tv_tuner] decoder quality low: PAT={pat} "
                       f"(strike {decoder_bad_count}/{DECODER_BAD_GRACE})")
