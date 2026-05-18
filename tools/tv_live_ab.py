@@ -187,10 +187,18 @@ class LiveTVTopBlock(gr.top_block):
         # to the offline chain's input (and AGC will trim per-block anyway).
         scaler = blocks.multiply_const_cc(32768.0)
 
-        # Software resample 8 MS/s -> 6.25 MS/s with the proven 25/32 ratio.
-        resamp = gr_filter.rational_resampler_ccc(
-            interpolation=RESAMP_INTERP, decimation=RESAMP_DECIM,
-        )
+        # Software resample to 6.25 MS/s. If STVT_SKIP_RESAMP=1, the SDR
+        # is already running at the right rate (set STVT_NATIVE_RATE=6250000)
+        # and we omit the resampler entirely — saves a CPU stage that was
+        # contributing to OsO sample-overflow bursts.
+        if int(os.environ.get("STVT_SKIP_RESAMP", "0")):
+            resamp = None
+            LOG.info("resampler: SKIPPED (STVT_SKIP_RESAMP=1)")
+        else:
+            resamp = gr_filter.rational_resampler_ccc(
+                interpolation=RESAMP_INTERP, decimation=RESAMP_DECIM,
+            )
+            LOG.info(f"resampler: {RESAMP_INTERP}/{RESAMP_DECIM}")
         # Front-end matched filter; outputs samples at output_rate (16.14 MS/s).
         rxf  = atsc_rx_filter(ATSC_RX_SAMPLE_RATE, SPS)
         # FPLL knobs via STVT_FPLL_ALPHA / STVT_FPLL_AFC_TAU env vars.
@@ -230,7 +238,17 @@ class LiveTVTopBlock(gr.top_block):
         else: raise ValueError(f"Unknown STVT_VITERBI={_vit_name}")
         LOG.info(f"viterbi: {_vit_name} (STVT_VITERBI)")
         deinterleaver = dtv.atsc_deinterleaver()
-        rs = dtv.atsc_rs_decoder()
+        # STVT_RS=erasure switches to the empirical-erasure RS decoder.
+        _rs_kind = os.environ.get("STVT_RS", "stock")
+        if _rs_kind == "erasure":
+            _rs_eras = int(os.environ.get("STVT_RS_ERASURES", "14"))
+            rs = atscplus.atsc_rs_decoder_erasure(_rs_eras)
+            _rs_is_2port = False
+            LOG.info(f"rs: erasure (max_erasures={_rs_eras}) (STVT_RS)")
+        else:
+            rs = dtv.atsc_rs_decoder()
+            _rs_is_2port = True
+            LOG.info("rs: stock dtv.atsc_rs_decoder (STVT_RS)")
         derand = dtv.atsc_derandomizer()
         depad = dtv.atsc_depad()
 
@@ -248,14 +266,28 @@ class LiveTVTopBlock(gr.top_block):
         #   src -> scaler(*32768) -> resamp -> rxf -> fpll -> dcr -> agc -> sync -> fs_check
         # fs_checker through rs_decoder carry TWO streams (data + tag);
         # derandomizer collapses to one, then depad emits raw TS bytes.
-        self.connect(src, scaler, resamp, rxf, fpll, dcr, agc, sync, fs_check)
-        for blk_in, blk_out in [(fs_check, equalizer),
-                                 (equalizer, viterbi),
-                                 (viterbi, deinterleaver),
-                                 (deinterleaver, rs),
-                                 (rs, derand)]:
-            self.connect((blk_in, 0), (blk_out, 0))
-            self.connect((blk_in, 1), (blk_out, 1))
+        # Skip the resampler stage when STVT_SKIP_RESAMP=1 (SDR runs at 6.25 MS/s).
+        if resamp is None:
+            self.connect(src, scaler, rxf, fpll, dcr, agc, sync, fs_check)
+        else:
+            self.connect(src, scaler, resamp, rxf, fpll, dcr, agc, sync, fs_check)
+        if _rs_is_2port:
+            for blk_in, blk_out in [(fs_check, equalizer),
+                                     (equalizer, viterbi),
+                                     (viterbi, deinterleaver),
+                                     (deinterleaver, rs),
+                                     (rs, derand)]:
+                self.connect((blk_in, 0), (blk_out, 0))
+                self.connect((blk_in, 1), (blk_out, 1))
+        else:
+            for blk_in, blk_out in [(fs_check, equalizer),
+                                     (equalizer, viterbi),
+                                     (viterbi, deinterleaver)]:
+                self.connect((blk_in, 0), (blk_out, 0))
+                self.connect((blk_in, 1), (blk_out, 1))
+            self.connect((deinterleaver, 0), (rs, 0))
+            self.connect((rs, 0), (derand, 0))
+            self.connect((deinterleaver, 1), (derand, 1))
         self.connect(derand, depad)
         # TEI-scrub: pack depad's byte stream into 188-byte TS packets,
         # rewrite RS-uncorrectable packets to NULL packets (preserves CC),
@@ -269,38 +301,44 @@ class LiveTVTopBlock(gr.top_block):
         self.connect(depad, self._v2s_in, self._teiscrub, self._v2s_out, ts_file)
 
         # Diagnostic taps — capture bytes at 5 decode-chain points.
-        diag_dir = "/tmp/diag_taps"
-        os.makedirs(diag_dir, exist_ok=True)
+        # OFF by default (2026-05-16): chain run filled /tmp tmpfs with
+        # 6.1 GB and broke the system with "Disk quota exceeded".
+        # Set STVT_DIAG=1 to re-enable during algorithm tuning.
+        if os.environ.get("STVT_DIAG"):
+            diag_dir = "/tmp/diag_taps"
+            os.makedirs(diag_dir, exist_ok=True)
 
-        # RS input bytes (post-deinterleaver, 207-byte RS code blocks).
-        self._diag_dei_v2s  = blocks.vector_to_stream(gr.sizeof_char, 207)
-        self._diag_dei_sink = blocks.file_sink(gr.sizeof_char, f"{diag_dir}/dei_out.bin")
-        self._diag_dei_sink.set_unbuffered(True)
-        self.connect((deinterleaver, 0), self._diag_dei_v2s, self._diag_dei_sink)
+            # RS input bytes (post-deinterleaver, 207-byte RS code blocks).
+            self._diag_dei_v2s  = blocks.vector_to_stream(gr.sizeof_char, 207)
+            self._diag_dei_sink = blocks.file_sink(gr.sizeof_char, f"{diag_dir}/dei_out.bin")
+            self._diag_dei_sink.set_unbuffered(True)
+            self.connect((deinterleaver, 0), self._diag_dei_v2s, self._diag_dei_sink)
 
-        # RS output bytes (corrected, 188-byte packets, sync 0x47 at offset 0).
-        self._diag_rs_v2s   = blocks.vector_to_stream(gr.sizeof_char, 188)
-        self._diag_rs_sink  = blocks.file_sink(gr.sizeof_char, f"{diag_dir}/rs_out.bin")
-        self._diag_rs_sink.set_unbuffered(True)
-        self.connect((rs, 0), self._diag_rs_v2s, self._diag_rs_sink)
+            # RS output bytes (corrected, 188-byte packets, sync 0x47 at offset 0).
+            self._diag_rs_v2s   = blocks.vector_to_stream(gr.sizeof_char, 188)
+            self._diag_rs_sink  = blocks.file_sink(gr.sizeof_char, f"{diag_dir}/rs_out.bin")
+            self._diag_rs_sink.set_unbuffered(True)
+            self.connect((rs, 0), self._diag_rs_v2s, self._diag_rs_sink)
 
-        # RS metadata stream (4 bytes per packet — plinfo: sync, errors, ...).
-        self._diag_rs_meta_sink = blocks.file_sink(4, f"{diag_dir}/rs_meta.bin")
-        self._diag_rs_meta_sink.set_unbuffered(True)
-        self.connect((rs, 1), self._diag_rs_meta_sink)
+            # RS metadata stream (4 bytes per packet — plinfo: sync, errors, ...).
+            # Erasure RS variant has no plinfo port; skip when in use.
+            if _rs_is_2port:
+                self._diag_rs_meta_sink = blocks.file_sink(4, f"{diag_dir}/rs_meta.bin")
+                self._diag_rs_meta_sink.set_unbuffered(True)
+                self.connect((rs, 1), self._diag_rs_meta_sink)
 
-        # Derand output (descrambled, 188-byte packets).
-        self._diag_derand_v2s  = blocks.vector_to_stream(gr.sizeof_char, 188)
-        self._diag_derand_sink = blocks.file_sink(gr.sizeof_char, f"{diag_dir}/derand_out.bin")
-        self._diag_derand_sink.set_unbuffered(True)
-        self.connect(derand, self._diag_derand_v2s, self._diag_derand_sink)
+            # Derand output (descrambled, 188-byte packets).
+            self._diag_derand_v2s  = blocks.vector_to_stream(gr.sizeof_char, 188)
+            self._diag_derand_sink = blocks.file_sink(gr.sizeof_char, f"{diag_dir}/derand_out.bin")
+            self._diag_derand_sink.set_unbuffered(True)
+            self.connect(derand, self._diag_derand_v2s, self._diag_derand_sink)
 
-        # Depad output — raw TS bytes BEFORE TEIScrub rewrites failed packets.
-        # This is the real RS failure rate (live.ts hides it because scrub
-        # converts TEI=1 packets into NULL packets, hiding the loss rate).
-        self._diag_depad_sink = blocks.file_sink(gr.sizeof_char, f"{diag_dir}/depad_out.bin")
-        self._diag_depad_sink.set_unbuffered(True)
-        self.connect(depad, self._diag_depad_sink)
+            # Depad output — raw TS bytes BEFORE TEIScrub rewrites failed packets.
+            # This is the real RS failure rate (live.ts hides it because scrub
+            # converts TEI=1 packets into NULL packets, hiding the loss rate).
+            self._diag_depad_sink = blocks.file_sink(gr.sizeof_char, f"{diag_dir}/depad_out.bin")
+            self._diag_depad_sink.set_unbuffered(True)
+            self.connect(depad, self._diag_depad_sink)
 
 
 def main():
