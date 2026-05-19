@@ -1084,6 +1084,10 @@ def build_ffmpeg_cmd(play: bool, record_path: Path | None,
         Only valid when play=True with no record/stream sinks.
     """
     if passthrough:
+        # 2026-05-18 REVERTED: tried -c:a aac + aresample=async=1000 to
+        # mask AC3 gaps but it introduced 3-sec freeze pattern in user
+        # playback. Re-encoding added CPU + bursty output that stuttered
+        # the whole pipeline. Back to pure -c copy passthrough.
         return [
             FFMPEG,
             "-hide_banner", "-loglevel", "warning",
