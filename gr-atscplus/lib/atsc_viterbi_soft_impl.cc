@@ -17,6 +17,7 @@
 #include "atsc_viterbi_mux.h"
 #include <gnuradio/io_signature.h>
 #include <cstring>
+#include <pmt/pmt.h>
 
 namespace gr {
 namespace atscplus {
@@ -141,6 +142,25 @@ int atsc_viterbi_soft_impl::work(int noutput_items,
             // adjust pipeline info to reflect 12 segment delay
             plinfo::delay(plout[i + j], plin[i + j], NCODERS);
         }
+
+        // 2026-05-18: emit per-segment confidence as stream tag.
+        // best_state_metric() rises with accumulating path uncertainty;
+        // lower magnitude = more confident. We tag the FIRST output
+        // segment of each NCODERS-segment batch with the average across
+        // all 12 decoders. Downstream consumers (future erasure-RS) can
+        // gate erasure aggressiveness on this signal. Tagging only the
+        // first sample of the batch keeps GR overhead low (~1 tag per
+        // 12 segments = ~1 tag per 2484 output bytes).
+        float conf_sum = 0.0f;
+        for (int e = 0; e < NCODERS; e++) {
+            conf_sum += viterbi[e].best_state_metric();
+        }
+        const float avg_metric = conf_sum / float(NCODERS);
+        const uint64_t tag_offset = nitems_written(0) + i;
+        add_item_tag(0,
+                     tag_offset,
+                     pmt::intern("viterbi_metric"),
+                     pmt::from_double(double(avg_metric)));
     }
 
     return noutput_items;
