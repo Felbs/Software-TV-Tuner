@@ -298,7 +298,10 @@ class LiveTVTopBlock(gr.top_block):
         self._v2s_in   = blocks.stream_to_vector(gr.sizeof_char, 188)
         self._teiscrub = TEIScrub()
         self._v2s_out  = blocks.vector_to_stream(gr.sizeof_char, 188)
-        self.connect(depad, self._v2s_in, self._teiscrub, self._v2s_out, ts_file)
+        if os.environ.get("STVT_TEISCRUB", "1") == "1":
+            self.connect(depad, self._v2s_in, self._teiscrub, self._v2s_out, ts_file)
+        else:
+            self.connect(depad, ts_file)
 
         # Diagnostic taps — capture bytes at 5 decode-chain points.
         # OFF by default (2026-05-16): a multi-hour chain run filled /tmp
