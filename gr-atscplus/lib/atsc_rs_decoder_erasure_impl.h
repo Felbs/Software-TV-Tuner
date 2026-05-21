@@ -41,6 +41,20 @@ private:
     int d_erasure_successes;
     int d_bad_packets;
 
+    // Viterbi-confidence integration (Day 2/3 of the soft-Viterbi →
+    // tagged-stream → erasure-RS project). The atscplus.atsc_viterbi_soft
+    // block emits `viterbi_metric` stream tags every NCODERS segments
+    // with the average best_state_metric (higher = less confident).
+    // We read those tags here and use them to gate retry aggressiveness.
+    double d_recent_metric;     // last-seen viterbi_metric value
+    int    d_metric_tag_count;  // total tags observed (sanity check)
+    int    d_effective_max_erasures;  // metric-gated, updated per work()
+
+    // Day 3: derive a dynamic erasure budget from d_recent_metric.
+    // Empirical thresholds based on observed range 3000-7000 (typical
+    // marginal-RF lock at ~5000). Lower = more confident signal.
+    int dynamic_max_erasures() const;
+
     // Periodic stderr log
     std::chrono::steady_clock::time_point d_t0;
     std::chrono::steady_clock::time_point d_last_log;
