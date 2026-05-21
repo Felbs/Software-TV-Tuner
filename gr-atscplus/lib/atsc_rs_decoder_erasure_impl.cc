@@ -49,6 +49,9 @@ atsc_rs_decoder_erasure_impl::atsc_rs_decoder_erasure_impl(int max_erasures)
     d_erasure_decodes    = 0;
     d_erasure_successes  = 0;
     d_bad_packets        = 0;
+    d_recent_metric      = 0.0;
+    d_metric_tag_count   = 0;
+    d_effective_max_erasures = d_max_erasures;
 
     d_t0       = std::chrono::steady_clock::now();
     d_last_log = d_t0;
@@ -66,6 +69,20 @@ atsc_rs_decoder_erasure_impl::~atsc_rs_decoder_erasure_impl()
 {
     if (d_rs)
         free_rs_char(d_rs);
+}
+
+// Day 3 (2026-05-21): gate erasure-retry budget on viterbi_metric.
+// best_state_metric() in atsc_single_viterbi_soft grows with path
+// uncertainty. Observed range in production: 3000-7000, mean ~5000.
+// Lower = more confident signal — fewer erasures needed (saves CPU
+// when chain is clean). Higher = noisier — push erasures up to recover
+// more packets. Returns clamped to [1, 20] (RS code allows up to 20).
+int atsc_rs_decoder_erasure_impl::dynamic_max_erasures() const
+{
+    if (d_metric_tag_count == 0) return d_max_erasures;   // no signal yet
+    if (d_recent_metric < 3500.0) return std::max(4, d_max_erasures - 6);
+    if (d_recent_metric < 5500.0) return d_max_erasures;
+    return std::min(20, d_max_erasures + 4);
 }
 
 int atsc_rs_decoder_erasure_impl::decode_block(const unsigned char* in207,
@@ -118,7 +135,7 @@ int atsc_rs_decoder_erasure_impl::decode_block(const unsigned char* in207,
                   return a.first > b.first;
               });
 
-    int no_eras = std::min<int>({d_max_erasures, (int)ranked.size(), 20});
+    int no_eras = std::min<int>({d_effective_max_erasures, (int)ranked.size(), 20});
     int eras_pos[20];
     for (int i = 0; i < no_eras; i++)
         eras_pos[i] = ranked[i].second + PAD_BYTES;   // positions in 255-buf
@@ -161,6 +178,23 @@ int atsc_rs_decoder_erasure_impl::work(int noutput_items,
     auto out = static_cast<unsigned char*>(output_items[0]);
 
     unsigned char data187[DATA_LEN];
+
+    // 2026-05-21 Day 2: read viterbi_metric tags emitted by
+    // atscplus.atsc_viterbi_soft (12 segments per tag, propagated through
+    // the deinterleaver as a stream tag — values are off by the
+    // deinterleaver's 52-segment delay but the running mean still tracks
+    // RF SNR). Tags only present when chain uses STVT_VITERBI=soft.
+    std::vector<tag_t> tags;
+    get_tags_in_window(tags, 0, 0, noutput_items,
+                       pmt::intern("viterbi_metric"));
+    for (const auto& t : tags) {
+        if (pmt::is_real(t.value) || pmt::is_integer(t.value)) {
+            d_recent_metric = pmt::to_double(t.value);
+            d_metric_tag_count++;
+        }
+    }
+    // Day 3: update effective erasure budget from latest metric.
+    d_effective_max_erasures = dynamic_max_erasures();
 
     for (int i = 0; i < noutput_items; i++) {
         const unsigned char* in_pkt  = in  + i * CODE_LEN;
@@ -218,12 +252,15 @@ int atsc_rs_decoder_erasure_impl::work(int noutput_items,
                      "[rs_erasure t=%6.1fs] pkts=%d ec=%d era_dec=%d "
                      "era_ok=%d bad=%d "
                      "(last5s: pkts=%d era_dec=%d era_ok=%d bad=%d)  "
-                     "weak_pos[%d:%d,%d:%d,%d:%d]\n",
+                     "weak_pos[%d:%d,%d:%d,%d:%d]  "
+                     "vit_metric=%.3f tags=%d eff_eras=%d\n",
                      elapsed_ms / 1000.0,
                      d_packets, d_errors_corrected,
                      d_erasure_decodes, d_erasure_successes, d_bad_packets,
                      d_log_packets, d_log_eras_dec, d_log_eras_ok, d_log_bad,
-                     top3[0], top3v[0], top3[1], top3v[1], top3[2], top3v[2]);
+                     top3[0], top3v[0], top3[1], top3v[1], top3[2], top3v[2],
+                     d_recent_metric, d_metric_tag_count,
+                     d_effective_max_erasures);
         d_last_log = now;
         d_log_packets  = 0;
         d_log_eras_dec = 0;
