@@ -1249,11 +1249,24 @@ def spawn_ffplay(window_title: str, log_fh):
                # experiment broke mpv probe; this one ONLY adds this flag
                # alongside the proven baseline config.
                "--audio-stream-silence=yes",
-               # 2026-05-17 try #3 REVERTED: --vd-lavc-show-all=yes and
-               # --vd-lavc-skip-loop-filter=nonref caused mpv to crash on
-               # spawn (11 recoveries in 3 min). tv_tuner ended up in a
-               # spawn-die-respawn loop. Removed; staying on bare config
-               # plus the proven --audio-stream-silence=yes only.
+               # 2026-05-22 anti-freeze flags. The earlier
+               # --vd-lavc-show-all=yes crashed mpv (don't re-add). These
+               # are different — they affect frame-drop behavior, not
+               # the decoder error model, so they should be safe:
+               #   framedrop=vo: drop displayed frames if behind, don't
+               #                 stall waiting for decode
+               #   video-sync=desync: don't pause video to maintain
+               #                      audio sync — keeps picture moving
+               #                      through brief decode hiccups
+               #   hr-seek=no: avoid expensive seek-back on glitches
+               "--framedrop=vo",
+               "--video-sync=desync",
+               "--hr-seek=no",
+               # vd-lavc-skiploopfilter=all skips the in-loop deblocking
+               # on every frame. Costs sharpness but the decoder doesn't
+               # stall when it sees broken loop-filter syntax. Helps
+               # with the "ac-tex damaged" cascade we see in mpv log.
+               "--vd-lavc-skiploopfilter=all",
                "-"]
         return subprocess.Popen(
             cmd,
