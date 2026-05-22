@@ -48,13 +48,28 @@ private:
 
     // Tunables
     float d_alpha;             // EMA rate per sample
-    float d_lock_threshold;    // peak/RMS to acquire lock
-    float d_unlock_threshold;  // peak/RMS to hold lock
+    float d_lock_threshold;    // peak/RMS to acquire lock (current effective value)
+    float d_unlock_threshold;  // peak/RMS to hold lock (current effective value)
     float d_sticky_fraction;   // sticky-lock: stay on d_locked_idx while its value >= sticky*max
     bool d_emit_when_unlocked;
     bool d_debug;
     int d_locked_idx;          // currently-locked argmax bin (-1 = unlocked)
     float d_timing_gain_scale; // multiplier on timing_adjust gain when locked
+
+    // Day 17 (2026-05-22): adaptive thresholds. Two threshold pairs —
+    // ACQUIRE (lenient, for fast initial lock) and STEADY (strict, for
+    // robust hold once stably locked). When unlocked, use ACQUIRE; once
+    // we've held lock for `d_steady_after_segs` consecutive segments,
+    // switch to STEADY. On any unlock, drop back to ACQUIRE.
+    // Disabled by default (d_adaptive = false) — backward compatible.
+    bool d_adaptive;
+    float d_acquire_lock_thresh;
+    float d_acquire_unlock_thresh;
+    float d_steady_lock_thresh;
+    float d_steady_unlock_thresh;
+    int d_steady_after_segs;
+    int d_consec_locked_segs;  // counter, reset on unlock
+    bool d_in_steady_state;
 
     // Stats
     uint64_t d_segs_emitted;
