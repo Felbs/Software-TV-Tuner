@@ -193,6 +193,10 @@ def main() -> int:
     ap.add_argument("--verify-seconds", type=int, default=60,
                     help="extra seconds to verify a candidate winner")
     ap.add_argument("--reset", action="store_true")
+    ap.add_argument("--best-of", type=int, default=0,
+                    help="if >0, evaluate up to N candidates and pick the "
+                         "one with highest verify-PAT (default: stop on "
+                         "first passing candidate)")
     args = ap.parse_args()
 
     # Single-instance lock.
@@ -234,6 +238,11 @@ def main() -> int:
         f"{len(RF_CHANNELS)}×{len(IFGRS)}×{len(RFGAIN_SELS)}×"
         f"{len(ANTENNAS)}×{len(EQS)})")
 
+    # Day 15: when --best-of > 0, collect ALL passing candidates and pick
+    # the one with highest verify-PAT (best quality), not just the first.
+    # Slower but lands on a stronger signal — fewer mid-run drops.
+    passing: list[tuple[int, tuple, dict]] = []
+
     try:
         for rf, ifgr, rfgain, ant, eq in combos:
             if time.time() >= deadline:
@@ -267,20 +276,45 @@ def main() -> int:
                     f"pat={verify['pat_count']}  "
                     f"died={verify['chain_died']}")
                 if verify["pat_count"] >= 10 and not verify["chain_died"]:
-                    log("=" * 60)
-                    log(f"*** SUCCESS! ***")
-                    log(f"*** Config: RF={rf} IFGR={ifgr} RFGAIN_SEL={rfgain}")
-                    log(f"*** Antenna={ant!r} EQ={eq}")
-                    log(f"*** PAT count in 60s verify: {verify['pat_count']}")
-                    log("=" * 60)
-                    save_winner(rf, ifgr, rfgain, ant, eq,
-                                verify["pat_count"])
-                    log(f"Winner saved to {WINNER}")
-                    log(f"To use:")
-                    log(f"  source {WINNER} && ~/run_stvt_winner.sh {eq} {rf}")
-                    return 0
+                    passing.append((verify["pat_count"], key, verify))
+                    if args.best_of <= 0:
+                        # Stop on first passing candidate (original behavior).
+                        rf, ifgr, rfgain, ant, eq = key
+                        log("=" * 60)
+                        log(f"*** SUCCESS! ***")
+                        log(f"*** Config: RF={rf} IFGR={ifgr} RFGAIN_SEL={rfgain}")
+                        log(f"*** Antenna={ant!r} EQ={eq}")
+                        log(f"*** PAT count in 60s verify: {verify['pat_count']}")
+                        log("=" * 60)
+                        save_winner(rf, ifgr, rfgain, ant, eq,
+                                    verify["pat_count"])
+                        log(f"Winner saved to {WINNER}")
+                        log(f"To use:")
+                        log(f"  source {WINNER} && ~/run_stvt_winner.sh {eq} {rf}")
+                        return 0
+                    elif len(passing) >= args.best_of:
+                        # Got N candidates, stop sweeping early.
+                        log(f"   collected {args.best_of} passing candidates; ending sweep")
+                        break
                 else:
                     log("   verify failed — continuing sweep")
+
+        # Day 15: if we collected best-of candidates, pick the strongest now.
+        if passing:
+            passing.sort(reverse=True)  # highest PAT first
+            best_pat, key, verify = passing[0]
+            rf, ifgr, rfgain, ant, eq = key
+            log("=" * 60)
+            log(f"*** BEST OF {len(passing)} CANDIDATES ***")
+            log(f"*** Config: RF={rf} IFGR={ifgr} RFGAIN_SEL={rfgain}")
+            log(f"*** Antenna={ant!r} EQ={eq}")
+            log(f"*** PAT count in 60s verify: {best_pat}")
+            log(f"*** other candidates: " +
+                ", ".join(f"RF{k[0]}/{k[4]}={p}" for p, k, _ in passing[1:]))
+            log("=" * 60)
+            save_winner(rf, ifgr, rfgain, ant, eq, best_pat)
+            log(f"Winner saved to {WINNER}")
+            return 0
 
         log("Sweep complete. No config produced sustained lock.")
         log("Likely RF/antenna issue — software cannot fix this.")
