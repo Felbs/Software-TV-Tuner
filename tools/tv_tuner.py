@@ -1238,8 +1238,15 @@ def spawn_ffplay(window_title: str, log_fh):
                f"--title={window_title}",
                "--demuxer=lavf",
                "--demuxer-lavf-format=mpegts",
-               "--demuxer-lavf-analyzeduration=15",
-               "--demuxer-lavf-probesize=20000000",
+               # 2026-05-22 last-ditch probe expansion. Chain produces clean
+               # TS bytes but with corrupt mpeg2video sequence headers on
+               # marginal RF. Bigger probe window = more chance to catch
+               # one valid sequence_header_code (0x000001B3) somewhere.
+               "--demuxer-lavf-analyzeduration=60",
+               "--demuxer-lavf-probesize=200000000",
+               # Don't require ALL streams probed — start playback as soon
+               # as one decodable video stream is found.
+               "--demuxer-lavf-o=fflags=+nofillin,scan_all_pmts=1,err_detect=ignore_err",
                "--cache=yes",
                f"--cache-secs={cache_secs}",
                "--demuxer-max-bytes=200MiB",
