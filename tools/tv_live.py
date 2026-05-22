@@ -166,6 +166,37 @@ class LiveTVTopBlock(gr.top_block):
         except Exception:
             pass
 
+        # 2026-05-22 Day 16: expose RSPdx-specific SoapySDR tunables. These
+        # are no-ops on RSP1/RSP2 (write_setting just fails silently). All
+        # default to "leave alone" — opt-in via env vars.
+        #
+        #   STVT_RFNOTCH=1   enable RF notch (FM/AM rejection). Harmless
+        #                    for UHF ATSC (FM is 88-108 MHz, far away),
+        #                    but can suppress intermod from strong nearby
+        #                    FM broadcasts. Worth trying on marginal lock.
+        #   STVT_DABNOTCH=1  enable DAB-band notch (174-240 MHz). Not
+        #                    useful for UHF ATSC unless you have a strong
+        #                    DAB transmitter near the antenna.
+        #   STVT_IQCORR=1    enable IQ correction (DC offset + imbalance).
+        #                    Generally improves dynamic range; cost is
+        #                    a tiny CPU bump. Try ON if image rejection
+        #                    issues are suspected.
+        #   STVT_BIAST=1     enable bias-T (only for active antennas).
+        #
+        for env_key, soapy_key in [
+            ("STVT_RFNOTCH",  "rfnotch_ctrl"),
+            ("STVT_DABNOTCH", "dabnotch_ctrl"),
+            ("STVT_IQCORR",   "iqcorr_ctrl"),
+            ("STVT_BIAST",    "biasT_ctrl"),
+        ]:
+            v = os.environ.get(env_key)
+            if v is not None:
+                try:
+                    src.write_setting(soapy_key, "true" if v == "1" else "false")
+                    LOG.info(f"soapy: {soapy_key}={'true' if v == '1' else 'false'} ({env_key})")
+                except Exception as exc:
+                    LOG.info(f"soapy: {soapy_key} write failed ({exc!r})")
+
         # ── EXACT REPLICA OF run_combo.py fpll_a002_tau20 PIPELINE ──
         # The proven offline chain that gave clean decode:
         #   src -> rs(8M->6.25M) -> rx_filt -> fpll_tight -> dcr -> agc
