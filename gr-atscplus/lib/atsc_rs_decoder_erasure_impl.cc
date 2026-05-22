@@ -17,8 +17,10 @@ extern "C" {
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace gr {
@@ -70,13 +72,80 @@ atsc_rs_decoder_erasure_impl::atsc_rs_decoder_erasure_impl(int max_erasures)
     d_log_eras_ok  = 0;
     d_log_bad      = 0;
 
+    // Day 10 (2026-05-21): persistent histogram. Saves the empirical
+    // weak-position histogram to a file on shutdown and reloads it on
+    // startup so erasure retry kicks in from segment 1 instead of after
+    // the ~60-120s cold-start required to populate from scratch.
+    // Disable by setting env STVT_RS_HIST_FILE=/dev/null.
+    d_hist_path = "/tmp/atscplus_rs_erasure_hist.bin";
+    if (const char* p = std::getenv("STVT_RS_HIST_FILE"))
+        d_hist_path = p;
+    d_save_period_packets = 30000;   // ~2.5s at 12k segments/sec
+    d_packets_since_save  = 0;
+    load_histogram();
+
     std::fprintf(stderr,
-                 "[rs_erasure] init max_erasures=%d decay_period=%d\n",
-                 d_max_erasures, d_hist_decay_period);
+                 "[rs_erasure] init max_erasures=%d decay_period=%d hist_count=%d\n",
+                 d_max_erasures, d_hist_decay_period, d_hist_count);
+}
+
+void atsc_rs_decoder_erasure_impl::load_histogram()
+{
+    if (d_hist_path == "/dev/null") return;
+    std::FILE* f = std::fopen(d_hist_path.c_str(), "rb");
+    if (!f) return;
+    uint32_t magic = 0;
+    uint32_t version = 0;
+    uint32_t code_len = 0;
+    uint32_t hist_count = 0;
+    if (std::fread(&magic, sizeof(magic), 1, f) != 1 || magic != HIST_MAGIC) {
+        std::fclose(f); return;
+    }
+    if (std::fread(&version, sizeof(version), 1, f) != 1 || version != HIST_VERSION) {
+        std::fclose(f); return;
+    }
+    if (std::fread(&code_len, sizeof(code_len), 1, f) != 1 || code_len != CODE_LEN) {
+        std::fclose(f); return;
+    }
+    if (std::fread(&hist_count, sizeof(hist_count), 1, f) != 1) {
+        std::fclose(f); return;
+    }
+    int32_t pos[CODE_LEN];
+    if (std::fread(pos, sizeof(int32_t), CODE_LEN, f) != CODE_LEN) {
+        std::fclose(f); return;
+    }
+    for (int i = 0; i < CODE_LEN; i++) d_hist_pos[i] = pos[i];
+    d_hist_count = static_cast<int>(hist_count);
+    std::fclose(f);
+    std::fprintf(stderr,
+                 "[rs_erasure] loaded histogram from %s hist_count=%d\n",
+                 d_hist_path.c_str(), d_hist_count);
+}
+
+void atsc_rs_decoder_erasure_impl::save_histogram() const
+{
+    if (d_hist_path == "/dev/null") return;
+    std::string tmp = d_hist_path + ".tmp";
+    std::FILE* f = std::fopen(tmp.c_str(), "wb");
+    if (!f) return;
+    uint32_t magic = HIST_MAGIC;
+    uint32_t version = HIST_VERSION;
+    uint32_t code_len = CODE_LEN;
+    uint32_t hist_count = static_cast<uint32_t>(d_hist_count);
+    std::fwrite(&magic, sizeof(magic), 1, f);
+    std::fwrite(&version, sizeof(version), 1, f);
+    std::fwrite(&code_len, sizeof(code_len), 1, f);
+    std::fwrite(&hist_count, sizeof(hist_count), 1, f);
+    int32_t pos[CODE_LEN];
+    for (int i = 0; i < CODE_LEN; i++) pos[i] = d_hist_pos[i];
+    std::fwrite(pos, sizeof(int32_t), CODE_LEN, f);
+    std::fclose(f);
+    std::rename(tmp.c_str(), d_hist_path.c_str());
 }
 
 atsc_rs_decoder_erasure_impl::~atsc_rs_decoder_erasure_impl()
 {
+    save_histogram();
     if (d_rs)
         free_rs_char(d_rs);
 }
@@ -259,6 +328,14 @@ int atsc_rs_decoder_erasure_impl::work(int noutput_items,
     if (d_packets % d_hist_decay_period == 0) {
         for (auto& v : d_hist_pos)
             v = (v * 7) / 8;        // 12.5% decay per period
+    }
+
+    // Day 10: periodically checkpoint histogram to disk so next chain
+    // run skips the 60-120s cold-start.
+    d_packets_since_save += noutput_items;
+    if (d_packets_since_save >= d_save_period_packets) {
+        save_histogram();
+        d_packets_since_save = 0;
     }
 
     // Stderr telemetry every 5 s.
