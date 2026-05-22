@@ -22,6 +22,7 @@ private:
     // State.
     float    d_ema;                // running mean of |sample|
     int      d_blank_remaining;    // samples left to blank after trigger
+    int      d_warmup_samples;     // skip blanking until EMA settles
     uint64_t d_n_samples;
     uint64_t d_n_blanked;
 
