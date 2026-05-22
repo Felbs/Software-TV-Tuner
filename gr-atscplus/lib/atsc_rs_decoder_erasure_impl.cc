@@ -113,21 +113,13 @@ int atsc_rs_decoder_erasure_impl::decode_block(const unsigned char* in207,
     // First attempt: hard decode (no erasures).
     int n = decode_rs_char(d_rs, tmp, nullptr, 0);
     if (n >= 0) {
-        // Day 9: only update histogram on LOW-correction successes.
-        // RS (255,235) over GF(256) can correct up to 10 hard errors;
-        // n near that limit (n >= 7) is increasingly likely a false-
-        // positive decode that "succeeds" by mapping random noise to a
-        // valid codeword. Such successes have OUTPUT bytes scattered
-        // randomly across the codeword — polluting the empirical
-        // histogram with false weak positions. Threshold tuned at 4:
-        // ~80% of legitimate corrections fit; suspicious ones skip.
-        if (n <= 4) {
-            for (int i = 0; i < CODE_LEN; i++) {
-                if (tmp[PAD_BYTES + i] != in207[i]) {
-                    int v = d_hist_pos[i] + 1;
-                    if (v > 2000) v = 2000;
-                    d_hist_pos[i] = v;
-                }
+        // Update histogram with positions that were corrected.
+        // Compare corrected tmp[PAD..PAD+CODE_LEN] against original in207.
+        for (int i = 0; i < CODE_LEN; i++) {
+            if (tmp[PAD_BYTES + i] != in207[i]) {
+                int v = d_hist_pos[i] + 1;
+                if (v > 2000) v = 2000;
+                d_hist_pos[i] = v;
             }
         }
         std::memcpy(out188, tmp + PAD_BYTES, PKT_LEN);
@@ -174,11 +166,16 @@ int atsc_rs_decoder_erasure_impl::decode_block(const unsigned char* in207,
     if (n >= 0) {
         d_erasure_successes++;
         d_log_eras_ok++;
-        // Day 9: don't update histogram on erasure-decode successes —
-        // the corrections include up to no_eras erasure positions which
-        // were "free" hints we provided, so we can't tell which are
-        // legitimately weak vs which we biased the decoder toward.
-        // Keep the histogram pure from hard-decode-only successes.
+        // Update histogram: positions actually-corrected (could include some
+        // of the erasure positions or different ones). Compare tmp to in207
+        // across the full codeword.
+        for (int i = 0; i < CODE_LEN; i++) {
+            if (tmp[PAD_BYTES + i] != in207[i]) {
+                int v = d_hist_pos[i] + 1;
+                if (v > 2000) v = 2000;
+                d_hist_pos[i] = v;
+            }
+        }
         std::memcpy(out188, tmp + PAD_BYTES, PKT_LEN);
         d_hist_count++;
         return n;
