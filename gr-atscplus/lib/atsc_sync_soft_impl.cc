@@ -83,6 +83,49 @@ atsc_sync_soft_impl::atsc_sync_soft_impl(float rate)
         d_debug = (std::atoi(p) != 0);
     }
 
+    // Day 17: adaptive thresholds. Defaults are no-op (d_adaptive=false).
+    // Enable with ATSC_SYNC_SOFT_ADAPTIVE=1. Tune the lenient/strict pairs
+    // independently. STEADY thresholds default to whatever LOCK/UNLOCK
+    // were set to (so toggling adaptive on doesn't change steady-state
+    // behavior of a tuned chain).
+    d_adaptive             = false;
+    d_acquire_lock_thresh  = 3.0f;
+    d_acquire_unlock_thresh = 1.5f;
+    d_steady_lock_thresh   = d_lock_threshold;
+    d_steady_unlock_thresh = d_unlock_threshold;
+    d_steady_after_segs    = 313;  // 1 ATSC field = 313 segments
+    d_consec_locked_segs   = 0;
+    d_in_steady_state      = false;
+
+    if (const char* p = std::getenv("ATSC_SYNC_SOFT_ADAPTIVE")) {
+        d_adaptive = (std::atoi(p) != 0);
+    }
+    if (const char* p = std::getenv("ATSC_SYNC_SOFT_ACQUIRE_LOCK")) {
+        float v = std::atof(p);
+        if (v > 0.0f) d_acquire_lock_thresh = v;
+    }
+    if (const char* p = std::getenv("ATSC_SYNC_SOFT_ACQUIRE_UNLOCK")) {
+        float v = std::atof(p);
+        if (v > 0.0f) d_acquire_unlock_thresh = v;
+    }
+    if (const char* p = std::getenv("ATSC_SYNC_SOFT_STEADY_LOCK")) {
+        float v = std::atof(p);
+        if (v > 0.0f) d_steady_lock_thresh = v;
+    }
+    if (const char* p = std::getenv("ATSC_SYNC_SOFT_STEADY_UNLOCK")) {
+        float v = std::atof(p);
+        if (v > 0.0f) d_steady_unlock_thresh = v;
+    }
+    if (const char* p = std::getenv("ATSC_SYNC_SOFT_STEADY_AFTER")) {
+        int v = std::atoi(p);
+        if (v > 0) d_steady_after_segs = v;
+    }
+    // If adaptive enabled, start with ACQUIRE thresholds.
+    if (d_adaptive) {
+        d_lock_threshold   = d_acquire_lock_thresh;
+        d_unlock_threshold = d_acquire_unlock_thresh;
+    }
+
     d_segs_emitted = 0;
     d_segs_held = 0;
     d_segs_aligned = 0;
@@ -92,10 +135,15 @@ atsc_sync_soft_impl::atsc_sync_soft_impl(float rate)
 
     std::fprintf(stderr,
                  "[sync_soft] rate=%.0f alpha=%.4f lock=%.2f unlock=%.2f "
-                 "sticky=%.2f timing_scale=%.2f emit_unlocked=%d debug=%d\n",
+                 "sticky=%.2f timing_scale=%.2f emit_unlocked=%d debug=%d "
+                 "adaptive=%d acq=[%.2f/%.2f] steady=[%.2f/%.2f] after=%d\n",
                  rate, d_alpha, d_lock_threshold, d_unlock_threshold,
                  d_sticky_fraction, d_timing_gain_scale,
-                 (int)d_emit_when_unlocked, (int)d_debug);
+                 (int)d_emit_when_unlocked, (int)d_debug,
+                 (int)d_adaptive,
+                 d_acquire_lock_thresh, d_acquire_unlock_thresh,
+                 d_steady_lock_thresh, d_steady_unlock_thresh,
+                 d_steady_after_segs);
 
     reset();
 }
@@ -110,6 +158,13 @@ void atsc_sync_soft_impl::reset()
     d_seg_locked = false;
     d_locked_idx = -1;
     d_mf_idx = 0;
+    // Day 17: reset adaptive state — start at ACQUIRE thresholds if enabled.
+    d_consec_locked_segs = 0;
+    d_in_steady_state = false;
+    if (d_adaptive) {
+        d_lock_threshold   = d_acquire_lock_thresh;
+        d_unlock_threshold = d_acquire_unlock_thresh;
+    }
     memset(d_mf_buf, 0, sizeof(d_mf_buf));
     memset(d_sample_mem, 0, sizeof(d_sample_mem));
     memset(d_data_mem, 0, sizeof(d_data_mem));
@@ -260,6 +315,37 @@ int atsc_sync_soft_impl::general_work(int noutput_items,
                 if (d_seg_locked) {
                     d_locked_idx = best_idx;
                     if (!was_locked) d_relocks++;
+                }
+            }
+
+            // Day 17: adaptive threshold transitions.
+            if (d_adaptive) {
+                if (d_seg_locked) {
+                    d_consec_locked_segs++;
+                    if (!d_in_steady_state &&
+                        d_consec_locked_segs >= d_steady_after_segs) {
+                        // Stable lock for ≥ steady_after_segs — tighten.
+                        d_in_steady_state = true;
+                        d_lock_threshold   = d_steady_lock_thresh;
+                        d_unlock_threshold = d_steady_unlock_thresh;
+                        if (d_debug) {
+                            std::fprintf(stderr,
+                                "[sync_soft] -> STEADY (lock=%.2f unlock=%.2f) after %d segs\n",
+                                d_lock_threshold, d_unlock_threshold,
+                                d_consec_locked_segs);
+                        }
+                    }
+                } else {
+                    if (d_in_steady_state && d_debug) {
+                        std::fprintf(stderr,
+                            "[sync_soft] -> ACQUIRE (lock=%.2f unlock=%.2f) after %d steady segs\n",
+                            d_acquire_lock_thresh, d_acquire_unlock_thresh,
+                            d_consec_locked_segs);
+                    }
+                    d_in_steady_state = false;
+                    d_consec_locked_segs = 0;
+                    d_lock_threshold   = d_acquire_lock_thresh;
+                    d_unlock_threshold = d_acquire_unlock_thresh;
                 }
             }
 
