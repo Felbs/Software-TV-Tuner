@@ -64,9 +64,12 @@ private:
     int d_log_bad;
 
     // Returns # corrections (>=0) or -1 on uncorrectable. Updates internal
-    // histogram on success. out187 is always written (even on failure, with
+    // histogram on success. out188 is always written (even on failure, with
     // the best-effort buffer contents) so the caller can flag TEI.
-    int decode_block(const unsigned char* in207, unsigned char* out187);
+    // Day 6: now writes 188 bytes (matching stock dtv.atsc_rs_decoder which
+    // outputs the first 188 bytes of the 207-byte codeword — sync byte at
+    // offset 0 is preserved by deinterleaver, NOT manually injected).
+    int decode_block(const unsigned char* in207, unsigned char* out188);
 
 public:
     atsc_rs_decoder_erasure_impl(int max_erasures);
