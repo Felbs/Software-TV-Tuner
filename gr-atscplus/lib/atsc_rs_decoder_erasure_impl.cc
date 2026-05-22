@@ -16,6 +16,7 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -91,27 +92,52 @@ atsc_rs_decoder_erasure_impl::atsc_rs_decoder_erasure_impl(int max_erasures)
 
 void atsc_rs_decoder_erasure_impl::load_histogram()
 {
-    if (d_hist_path == "/dev/null") return;
+    if (d_hist_path == "/dev/null") {
+        std::fprintf(stderr, "[rs_erasure] hist load: disabled (/dev/null)\n");
+        return;
+    }
     std::FILE* f = std::fopen(d_hist_path.c_str(), "rb");
-    if (!f) return;
+    if (!f) {
+        std::fprintf(stderr, "[rs_erasure] hist load: fopen(%s) failed errno=%d\n",
+                     d_hist_path.c_str(), errno);
+        return;
+    }
     uint32_t magic = 0;
     uint32_t version = 0;
     uint32_t code_len = 0;
     uint32_t hist_count = 0;
-    if (std::fread(&magic, sizeof(magic), 1, f) != 1 || magic != HIST_MAGIC) {
+    size_t r = std::fread(&magic, sizeof(magic), 1, f);
+    if (r != 1 || magic != HIST_MAGIC) {
+        std::fprintf(stderr,
+            "[rs_erasure] hist load: bad magic (read %zu items, magic=0x%08x expected 0x%08x)\n",
+            r, magic, (uint32_t)HIST_MAGIC);
         std::fclose(f); return;
     }
-    if (std::fread(&version, sizeof(version), 1, f) != 1 || version != HIST_VERSION) {
+    r = std::fread(&version, sizeof(version), 1, f);
+    if (r != 1 || version != HIST_VERSION) {
+        std::fprintf(stderr,
+            "[rs_erasure] hist load: bad version (read %zu, ver=%u expected %u)\n",
+            r, version, (uint32_t)HIST_VERSION);
         std::fclose(f); return;
     }
-    if (std::fread(&code_len, sizeof(code_len), 1, f) != 1 || code_len != CODE_LEN) {
+    r = std::fread(&code_len, sizeof(code_len), 1, f);
+    if (r != 1 || code_len != (uint32_t)CODE_LEN) {
+        std::fprintf(stderr,
+            "[rs_erasure] hist load: bad code_len (read %zu, code_len=%u expected %u)\n",
+            r, code_len, (uint32_t)CODE_LEN);
         std::fclose(f); return;
     }
-    if (std::fread(&hist_count, sizeof(hist_count), 1, f) != 1) {
+    r = std::fread(&hist_count, sizeof(hist_count), 1, f);
+    if (r != 1) {
+        std::fprintf(stderr, "[rs_erasure] hist load: fread hist_count failed (r=%zu)\n", r);
         std::fclose(f); return;
     }
     int32_t pos[CODE_LEN];
-    if (std::fread(pos, sizeof(int32_t), CODE_LEN, f) != CODE_LEN) {
+    r = std::fread(pos, sizeof(int32_t), CODE_LEN, f);
+    if (r != (size_t)CODE_LEN) {
+        std::fprintf(stderr,
+            "[rs_erasure] hist load: fread pos failed (r=%zu, expected %d)\n",
+            r, CODE_LEN);
         std::fclose(f); return;
     }
     for (int i = 0; i < CODE_LEN; i++) d_hist_pos[i] = pos[i];
