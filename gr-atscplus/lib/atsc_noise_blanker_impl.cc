@@ -52,6 +52,7 @@ atsc_noise_blanker_impl::atsc_noise_blanker_impl(float threshold,
     d_blank_remaining = 0;
     d_n_samples       = 0;
     d_n_blanked       = 0;
+    d_warmup_samples  = 1024;  // build EMA before checking threshold
 
     d_t0           = std::chrono::steady_clock::now();
     d_last_log     = d_t0;
@@ -83,8 +84,15 @@ int atsc_noise_blanker_impl::work(int noutput_items,
         const float a = d_alpha;
         const float thr = d_threshold;
 
+        // During warmup, just track the EMA — don't blank anything. This
+        // prevents the EMA-near-zero bootstrap from misclassifying the
+        // very first normal samples as impulses.
+        const uint64_t total_before = d_n_samples;
+
         for (int i = 0; i < noutput_items; i++) {
             const float mag = std::abs(in[i]);
+            const uint64_t idx = total_before + (uint64_t)i;
+            const bool warming = (idx < (uint64_t)d_warmup_samples);
 
             if (d_blank_remaining > 0) {
                 // Still inside a blanking window — zero out and decrement.
@@ -93,16 +101,19 @@ int atsc_noise_blanker_impl::work(int noutput_items,
                 d_n_blanked++;
                 d_log_blanked++;
                 // Don't update EMA during blanking (impulse would skew it).
-            } else if (mag > thr * d_ema && d_ema > 1e-6f) {
-                // Impulse trigger.
+            } else if (!warming && mag > thr * d_ema && d_ema > 1e-6f) {
+                // Impulse trigger (only after warmup).
                 out[i] = gr_complex(0.0f, 0.0f);
                 d_blank_remaining = d_blank_samples;
                 d_n_blanked++;
                 d_log_blanked++;
                 // Hold EMA — don't poison it with the impulse.
             } else {
-                // Normal sample. Update EMA, passthrough.
-                d_ema = (1.0f - a) * d_ema + a * mag;
+                // Normal sample. Update EMA, passthrough. During warmup
+                // we use a much higher alpha so the EMA snaps to the true
+                // level quickly.
+                const float eff_a = warming ? std::max(a, 1.0f / 32.0f) : a;
+                d_ema = (1.0f - eff_a) * d_ema + eff_a * mag;
                 out[i] = in[i];
             }
         }
