@@ -7,6 +7,8 @@
 #include <gnuradio/atscplus/atsc_rs_decoder_erasure.h>
 #include <array>
 #include <chrono>
+#include <cstdint>
+#include <string>
 
 namespace gr {
 namespace atscplus {
@@ -62,6 +64,16 @@ private:
     int d_log_eras_dec;
     int d_log_eras_ok;
     int d_log_bad;
+
+    // Day 10: persistent histogram across chain restarts.
+    static constexpr uint32_t HIST_MAGIC   = 0x52534552;  // "RSER"
+    static constexpr uint32_t HIST_VERSION = 1;
+    std::string d_hist_path;
+    int d_save_period_packets;
+    int d_packets_since_save;
+
+    void load_histogram();
+    void save_histogram() const;
 
     // Returns # corrections (>=0) or -1 on uncorrectable. Updates internal
     // histogram on success. out188 is always written (even on failure, with
