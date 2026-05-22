@@ -243,7 +243,8 @@ class LiveTVTopBlock(gr.top_block):
         if _rs_kind == "erasure":
             _rs_eras = int(os.environ.get("STVT_RS_ERASURES", "14"))
             rs = atscplus.atsc_rs_decoder_erasure(_rs_eras)
-            _rs_is_2port = False
+            # 2026-05-21 Day 4: erasure block now 2-port (matches stock).
+            _rs_is_2port = True
             LOG.info(f"rs: erasure (max_erasures={_rs_eras}) (STVT_RS)")
         else:
             rs = dtv.atsc_rs_decoder()

@@ -8,6 +8,7 @@
 
 #include "atsc_rs_decoder_erasure_impl.h"
 #include <gnuradio/io_signature.h>
+#include <gnuradio/dtv/atsc_plinfo.h>
 // gnuradio/fec/rs.h is a C header; gr-fec was built without extern "C"
 // guards in its public header. Wrap it here so the symbols resolve.
 extern "C" {
@@ -30,8 +31,17 @@ atsc_rs_decoder_erasure::sptr atsc_rs_decoder_erasure::make(int max_erasures)
 
 atsc_rs_decoder_erasure_impl::atsc_rs_decoder_erasure_impl(int max_erasures)
     : sync_block("atscplus_atsc_rs_decoder_erasure",
-                 io_signature::make(1, 1, CODE_LEN),
-                 io_signature::make(1, 1, PKT_LEN))
+                 // 2026-05-21 Day 4 fix: match stock dtv.atsc_rs_decoder
+                 // interface — 2 input ports (data + plinfo), 2 output
+                 // ports. plinfo lets us skip field-sync segments which
+                 // aren't RS-encoded and would produce 100% garbage if
+                 // decoded as data. THIS WAS THE PSI-CORRUPTION BUG.
+                 io_signature::make2(2, 2,
+                     sizeof(unsigned char) * CODE_LEN,
+                     sizeof(gr::dtv::plinfo)),
+                 io_signature::make2(2, 2,
+                     sizeof(unsigned char) * PKT_LEN,
+                     sizeof(gr::dtv::plinfo)))
 {
     // Phil Karn / gnuradio-fec init. Parameters MUST match gr-dtv's stock
     // atsc_rs_decoder so the GF and generator polynomials agree.
@@ -86,10 +96,16 @@ int atsc_rs_decoder_erasure_impl::dynamic_max_erasures() const
 }
 
 int atsc_rs_decoder_erasure_impl::decode_block(const unsigned char* in207,
-                                               unsigned char* out187)
+                                               unsigned char* out188)
 {
     // (207, 187) shortened from (255, 235) — 48 byte implicit zero pad
     // at the front of the 255-byte buffer fed to decode_rs_char.
+    // Stock dtv.atsc_rs_decoder copies 188 bytes from tmp[PAD..PAD+188]
+    // (which is the first 188 bytes of the 207-byte codeword: sync byte
+    // at offset 0 already in place because deinterleaver preserves it).
+    // Day 6: we previously forced out[0]=0x47 and shifted bytes by 1 —
+    // that DUPLICATED the sync byte at offset 1 (the PID-high byte),
+    // breaking ALL PID parsing including PSI PAT/PMT. THAT was the bug.
     unsigned char tmp[RS_N];
     std::memset(tmp, 0, PAD_BYTES);
     std::memcpy(tmp + PAD_BYTES, in207, CODE_LEN);
@@ -106,7 +122,7 @@ int atsc_rs_decoder_erasure_impl::decode_block(const unsigned char* in207,
                 d_hist_pos[i] = v;
             }
         }
-        std::memcpy(out187, tmp + PAD_BYTES, DATA_LEN);
+        std::memcpy(out188, tmp + PAD_BYTES, PKT_LEN);
         d_hist_count++;
         return n;
     }
@@ -114,7 +130,7 @@ int atsc_rs_decoder_erasure_impl::decode_block(const unsigned char* in207,
     // First attempt failed.
     // If we don't have meaningful histogram yet, give up.
     if (d_hist_count < 20) {
-        std::memcpy(out187, in207, DATA_LEN);
+        std::memcpy(out188, in207, PKT_LEN);
         return -1;
     }
 
@@ -127,7 +143,7 @@ int atsc_rs_decoder_erasure_impl::decode_block(const unsigned char* in207,
             ranked.emplace_back(d_hist_pos[i], i);
     }
     if (ranked.empty()) {
-        std::memcpy(out187, in207, DATA_LEN);
+        std::memcpy(out188, in207, PKT_LEN);
         return -1;
     }
     std::sort(ranked.begin(), ranked.end(),
@@ -160,13 +176,13 @@ int atsc_rs_decoder_erasure_impl::decode_block(const unsigned char* in207,
                 d_hist_pos[i] = v;
             }
         }
-        std::memcpy(out187, tmp + PAD_BYTES, DATA_LEN);
+        std::memcpy(out188, tmp + PAD_BYTES, PKT_LEN);
         d_hist_count++;
         return n;
     }
 
     // Still uncorrectable — return data as-is for caller to mark TEI.
-    std::memcpy(out187, in207, DATA_LEN);
+    std::memcpy(out188, in207, PKT_LEN);
     return -1;
 }
 
@@ -174,10 +190,12 @@ int atsc_rs_decoder_erasure_impl::work(int noutput_items,
                                        gr_vector_const_void_star& input_items,
                                        gr_vector_void_star&       output_items)
 {
-    auto in  = static_cast<const unsigned char*>(input_items[0]);
-    auto out = static_cast<unsigned char*>(output_items[0]);
+    auto in     = static_cast<const unsigned char*>(input_items[0]);
+    auto plin   = static_cast<const gr::dtv::plinfo*>(input_items[1]);
+    auto out    = static_cast<unsigned char*>(output_items[0]);
+    auto plout  = static_cast<gr::dtv::plinfo*>(output_items[1]);
 
-    unsigned char data187[DATA_LEN];
+    (void)0;  // Day 6: removed data187[] — decode_block writes directly to out_pkt
 
     // 2026-05-21 Day 2: read viterbi_metric tags emitted by
     // atscplus.atsc_viterbi_soft (12 segments per tag, propagated through
@@ -200,14 +218,31 @@ int atsc_rs_decoder_erasure_impl::work(int noutput_items,
         const unsigned char* in_pkt  = in  + i * CODE_LEN;
         unsigned char*       out_pkt = out + i * PKT_LEN;
 
-        int n = decode_block(in_pkt, data187);
+        // Always propagate plinfo (downstream blocks need it).
+        plout[i] = plin[i];
+
+        // Skip RS decode on non-regular (field-sync) segments — they
+        // aren't RS-encoded data. Day 5: stock RS probably copies the
+        // input bytes through unchanged (NOT a fake NULL packet — that
+        // confuses downstream derand whose PN-sync depends on input
+        // content matching field-sync patterns). Copy first 188 bytes
+        // of the 207-byte codeword through. plinfo tells depad downstream
+        // to strip the segment.
+        if (!plin[i].regular_seg_p()) {
+            std::memcpy(out_pkt, in_pkt, PKT_LEN);
+            d_packets++;
+            d_log_packets++;
+            continue;
+        }
+
+        int n = decode_block(in_pkt, out_pkt);
         d_packets++;
         d_log_packets++;
 
-        // Output is 188-byte TS packet: sync byte + 187 data bytes.
-        // (Stock gr-dtv atsc_rs_decoder follows this convention.)
-        out_pkt[0] = 0x47;
-        std::memcpy(out_pkt + 1, data187, DATA_LEN);
+        // Day 6: ALSO set plinfo.transport_error so downstream
+        // (depad/derand) sees the same authoritative TEI flag stock RS
+        // uses. Don't overwrite byte 1 of TS — sync is at byte 0 already.
+        plout[i].set_transport_error(n == -1);
 
         if (n < 0) {
             // Set TEI flag (bit 7 of byte 1) so teiscrub can NULL-out
