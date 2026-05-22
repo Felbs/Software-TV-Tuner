@@ -1238,42 +1238,23 @@ def spawn_ffplay(window_title: str, log_fh):
                f"--title={window_title}",
                "--demuxer=lavf",
                "--demuxer-lavf-format=mpegts",
-               # 2026-05-22 last-ditch probe expansion. Chain produces clean
-               # TS bytes but with corrupt mpeg2video sequence headers on
-               # marginal RF. Bigger probe window = more chance to catch
-               # one valid sequence_header_code (0x000001B3) somewhere.
-               "--demuxer-lavf-analyzeduration=60",
-               "--demuxer-lavf-probesize=200000000",
-               # Don't require ALL streams probed — start playback as soon
-               # as one decodable video stream is found.
-               "--demuxer-lavf-o=fflags=+nofillin,scan_all_pmts=1,err_detect=ignore_err",
+               # 2026-05-22 18:00: REVERTED to pre-today baseline (commit
+               # 7224446 state). Today's experiments made things WORSE:
+               #   probesize=200M + analyzeduration=60M → mpv OOMs/timeouts,
+               #     crashed 4× in 50s
+               #   anti-freeze flags (framedrop=vo, video-sync=desync, etc)
+               #     never resolved the freeze
+               #   audio-stream-silence flip-flopped (memory says it broke
+               #     things, but the code that worked yesterday HAD it).
+               # Pre-today baseline plays (with freezes) — today's changes
+               # don't play at all. Going back, then iterating from there.
+               "--demuxer-lavf-analyzeduration=15",
+               "--demuxer-lavf-probesize=20000000",
                "--cache=yes",
                f"--cache-secs={cache_secs}",
                "--demuxer-max-bytes=200MiB",
                "--demuxer-max-back-bytes=200MiB",
-               # 2026-05-17 (try #2, single-flag): fill silence on audio
-               # underrun instead of skipping. The earlier multi-flag
-               # experiment broke mpv probe; this one ONLY adds this flag
-               # alongside the proven baseline config.
                "--audio-stream-silence=yes",
-               # 2026-05-22 anti-freeze flags. The earlier
-               # --vd-lavc-show-all=yes crashed mpv (don't re-add). These
-               # are different — they affect frame-drop behavior, not
-               # the decoder error model, so they should be safe:
-               #   framedrop=vo: drop displayed frames if behind, don't
-               #                 stall waiting for decode
-               #   video-sync=desync: don't pause video to maintain
-               #                      audio sync — keeps picture moving
-               #                      through brief decode hiccups
-               #   hr-seek=no: avoid expensive seek-back on glitches
-               "--framedrop=vo",
-               "--video-sync=desync",
-               "--hr-seek=no",
-               # vd-lavc-skiploopfilter=all skips the in-loop deblocking
-               # on every frame. Costs sharpness but the decoder doesn't
-               # stall when it sees broken loop-filter syntax. Helps
-               # with the "ac-tex damaged" cascade we see in mpv log.
-               "--vd-lavc-skiploopfilter=all",
                "-"]
         return subprocess.Popen(
             cmd,
