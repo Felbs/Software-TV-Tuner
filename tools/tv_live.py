@@ -152,9 +152,14 @@ class LiveTVTopBlock(gr.top_block):
         src.set_sample_rate(0, ATSC_NATIVE_SAMPLE_RATE)
         src.set_frequency(0, freq)
         src.set_antenna(0, _antenna)
-        # Disable AGC so manual IFGR/RFGR settings stick.
+        # AGC: default OFF (manual gain via IFGR/RFGR), but STVT_SDR_AGC=1
+        # enables the SDR's internal AGC. Useful when RF level drifts and
+        # samples clip faster than manual gain can compensate. Observed
+        # 2026-05-22 with max|x|=1.57 clips ~50s after lock, killing chain.
+        # Hardware AGC adapts in microseconds.
+        _sdr_agc = int(os.environ.get("STVT_SDR_AGC", "0"))
         try:
-            src.set_gain_mode(0, False)
+            src.set_gain_mode(0, bool(_sdr_agc))
         except Exception:
             pass
         try:
