@@ -37,7 +37,11 @@ RF_CHANNELS    = [34, 35, 31, 25, 27, 23, 28, 32, 36]
 IFGRS          = [59, 50, 45, 40, 35, 30]
 RFGAIN_SELS    = [5, 3, 7, 1]
 ANTENNAS       = ["Antenna A", "Antenna B"]
-EQS            = ["cma", "long"]  # multifs excluded 2026-05-16:
+EQS            = ["long", "cma"]  # long first — it's the typical winner per
+# working_recipe_2026_05_22 (replug + bare config). Old order put cma first
+# which wasted ~9 RF cells (4 min) on a config that rarely wins before getting
+# to the one that does. CMA stays as fallback for marginal RF where long
+# can't converge blind. multifs excluded 2026-05-16:
 # even when it "locks" + PAT-counts pass in verify, multifs drops the
 # PSI packets (PAT/PMT PIDs) ~80% of the time, so ts_psi_repair sees
 # nothing to cache and the player has no program info to decode. The
