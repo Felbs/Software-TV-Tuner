@@ -62,38 +62,56 @@ def kill_chain() -> None:
 
 
 def measure_pat(ts_path: Path, max_bytes: int = 5_000_000) -> tuple[int, int]:
-    """Return (pat_count, ts_size). Scans the last `max_bytes` of live.ts
-    for TS packets with PID 0 (PAT)."""
+    """Return (pat_count, ts_size). Scans up to `max_bytes` worth of TS
+    packets and returns max PAT-count found across windows of the file
+    (first 5 MB, middle 5 MB, last 5 MB).
+
+    2026-05-22 Day 14: changed from only-last-5MB to max-across-windows.
+    On marginal RF, the chain locks initially (gets PATs in first window)
+    but may diverge mid-run (no PATs in last window). The candidate is
+    still useful — we should accept it and rely on run_stvt_winner.sh's
+    watchdog to handle drops.
+    """
     if not ts_path.exists():
         return -1, 0
     sz = ts_path.stat().st_size
     if sz < 100_000:
         return 0, sz
-    n = min(sz, max_bytes)
     pkt_size = 188
-    try:
-        with open(ts_path, "rb") as f:
-            f.seek(max(0, sz - n))
-            data = f.read(n)
-    except OSError:
-        return -1, sz
-    # First find sync byte alignment
-    align = -1
-    for i in range(0, min(2000, len(data) - pkt_size * 4)):
-        if (data[i] == 0x47 and data[i + pkt_size] == 0x47
-                and data[i + 2 * pkt_size] == 0x47):
-            align = i
-            break
-    if align < 0:
-        return 0, sz
-    pat_count = 0
-    for i in range(align, len(data) - pkt_size, pkt_size):
-        if data[i] != 0x47:
-            continue
-        pid = ((data[i + 1] & 0x1f) << 8) | data[i + 2]
-        if pid == 0:
-            pat_count += 1
-    return pat_count, sz
+    n = min(sz, max_bytes)
+
+    def count_in(offset: int) -> int:
+        try:
+            with open(ts_path, "rb") as f:
+                f.seek(offset)
+                data = f.read(n)
+        except OSError:
+            return -1
+        # find sync byte alignment
+        align = -1
+        for i in range(0, min(2000, len(data) - pkt_size * 4)):
+            if (data[i] == 0x47 and data[i + pkt_size] == 0x47
+                    and data[i + 2 * pkt_size] == 0x47):
+                align = i
+                break
+        if align < 0:
+            return 0
+        c = 0
+        for i in range(align, len(data) - pkt_size, pkt_size):
+            if data[i] != 0x47:
+                continue
+            pid = ((data[i + 1] & 0x1f) << 8) | data[i + 2]
+            if pid == 0:
+                c += 1
+        return c
+
+    offsets = [0]
+    if sz > n * 2:
+        offsets.append((sz - n) // 2)
+    if sz > n:
+        offsets.append(sz - n)
+    best = max((count_in(o) for o in offsets), default=0)
+    return max(best, 0), sz
 
 
 def try_config(rf: int, ifgr: int, rfgain: int, ant: str, eq: str,
@@ -108,6 +126,15 @@ def try_config(rf: int, ifgr: int, rfgain: int, ant: str, eq: str,
     env["STVT_EQ"]          = eq
     env["STVT_VITERBI"]     = "hard"
     env["STVT_RS"]          = "stock"
+    # 2026-05-21 Day 13: match the sync thresholds that run_stvt_winner.sh
+    # uses. Default ATSC_SYNC_SOFT_LOCK=4.0 is too strict for marginal RF;
+    # verify would fail on RFs that the actual chain (set 3.5) would lock.
+    # Without this, auto_acquire kept rejecting every candidate.
+    env.setdefault("ATSC_SYNC_SOFT_LOCK",   "3.5")
+    env.setdefault("ATSC_SYNC_SOFT_UNLOCK", "2.0")
+    env.setdefault("STVT_NATIVE_RATE",     "8000000")
+    env.setdefault("STVT_RESAMP_INTERP",   "25")
+    env.setdefault("STVT_RESAMP_DECIM",    "32")
     # Run with hardware-respectful defaults (no extreme priority).
     env.pop("STVT_PLAYER", None)
 
