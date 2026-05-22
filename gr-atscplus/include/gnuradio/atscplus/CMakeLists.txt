@@ -18,5 +18,6 @@ install(FILES
     atsc_sync_pathA.h
     atsc_viterbi_soft.h
     atsc_rs_decoder_erasure.h
+    atsc_noise_blanker.h
     DESTINATION include/gnuradio/atscplus
 )

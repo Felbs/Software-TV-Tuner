@@ -218,6 +218,23 @@ class LiveTVTopBlock(gr.top_block):
         # to the offline chain's input (and AGC will trim per-block anyway).
         scaler = blocks.multiply_const_cc(32768.0)
 
+        # 2026-05-22 Day 18: optional impulse noise blanker BEFORE resamp.
+        # Enable with STVT_NB=1 (default off). Clips samples above
+        # STVT_NB_THRESHOLD × running |sample| EMA, blanks STVT_NB_BLANK_SAMPLES
+        # consecutive samples per trigger. Helps with impulse interference
+        # (lightning, ignition, electrical arcing) that would otherwise saturate
+        # the matched filter / equalizer.
+        nb = None
+        if int(os.environ.get("STVT_NB", "0")):
+            _nb_thresh = float(os.environ.get("STVT_NB_THRESHOLD",     "3.0"))
+            _nb_blank  = int  (os.environ.get("STVT_NB_BLANK_SAMPLES", "8"))
+            _nb_alpha  = float(os.environ.get("STVT_NB_ALPHA",         "1e-4"))
+            nb = atscplus.atsc_noise_blanker(_nb_thresh, _nb_blank, _nb_alpha)
+            LOG.info(f"noise_blanker: ENABLED thresh={_nb_thresh} "
+                     f"blank_samples={_nb_blank} alpha={_nb_alpha}")
+        else:
+            LOG.info("noise_blanker: disabled (STVT_NB=0)")
+
         # Software resample to 6.25 MS/s. If STVT_SKIP_RESAMP=1, the SDR
         # is already running at the right rate (set STVT_NATIVE_RATE=6250000)
         # and we omit the resampler entirely — saves a CPU stage that was
@@ -299,10 +316,20 @@ class LiveTVTopBlock(gr.top_block):
         # fs_checker through rs_decoder carry TWO streams (data + tag);
         # derandomizer collapses to one, then depad emits raw TS bytes.
         # Skip the resampler stage when STVT_SKIP_RESAMP=1 (SDR runs at 6.25 MS/s).
+        # Day 18: insert noise blanker between scaler and (resamp or rxf)
+        # so it operates on the raw scaled SDR samples — earliest point
+        # impulse spikes show up. Disabled by default; the variable `nb` is
+        # None when STVT_NB=0 and falls back to the original chain.
         if resamp is None:
-            self.connect(src, scaler, rxf, fpll, dcr, agc, sync, fs_check)
+            if nb is None:
+                self.connect(src, scaler, rxf, fpll, dcr, agc, sync, fs_check)
+            else:
+                self.connect(src, scaler, nb, rxf, fpll, dcr, agc, sync, fs_check)
         else:
-            self.connect(src, scaler, resamp, rxf, fpll, dcr, agc, sync, fs_check)
+            if nb is None:
+                self.connect(src, scaler, resamp, rxf, fpll, dcr, agc, sync, fs_check)
+            else:
+                self.connect(src, scaler, nb, resamp, rxf, fpll, dcr, agc, sync, fs_check)
         if _rs_is_2port:
             for blk_in, blk_out in [(fs_check, equalizer),
                                      (equalizer, viterbi),
