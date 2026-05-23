@@ -11,7 +11,8 @@
 set -u
 LOG=/tmp/stvt_play_watchdog.log
 SAMPLE_SEC=30
-ZERO_THRESHOLD=3   # 3 × 30s = 90s of zero output triggers restart
+ZERO_THRESHOLD=6   # 6 × 30s = 180s of zero output triggers restart
+                   # (ffmpeg with -re needs longer probe headroom)
 
 log() { echo "[$(date '+%H:%M:%S')] $*" >> "$LOG"; }
 log "watchdog starting"
