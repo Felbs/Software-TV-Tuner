@@ -100,11 +100,36 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
                                  float* output_samples,
                                  int nsamples)
 {
-    // Tier-3: anti-windup + leakage. Bounds monotonic FS-only over-fit drift
-    // and resets to delta on divergence. See README (Tier 3).
-    static const double BETA = 5e-5;
-    static const float  LEAK = 5e-4f;
-    static const float  DIVERGENCE_BAIL = 50.0f;
+    // 2026-05-22 23:42: expose BETA/LEAK/DIVERGENCE_BAIL via env vars
+    // so the chain can sweep optimal LMS step / leakage. Defaults match
+    // prior hardcoded values. Read once and cached in static locals.
+    static const double BETA = []() -> double {
+        if (const char* p = std::getenv("STVT_EQ_BETA")) {
+            char* e = nullptr; double v = std::strtod(p, &e);
+            if (e != p) return v;
+        }
+        return 5e-5;
+    }();
+    static const float  LEAK = []() -> float {
+        if (const char* p = std::getenv("STVT_EQ_LEAK")) {
+            char* e = nullptr; double v = std::strtod(p, &e);
+            if (e != p) return (float)v;
+        }
+        return 5e-4f;
+    }();
+    static const float  DIVERGENCE_BAIL = []() -> float {
+        if (const char* p = std::getenv("STVT_EQ_DIVERGE")) {
+            char* e = nullptr; double v = std::strtod(p, &e);
+            if (e != p) return (float)v;
+        }
+        return 50.0f;
+    }();
+    static bool _logged = []() {
+        std::fprintf(stderr,
+                     "[atsc_equalizer_long] tunable params: BETA=%g LEAK=%g DIVERGENCE_BAIL=%g\n",
+                     BETA, LEAK, DIVERGENCE_BAIL);
+        return true;
+    }();
 
     for (int j = 0; j < nsamples; j++) {
         output_samples[j] = 0;
