@@ -18,3 +18,21 @@ recordings/
 
 # Scan-lab fixtures (captured wideband IQ — 400+ MB, regenerate locally)
 tools/scan_lab/fixtures/
+
+# Build artifacts (not tracked)
+gr-atscplus/build/
+gr-atscplus/build_*/
+gr-atscplus/build.znver1.test/
+
+# Editor / archive backups
+tools/*.pre_*
+tools/tv_live_bigbuf.py
+tools/tv_live_lite*.py
+tools/tv_live_no_resample.py
+tools/tv_live_nodcr.py
+tools/tv_live_sdrplay3_v2.py
+tools/tv_live_stockrx.py
+tools/tv_live_test*.py
+
+# Claude Code session state
+.claude/
