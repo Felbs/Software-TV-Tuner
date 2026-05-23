@@ -55,6 +55,7 @@ echo "[stvt_play] starting (live.ts=$((SZ/1024/1024)) MB, prog=$PROGRAM)"
       -map "0:p:$PROGRAM:v" -map "0:p:$PROGRAM:a?" \
       -map_metadata 0 \
       -c:v libx264 -preset ultrafast -tune zerolatency -crf 28 -g 30 \
+      -fps_mode cfr -r 30 \
       -c:a aac -b:a 128k -ar 48000 -ac 2 \
       -f mpegts pipe:1 2>/tmp/stvt_ffmpeg.log \
   | mpv \
@@ -65,4 +66,7 @@ echo "[stvt_play] starting (live.ts=$((SZ/1024/1024)) MB, prog=$PROGRAM)"
       --demuxer-max-bytes=500MiB --demuxer-max-back-bytes=100MiB \
       --cache-pause=no \
       --alang=eng,en \
+      --interpolation=yes --tscale=mitchell \
+      --video-sync=display-resample \
+      --framedrop=vo \
       - 2>/tmp/stvt_mpv.log
