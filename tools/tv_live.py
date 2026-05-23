@@ -290,7 +290,19 @@ class LiveTVTopBlock(gr.top_block):
         elif _vit_name == "soft": viterbi = atscplus.atsc_viterbi_soft()
         else: raise ValueError(f"Unknown STVT_VITERBI={_vit_name}")
         LOG.info(f"viterbi: {_vit_name} (STVT_VITERBI)")
-        deinterleaver = dtv.atsc_deinterleaver()
+        # 2026-05-22: when both soft viterbi AND erasure RS are active, use
+        # atscplus.atsc_deinterleaver (tag-forwarding clone) so the
+        # viterbi_metric tags emitted by atsc_viterbi_soft reach
+        # atsc_rs_decoder_erasure. The stock dtv.atsc_deinterleaver was
+        # observed to deliver tags=0 in this configuration.
+        _use_tagged_dei = (_vit_name == "soft" and
+                           os.environ.get("STVT_RS", "stock") == "erasure")
+        if _use_tagged_dei:
+            deinterleaver = atscplus.atsc_deinterleaver()
+            LOG.info("deinterleaver: atscplus (tag-forwarding)")
+        else:
+            deinterleaver = dtv.atsc_deinterleaver()
+            LOG.info("deinterleaver: dtv (stock)")
         # STVT_RS=erasure switches to the empirical-erasure RS decoder.
         _rs_kind = os.environ.get("STVT_RS", "stock")
         if _rs_kind == "erasure":

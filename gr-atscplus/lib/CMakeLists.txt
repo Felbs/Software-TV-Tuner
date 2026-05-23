@@ -31,6 +31,7 @@ list(APPEND atscplus_sources
     atsc_sync_pathA_impl.cc
     atsc_rs_decoder_erasure_impl.cc
     atsc_noise_blanker_impl.cc
+    atsc_deinterleaver_impl.cc
 )
 
 set(atscplus_sources
