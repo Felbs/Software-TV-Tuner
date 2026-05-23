@@ -61,7 +61,8 @@ echo "[stvt_play] starting (live.ts=$((SZ/1024/1024)) MB, prog=$PROGRAM)"
       --no-terminal --keep-open=yes \
       --title="$TITLE" \
       --demuxer=lavf --demuxer-lavf-format=mpegts \
-      --cache=yes --cache-secs=30 \
-      --demuxer-max-bytes=200MiB \
+      --cache=yes --cache-secs=120 \
+      --demuxer-max-bytes=500MiB --demuxer-max-back-bytes=100MiB \
+      --cache-pause=no \
       --alang=eng,en \
       - 2>/tmp/stvt_mpv.log
