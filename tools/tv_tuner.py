@@ -123,8 +123,14 @@ if sys.platform == "win32":
     FFMPEG_ANALYZE_DURATION = "2000000"   # 2 s
     FFMPEG_PROBE_SIZE       = "3000000"   # 3 MB
 else:
-    FFMPEG_ANALYZE_DURATION = "10000000"  # 10 s
-    FFMPEG_PROBE_SIZE       = "50000000"  # 50 MB
+    # 2026-05-22 19:59: bumped from 10s/50MB. On marginal RF, the chain's
+    # mpeg2video stream has very rare seq_headers (most are corrupted).
+    # ffmpeg-from-pipe needs to ingest enough TS to find ONE before it can
+    # probe dimensions and feed them to the libx264 encoder. From-file works
+    # because ffmpeg can read ahead; from-pipe is rate-limited to chain's
+    # 1.5MB/s output. 60s × 1.5MB/s = 90MB which fits a seq_header.
+    FFMPEG_ANALYZE_DURATION = "60000000"  # 60 s
+    FFMPEG_PROBE_SIZE       = "200000000" # 200 MB
 FFPLAY_ANALYZE_DURATION = "3000000"       # 3 s — both platforms
 FFPLAY_PROBE_SIZE       = "3000000"       # 3 MB — both platforms
 TV_PLAYER = HERE / "tv_player.py"   # bundled with the repo
@@ -1084,14 +1090,22 @@ def build_ffmpeg_cmd(play: bool, record_path: Path | None,
         Only valid when play=True with no record/stream sinks.
     """
     if passthrough:
-        # 2026-05-18 REVERTED: tried -c:a aac + aresample=async=1000 to
-        # mask AC3 gaps but it introduced 3-sec freeze pattern in user
-        # playback. Re-encoding added CPU + bursty output that stuttered
-        # the whole pipeline. Back to pure -c copy passthrough.
+        # 2026-05-22 20:03: libx264 re-encode (replaces -c copy passthrough).
+        # On marginal RF, mpeg2video seq_header_code is too often corrupted
+        # for mpv's probe to find one. ffmpeg WITH PROPER BUFFERING during
+        # probe CAN find dimensions in this corrupt stream and decode. The
+        # libx264 encoder then emits clean SPS/PPS that mpv probes instantly.
+        # Critical: NO `+nobuffer` flag and `analyzeduration` ≥ 60s. With
+        # `+nobuffer`, ffmpeg never accumulates enough TS to find dimensions
+        # over a 1.5MB/s pipe — ffmpeg stays at 0% CPU forever in probe.
+        # Without `+nobuffer`, probe completes ~30-60s after pipe start.
         return [
             FFMPEG,
             "-hide_banner", "-loglevel", "warning",
-            "-fflags", "+genpts+igndts+discardcorrupt+nobuffer",
+            # 2026-05-22 20:08: removed +discardcorrupt — it was dropping
+            # the rare seq_header packets that DO exist in the stream,
+            # preventing ffmpeg from finding dimensions during probe.
+            "-fflags", "+genpts+igndts",
             "-err_detect", "ignore_err",
             "-flags", "+output_corrupt",
             "-analyzeduration", FFMPEG_ANALYZE_DURATION,
@@ -1101,7 +1115,9 @@ def build_ffmpeg_cmd(play: bool, record_path: Path | None,
             "-i", "pipe:0",
             "-map", f"0:p:{program}:v",
             "-map", f"0:p:{program}:a?",
-            "-c", "copy",
+            "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+            "-crf", "28", "-g", "30", "-keyint_min", "30",
+            "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
             "-f", "mpegts",
             "pipe:1",
         ]
