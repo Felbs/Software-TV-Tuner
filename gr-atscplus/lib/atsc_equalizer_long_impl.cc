@@ -124,12 +124,34 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
         }
         return 50.0f;
     }();
+    // 2026-05-23 LKG (Last Known Good) tap restoration.
+    // When set STVT_EQ_LKG=1, the equalizer keeps a snapshot of its last
+    // confidently-good tap state (small LMS error during a clean field sync).
+    // On divergence (tap_e too high / NaN), restore from snapshot instead
+    // of resetting to delta. Idea: during RF fades the equalizer gets
+    // pulled into bad states; reverting to a known good shape lets it
+    // recover faster than re-converging from delta.
+    static const bool LKG_ENABLED = []() -> bool {
+        const char* p = std::getenv("STVT_EQ_LKG");
+        return p && std::atoi(p) != 0;
+    }();
+    static const float LKG_GOOD_RMS_THRESHOLD = []() -> float {
+        if (const char* p = std::getenv("STVT_EQ_LKG_RMS")) {
+            char* e = nullptr; double v = std::strtod(p, &e);
+            if (e != p) return (float)v;
+        }
+        return 1.5f;   // error RMS below this counts as "good"
+    }();
     static bool _logged = []() {
         std::fprintf(stderr,
-                     "[atsc_equalizer_long] tunable params: BETA=%g LEAK=%g DIVERGENCE_BAIL=%g\n",
-                     BETA, LEAK, DIVERGENCE_BAIL);
+                     "[atsc_equalizer_long] tunable params: BETA=%g LEAK=%g DIVERGENCE_BAIL=%g LKG=%d LKG_RMS=%g\n",
+                     BETA, LEAK, DIVERGENCE_BAIL,
+                     (int)LKG_ENABLED, LKG_GOOD_RMS_THRESHOLD);
         return true;
     }();
+
+    // Accumulate RMS error during this adapt batch for LKG quality assessment.
+    double err_sq_sum = 0.0;
 
     for (int j = 0; j < nsamples; j++) {
         output_samples[j] = 0;
@@ -137,6 +159,7 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
             &output_samples[j], &input_samples[j], &d_taps[0], NTAPS);
 
         float e = output_samples[j] - training_pattern[j];
+        err_sq_sum += (double)e * (double)e;
 
         float tmp_taps[NTAPS];
         volk_32f_s32f_multiply_32f(tmp_taps, &input_samples[j], BETA * e, NTAPS);
@@ -146,11 +169,33 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
     float keep = 1.0f - LEAK;
     for (int k = 0; k < NTAPS; k++) d_taps[k] *= keep;
 
+    // LKG snapshot: if THIS adapt batch had low error, this tap state is
+    // probably good. Save it for future divergence recovery.
+    if (LKG_ENABLED && nsamples > 0) {
+        double err_rms = std::sqrt(err_sq_sum / (double)nsamples);
+        if (err_rms < (double)LKG_GOOD_RMS_THRESHOLD) {
+            for (int k = 0; k < NTAPS; k++) d_taps_lkg[k] = d_taps[k];
+            d_lkg_valid = true;
+        }
+    }
+
     double tap_e = 0.0;
     for (int k = 0; k < NTAPS; k++) tap_e += (double)d_taps[k] * (double)d_taps[k];
     if (!std::isfinite(tap_e) || tap_e > (double)DIVERGENCE_BAIL*DIVERGENCE_BAIL) {
-        for (int k = 0; k < NTAPS; k++) d_taps[k] = 0.0f;
-        d_taps[NPRETAPS] = 1.0f;
+        // Divergence: restore from LKG if available, otherwise reset to delta.
+        if (LKG_ENABLED && d_lkg_valid) {
+            static uint64_t lkg_restores = 0;
+            lkg_restores++;
+            for (int k = 0; k < NTAPS; k++) d_taps[k] = d_taps_lkg[k];
+            if (lkg_restores <= 5 || (lkg_restores & 0x3F) == 0) {
+                std::fprintf(stderr,
+                             "[atsc_equalizer_long] LKG restore #%llu (tap_e was %g)\n",
+                             (unsigned long long)lkg_restores, tap_e);
+            }
+        } else {
+            for (int k = 0; k < NTAPS; k++) d_taps[k] = 0.0f;
+            d_taps[NPRETAPS] = 1.0f;
+        }
         for (int j = 0; j < nsamples; j++) {
             output_samples[j] = (NPRETAPS+j < NTAPS+nsamples)
                 ? input_samples[j+NPRETAPS] : 0.0f;
