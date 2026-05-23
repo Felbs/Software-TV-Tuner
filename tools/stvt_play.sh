@@ -53,6 +53,7 @@ echo "[stvt_play] starting (live.ts=$((SZ/1024/1024)) MB, prog=$PROGRAM)"
       -analyzeduration 60000000 -probesize 200000000 \
       -f mpegts -i pipe:0 \
       -map "0:p:$PROGRAM:v" -map "0:p:$PROGRAM:a?" \
+      -map_metadata 0 \
       -c:v libx264 -preset ultrafast -tune zerolatency -crf 28 -g 30 \
       -c:a aac -b:a 128k -ar 48000 -ac 2 \
       -f mpegts pipe:1 2>/tmp/stvt_ffmpeg.log \
@@ -62,4 +63,5 @@ echo "[stvt_play] starting (live.ts=$((SZ/1024/1024)) MB, prog=$PROGRAM)"
       --demuxer=lavf --demuxer-lavf-format=mpegts \
       --cache=yes --cache-secs=30 \
       --demuxer-max-bytes=200MiB \
+      --alang=eng,en \
       - 2>/tmp/stvt_mpv.log
