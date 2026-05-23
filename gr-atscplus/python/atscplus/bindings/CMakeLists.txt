@@ -43,6 +43,7 @@ list(APPEND atscplus_python_files
     atsc_sync_pathA_python.cc
     atsc_rs_decoder_erasure_python.cc
     atsc_noise_blanker_python.cc
+    atsc_deinterleaver_python.cc
     python_bindings.cc)
 
 gr_pybind_make_oot(atscplus ../../.. gr::atscplus "${atscplus_python_files}")

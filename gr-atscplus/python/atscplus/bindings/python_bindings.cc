@@ -39,6 +39,7 @@ void bind_atsc_sync_slidefs(py::module& m);
 void bind_atsc_sync_pathA(py::module& m);
 void bind_atsc_rs_decoder_erasure(py::module& m);
 void bind_atsc_noise_blanker(py::module& m);
+void bind_atsc_deinterleaver(py::module& m);
 // ) END BINDING_FUNCTION_PROTOTYPES
 
 
@@ -85,5 +86,6 @@ PYBIND11_MODULE(atscplus_python, m)
     bind_atsc_sync_pathA(m);
     bind_atsc_rs_decoder_erasure(m);
     bind_atsc_noise_blanker(m);
+    bind_atsc_deinterleaver(m);
     // ) END BINDING_FUNCTION_CALLS
 }
