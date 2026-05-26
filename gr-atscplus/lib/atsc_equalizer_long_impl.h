@@ -23,6 +23,9 @@ class atsc_equalizer_long_impl : public atsc_equalizer_long
 private:
 #ifdef ATSC_EQ_ECO
     static constexpr int NTAPS = 128;
+#elif defined(ATSC_EQ_LONG_TAPS)
+    // Wider equalizer: 32μs span (was 16μs). Captures longer multipath echoes.
+    static constexpr int NTAPS = 512;
 #else
     static constexpr int NTAPS = 256;
 #endif
@@ -59,6 +62,14 @@ private:
     short d_segno;
 
     bool d_buff_not_filled = true;
+
+    // FIX #3 (2026-05-23): coherent field-sync averaging.
+    // Accumulate N field syncs' input buffers, run LMS on the average.
+    // Signal=fixed (PN511/PN63), noise=iid → √N SNR gain.
+    // Tunable via STVT_EQ_FS_AVG_DEPTH (default 1 = off).
+    static constexpr int FS_ACC_LEN = gr::dtv::ATSC_DATA_SEGMENT_LENGTH + NTAPS;
+    float d_fs_acc[FS_ACC_LEN];
+    int   d_fs_count = 0;
 
 public:
     atsc_equalizer_long_impl();

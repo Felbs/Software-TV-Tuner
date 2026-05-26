@@ -17,6 +17,7 @@
 #include "atsc_types.h"
 #include <gnuradio/io_signature.h>
 #include <volk/volk.h>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 
@@ -140,29 +141,87 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
             char* e = nullptr; double v = std::strtod(p, &e);
             if (e != p) return (float)v;
         }
-        return 1.5f;   // error RMS below this counts as "good"
+        return 1.5f;
+    }();
+    // FIX #3 (2026-05-23): coherent field-sync averaging depth.
+    // 1 = no averaging (legacy). 2/4/8 = average N field syncs before LMS.
+    // Signal=fixed (PN511/PN63 training), noise=iid → √N SNR gain on gradient.
+    // Cost: adapt rate ÷ N. Tunable via STVT_EQ_FS_AVG_DEPTH.
+    static const int FS_AVG_DEPTH = []() -> int {
+        if (const char* p = std::getenv("STVT_EQ_FS_AVG_DEPTH")) {
+            int v = std::atoi(p);
+            if (v >= 1 && v <= 32) return v;
+        }
+        return 1;
+    }();
+    // 2026-05-26 PERIODIC LKG reset. 0 = disabled (default). Otherwise
+    // force d_taps <- d_taps_lkg every N seconds, on top of the existing
+    // divergence-triggered restore. Counters slow LMS drift to noise
+    // that the divergence check doesn't catch in time.
+    static const int RESET_INTERVAL_SEC = []() -> int {
+        if (const char* p = std::getenv("STVT_EQ_RESET_INTERVAL")) {
+            int v = std::atoi(p);
+            if (v >= 0 && v <= 3600) return v;
+        }
+        return 0;
     }();
     static bool _logged = []() {
         std::fprintf(stderr,
-                     "[atsc_equalizer_long] tunable params: BETA=%g LEAK=%g DIVERGENCE_BAIL=%g LKG=%d LKG_RMS=%g\n",
+                     "[atsc_equalizer_long] tunable params: BETA=%g LEAK=%g DIVERGENCE_BAIL=%g LKG=%d LKG_RMS=%g FS_AVG_DEPTH=%d RESET_INTERVAL_SEC=%d\n",
                      BETA, LEAK, DIVERGENCE_BAIL,
-                     (int)LKG_ENABLED, LKG_GOOD_RMS_THRESHOLD);
+                     (int)LKG_ENABLED, LKG_GOOD_RMS_THRESHOLD, FS_AVG_DEPTH, RESET_INTERVAL_SEC);
         return true;
     }();
+
+    // Coherent field-sync averaging path. Accumulate input_samples into
+    // d_fs_acc; only run LMS update when FS_AVG_DEPTH syncs have been
+    // accumulated. Output is always computed (downstream needs it).
+    const float* lms_input = input_samples;
+    const int input_span = nsamples + NTAPS;
+    if (FS_AVG_DEPTH > 1 && input_span <= FS_ACC_LEN) {
+        if (d_fs_count == 0) {
+            std::memcpy(d_fs_acc, input_samples, input_span * sizeof(float));
+        } else {
+            for (int k = 0; k < input_span; k++) d_fs_acc[k] += input_samples[k];
+        }
+        d_fs_count++;
+        if (d_fs_count < FS_AVG_DEPTH) {
+            // Not enough accumulated yet — compute output from current taps,
+            // apply LEAK only, then return (no LMS update this sync).
+            for (int j = 0; j < nsamples; j++) {
+                output_samples[j] = 0;
+                volk_32f_x2_dot_prod_32f(
+                    &output_samples[j], &input_samples[j], &d_taps[0], NTAPS);
+            }
+            float keep = 1.0f - LEAK;
+            for (int k = 0; k < NTAPS; k++) d_taps[k] *= keep;
+            return;
+        }
+        // Accumulator full: normalize to average, run LMS on it.
+        const float scale = 1.0f / (float)FS_AVG_DEPTH;
+        for (int k = 0; k < input_span; k++) d_fs_acc[k] *= scale;
+        lms_input = d_fs_acc;
+        d_fs_count = 0;
+    }
 
     // Accumulate RMS error during this adapt batch for LKG quality assessment.
     double err_sq_sum = 0.0;
 
     for (int j = 0; j < nsamples; j++) {
         output_samples[j] = 0;
+        // Output uses current-field input (downstream sees this field).
         volk_32f_x2_dot_prod_32f(
             &output_samples[j], &input_samples[j], &d_taps[0], NTAPS);
-
-        float e = output_samples[j] - training_pattern[j];
+        // LMS gradient uses lms_input (averaged when FS_AVG_DEPTH>1).
+        float y_avg = output_samples[j];
+        if (lms_input != input_samples) {
+            y_avg = 0.0f;
+            volk_32f_x2_dot_prod_32f(&y_avg, &lms_input[j], &d_taps[0], NTAPS);
+        }
+        float e = y_avg - training_pattern[j];
         err_sq_sum += (double)e * (double)e;
-
         float tmp_taps[NTAPS];
-        volk_32f_s32f_multiply_32f(tmp_taps, &input_samples[j], BETA * e, NTAPS);
+        volk_32f_s32f_multiply_32f(tmp_taps, &lms_input[j], BETA * e, NTAPS);
         volk_32f_x2_subtract_32f(&d_taps[0], &d_taps[0], tmp_taps, NTAPS);
     }
 
@@ -176,6 +235,26 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
         if (err_rms < (double)LKG_GOOD_RMS_THRESHOLD) {
             for (int k = 0; k < NTAPS; k++) d_taps_lkg[k] = d_taps[k];
             d_lkg_valid = true;
+        }
+    }
+
+    // PERIODIC LKG reset: force taps back to known-good snapshot every N sec.
+    // Counters slow LMS drift to noise that doesn't trigger DIVERGENCE_BAIL.
+    if (RESET_INTERVAL_SEC > 0 && LKG_ENABLED && d_lkg_valid) {
+        static auto d_last_periodic_reset = std::chrono::steady_clock::now();
+        auto _now = std::chrono::steady_clock::now();
+        auto _elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                            _now - d_last_periodic_reset).count();
+        if (_elapsed >= RESET_INTERVAL_SEC) {
+            for (int k = 0; k < NTAPS; k++) d_taps[k] = d_taps_lkg[k];
+            d_last_periodic_reset = _now;
+            static uint64_t periodic_resets = 0;
+            periodic_resets++;
+            if (periodic_resets <= 5 || (periodic_resets & 0x3F) == 0) {
+                std::fprintf(stderr,
+                             "[atsc_equalizer_long] periodic LKG reset #%llu (every %ds)\n",
+                             (unsigned long long)periodic_resets, RESET_INTERVAL_SEC);
+            }
         }
     }
 

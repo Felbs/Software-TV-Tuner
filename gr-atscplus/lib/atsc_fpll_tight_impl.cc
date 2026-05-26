@@ -12,6 +12,8 @@
 #include <gnuradio/math.h>
 #include <gnuradio/sincos.h>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <cmath>
 #include <chrono>
 
@@ -71,8 +73,39 @@ int atsc_fpll_tight_impl::work(int noutput_items,
         filtered = d_afc.filter(result);
         x = gr::fast_atan2f(filtered.imag(), filtered.real());
 
-        if (x > M_PI_2) x = M_PI_2;
-        else if (x < -M_PI_2) x = -M_PI_2;
+        // FIX #1 (2026-05-23): saturation freeze.
+        // Degenerate samples (low |filtered| OR x at ±π/2) carry no info
+        // about the carrier offset. Legacy code fed ±π/2 to the NCO — a
+        // max-magnitude correction from a zero-info sample. New behavior:
+        // freeze the NCO on degenerate samples. STVT_FPLL_SAT_MODE=clip
+        // restores legacy. STVT_FPLL_MAG_MIN=<rms> (default 4) sets the
+        // magnitude threshold.
+        static const int SAT_MODE = []() -> int {
+            if (const char* p = std::getenv("STVT_FPLL_SAT_MODE")) {
+                if (std::strcmp(p, "clip") == 0) return 1;
+            }
+            return 0;
+        }();
+        static const float MAG_MIN_RMS = []() -> float {
+            if (const char* p = std::getenv("STVT_FPLL_MAG_MIN")) {
+                char* e = nullptr; float v = std::strtof(p, &e);
+                if (e != p) return v;
+            }
+            return 4.0f;
+        }();
+        const float mag2_min = MAG_MIN_RMS * MAG_MIN_RMS;
+        float mag2 = filtered.real() * filtered.real()
+                   + filtered.imag() * filtered.imag();
+        bool degenerate = (mag2 < mag2_min) || (x >= M_PI_2 - 1e-4f)
+                                            || (x <= -M_PI_2 + 1e-4f);
+        if (degenerate) {
+            if (SAT_MODE == 1) {
+                if (x > M_PI_2) x = M_PI_2;
+                else if (x < -M_PI_2) x = -M_PI_2;
+            } else {
+                x = 0.0f;
+            }
+        }
 
         d_nco.adjust_phase(d_alpha * x);
         d_nco.adjust_freq(d_beta * x);
