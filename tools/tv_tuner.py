@@ -1090,21 +1090,13 @@ def build_ffmpeg_cmd(play: bool, record_path: Path | None,
         Only valid when play=True with no record/stream sinks.
     """
     if passthrough:
-        # 2026-05-22 20:03: libx264 re-encode (replaces -c copy passthrough).
-        # On marginal RF, mpeg2video seq_header_code is too often corrupted
-        # for mpv's probe to find one. ffmpeg WITH PROPER BUFFERING during
-        # probe CAN find dimensions in this corrupt stream and decode. The
-        # libx264 encoder then emits clean SPS/PPS that mpv probes instantly.
-        # Critical: NO `+nobuffer` flag and `analyzeduration` ≥ 60s. With
-        # `+nobuffer`, ffmpeg never accumulates enough TS to find dimensions
-        # over a 1.5MB/s pipe — ffmpeg stays at 0% CPU forever in probe.
-        # Without `+nobuffer`, probe completes ~30-60s after pipe start.
+        # 2026-05-26 late evening: libx264 re-encode. `-c copy` is smoother
+        # when mpv's probe succeeds, but probe failure is too common on this
+        # RF (mpv "could not find codec parameters" on mpeg2 seq_header_code).
+        # libx264 ALWAYS produces output by re-encoding what it can decode.
         return [
             FFMPEG,
             "-hide_banner", "-loglevel", "warning",
-            # 2026-05-22 20:08: removed +discardcorrupt — it was dropping
-            # the rare seq_header packets that DO exist in the stream,
-            # preventing ffmpeg from finding dimensions during probe.
             "-fflags", "+genpts+igndts",
             "-err_detect", "ignore_err",
             "-flags", "+output_corrupt",
@@ -1264,8 +1256,12 @@ def spawn_ffplay(window_title: str, log_fh):
                #     things, but the code that worked yesterday HAD it).
                # Pre-today baseline plays (with freezes) — today's changes
                # don't play at all. Going back, then iterating from there.
-               "--demuxer-lavf-analyzeduration=15",
-               "--demuxer-lavf-probesize=20000000",
+               # 2026-05-26: bumped analyzeduration 15s→45s and probesize
+               # 20MB→50MB. Needed when ffmpeg uses -c copy (raw mpegts
+               # passthrough) — mpv has to find mpeg2 seq_header_code itself,
+               # and on marginal RF the first occurrence may be 20-40s in.
+               "--demuxer-lavf-analyzeduration=45",
+               "--demuxer-lavf-probesize=50000000",
                "--cache=yes",
                f"--cache-secs={cache_secs}",
                "--demuxer-max-bytes=200MiB",
