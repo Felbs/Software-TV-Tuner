@@ -252,6 +252,46 @@ class LiveTVTopBlock(gr.top_block):
                 interpolation=RESAMP_INTERP, decimation=RESAMP_DECIM,
             )
             LOG.info(f"resampler: {RESAMP_INTERP}/{RESAMP_DECIM}")
+        # 2026-05-29 SPECTRAL SMOOTHER — FFT-domain outlier suppression.
+        # Per-block (no IIR transients), suppresses bins that are >K×
+        # the local-median neighborhood. Smooth proportional pull-down
+        # (no flapping). Same chain position as the (disabled) adaptive
+        # notch. Disabled by default (STVT_SPECTRAL=0).
+        smoother = None
+        if int(os.environ.get("STVT_SPECTRAL", "0")):
+            _sm_fft   = int  (os.environ.get("STVT_SPECTRAL_FFT",          "1024"))
+            _sm_nbr   = int  (os.environ.get("STVT_SPECTRAL_NEIGHBORHOOD", "32"))
+            _sm_thr   = float(os.environ.get("STVT_SPECTRAL_THRESH",       "3.0"))
+            smoother = atscplus.atsc_spectral_smoother(
+                ATSC_RX_SAMPLE_RATE, _sm_fft, _sm_nbr, _sm_thr)
+            LOG.info(f"spectral_smoother: ENABLED fft={_sm_fft} "
+                     f"neighborhood={_sm_nbr} thresh={_sm_thr}")
+        else:
+            LOG.info("spectral_smoother: disabled (STVT_SPECTRAL=0)")
+
+        # 2026-05-29 ADAPTIVE NOTCH — narrowband interferer suppression.
+        # Inserted between the resampler and the matched filter so it runs
+        # at the chain's working sample rate (ATSC_RX_SAMPLE_RATE = 6.25 MS/s)
+        # where the pilot offset and ATSC band edges are well-defined.
+        # Disabled by default (STVT_NOTCH=0); when enabled, periodically
+        # FFTs the input, finds the strongest non-pilot peak, and notches
+        # it with a sharp complex IIR.
+        notch = None
+        if int(os.environ.get("STVT_NOTCH", "0")):
+            _notch_fft    = int  (os.environ.get("STVT_NOTCH_FFT",         "1024"))
+            _notch_thresh = float(os.environ.get("STVT_NOTCH_THRESH_DB",   "12.0"))
+            _notch_r      = float(os.environ.get("STVT_NOTCH_R",           "0.985"))
+            _notch_pilot  = float(os.environ.get("STVT_NOTCH_PILOT_HZ",   "-2.69e6"))
+            _notch_guard  = float(os.environ.get("STVT_NOTCH_GUARD_HZ",    "200e3"))
+            notch = atscplus.atsc_adaptive_notch(
+                ATSC_RX_SAMPLE_RATE,
+                _notch_fft, _notch_thresh, _notch_r,
+                _notch_pilot, _notch_guard)
+            LOG.info(f"adaptive_notch: ENABLED fft={_notch_fft} "
+                     f"thresh_db={_notch_thresh} r={_notch_r} "
+                     f"pilot_offset={_notch_pilot} guard={_notch_guard}")
+        else:
+            LOG.info("adaptive_notch: disabled (STVT_NOTCH=0)")
         # Front-end matched filter; outputs samples at output_rate (16.14 MS/s).
         rxf  = atsc_rx_filter(ATSC_RX_SAMPLE_RATE, SPS)
         # FPLL knobs via STVT_FPLL_ALPHA / STVT_FPLL_AFC_TAU env vars.
@@ -337,16 +377,20 @@ class LiveTVTopBlock(gr.top_block):
         # so it operates on the raw scaled SDR samples — earliest point
         # impulse spikes show up. Disabled by default; the variable `nb` is
         # None when STVT_NB=0 and falls back to the original chain.
-        if resamp is None:
-            if nb is None:
-                self.connect(src, scaler, rxf, fpll, dcr, agc, sync, fs_check)
-            else:
-                self.connect(src, scaler, nb, rxf, fpll, dcr, agc, sync, fs_check)
-        else:
-            if nb is None:
-                self.connect(src, scaler, resamp, rxf, fpll, dcr, agc, sync, fs_check)
-            else:
-                self.connect(src, scaler, nb, resamp, rxf, fpll, dcr, agc, sync, fs_check)
+        # 2026-05-29: adaptive notch sits between (resamp output / scaler)
+        # and rxf, so it runs at the working sample rate of 6.25 MS/s.
+        # `notch` is None when STVT_NOTCH=0 and falls back to legacy chain.
+        chain_blocks = [src, scaler]
+        if nb is not None:
+            chain_blocks.append(nb)
+        if resamp is not None:
+            chain_blocks.append(resamp)
+        if notch is not None:
+            chain_blocks.append(notch)
+        if smoother is not None:
+            chain_blocks.append(smoother)
+        chain_blocks += [rxf, fpll, dcr, agc, sync, fs_check]
+        self.connect(*chain_blocks)
         if _rs_is_2port:
             for blk_in, blk_out in [(fs_check, equalizer),
                                      (equalizer, viterbi),
