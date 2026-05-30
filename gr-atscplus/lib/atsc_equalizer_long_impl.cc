@@ -165,11 +165,80 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
         }
         return 0;
     }();
+    // 2026-05-27 QUALITY-AWARE LKG reset. When err_rms (this batch) exceeds
+    // QUALITY_BAD_RMS, force taps back to LKG snapshot — debounced so LMS
+    // gets ~0.5s to reconverge before another reset fires. Replaces the
+    // "wait N seconds and hope drift happens between resets" heuristic
+    // with "actually react when the equalizer is producing garbage".
+    // 0 = disabled (default — needs validation on a non-drought night).
+    // Useful range: 5–10. <5 blocks initial convergence; >10 rarely fires.
+    static const float QUALITY_BAD_RMS = []() -> float {
+        if (const char* p = std::getenv("STVT_EQ_QUALITY_BAD_RMS")) {
+            char* e = nullptr; double v = std::strtod(p, &e);
+            if (e != p && v >= 0.0) return (float)v;
+        }
+        return 0.0f;
+    }();
+    static const int QUALITY_DEBOUNCE_MS = []() -> int {
+        if (const char* p = std::getenv("STVT_EQ_QUALITY_DEBOUNCE_MS")) {
+            int v = std::atoi(p);
+            if (v >= 50 && v <= 10000) return v;
+        }
+        return 500;
+    }();
+    // 2026-05-28 GEAR-SHIFT LMS: separate step sizes for convergence vs
+    // steady-state tracking. The math: LMS steady-state tap variance is
+    // ≈ (μ/2)·σ²_e·N, so dropping μ by 50× drops drift by 50× — but
+    // convergence time scales as 1/μ, so cold-starting at low μ never
+    // locks. Solution: fast μ during convergence (err high), shift to
+    // slow μ once err stays low for K segments, shift back on err spike.
+    // Defaults disabled (FAST=SLOW=BETA) for backward compatibility.
+    static const bool GEAR_ENABLED = []() -> bool {
+        const char* p = std::getenv("STVT_EQ_GEAR_LMS");
+        return p && std::atoi(p) != 0;
+    }();
+    static const double BETA_FAST = []() -> double {
+        if (const char* p = std::getenv("STVT_EQ_BETA_FAST")) {
+            char* e = nullptr; double v = std::strtod(p, &e);
+            if (e != p) return v;
+        }
+        return 5e-5;   // matches default BETA — fast convergence
+    }();
+    static const double BETA_SLOW = []() -> double {
+        if (const char* p = std::getenv("STVT_EQ_BETA_SLOW")) {
+            char* e = nullptr; double v = std::strtod(p, &e);
+            if (e != p) return v;
+        }
+        return 1e-6;   // ~50× less drift than 5e-5 in steady state
+    }();
+    static const float GEAR_LOW_ERR = []() -> float {
+        if (const char* p = std::getenv("STVT_EQ_GEAR_LOW_ERR")) {
+            char* e = nullptr; double v = std::strtod(p, &e);
+            if (e != p) return (float)v;
+        }
+        return 1.0f;
+    }();
+    static const float GEAR_HIGH_ERR = []() -> float {
+        if (const char* p = std::getenv("STVT_EQ_GEAR_HIGH_ERR")) {
+            char* e = nullptr; double v = std::strtod(p, &e);
+            if (e != p) return (float)v;
+        }
+        return 2.0f;
+    }();
+    static const int GEAR_DEBOUNCE = []() -> int {
+        if (const char* p = std::getenv("STVT_EQ_GEAR_DEBOUNCE_BATCHES")) {
+            int v = std::atoi(p);
+            if (v >= 1 && v <= 100000) return v;
+        }
+        return 100;    // ~100 field syncs (~4 sec) of sustained low-err
+    }();
     static bool _logged = []() {
         std::fprintf(stderr,
-                     "[atsc_equalizer_long] tunable params: BETA=%g LEAK=%g DIVERGENCE_BAIL=%g LKG=%d LKG_RMS=%g FS_AVG_DEPTH=%d RESET_INTERVAL_SEC=%d\n",
+                     "[atsc_equalizer_long] tunable params: BETA=%g LEAK=%g DIVERGENCE_BAIL=%g LKG=%d LKG_RMS=%g FS_AVG_DEPTH=%d RESET_INTERVAL_SEC=%d GEAR=%d BETA_FAST=%g BETA_SLOW=%g GEAR_LOW=%g GEAR_HIGH=%g GEAR_DEBOUNCE=%d QUALITY_BAD_RMS=%g QUALITY_DEBOUNCE_MS=%d\n",
                      BETA, LEAK, DIVERGENCE_BAIL,
-                     (int)LKG_ENABLED, LKG_GOOD_RMS_THRESHOLD, FS_AVG_DEPTH, RESET_INTERVAL_SEC);
+                     (int)LKG_ENABLED, LKG_GOOD_RMS_THRESHOLD, FS_AVG_DEPTH, RESET_INTERVAL_SEC,
+                     (int)GEAR_ENABLED, BETA_FAST, BETA_SLOW, GEAR_LOW_ERR, GEAR_HIGH_ERR, GEAR_DEBOUNCE,
+                     QUALITY_BAD_RMS, QUALITY_DEBOUNCE_MS);
         return true;
     }();
 
@@ -207,6 +276,13 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
     // Accumulate RMS error during this adapt batch for LKG quality assessment.
     double err_sq_sum = 0.0;
 
+    // 2026-05-28 GEAR-SHIFT LMS state — track active μ and shift hysteresis.
+    // When disabled, current_mu stays at BETA forever (legacy behavior).
+    static double current_mu = BETA;
+    static int    gear_low_err_count = 0;
+    static int    gear_state = 0;   // 0=FAST, 1=SLOW
+    const double effective_mu = GEAR_ENABLED ? current_mu : BETA;
+
     for (int j = 0; j < nsamples; j++) {
         output_samples[j] = 0;
         // Output uses current-field input (downstream sees this field).
@@ -221,7 +297,7 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
         float e = y_avg - training_pattern[j];
         err_sq_sum += (double)e * (double)e;
         float tmp_taps[NTAPS];
-        volk_32f_s32f_multiply_32f(tmp_taps, &lms_input[j], BETA * e, NTAPS);
+        volk_32f_s32f_multiply_32f(tmp_taps, &lms_input[j], effective_mu * e, NTAPS);
         volk_32f_x2_subtract_32f(&d_taps[0], &d_taps[0], tmp_taps, NTAPS);
     }
 
@@ -230,11 +306,49 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
 
     // LKG snapshot: if THIS adapt batch had low error, this tap state is
     // probably good. Save it for future divergence recovery.
+    const double batch_err_rms = (nsamples > 0)
+        ? std::sqrt(err_sq_sum / (double)nsamples)
+        : 0.0;
     if (LKG_ENABLED && nsamples > 0) {
-        double err_rms = std::sqrt(err_sq_sum / (double)nsamples);
-        if (err_rms < (double)LKG_GOOD_RMS_THRESHOLD) {
+        if (batch_err_rms < (double)LKG_GOOD_RMS_THRESHOLD) {
             for (int k = 0; k < NTAPS; k++) d_taps_lkg[k] = d_taps[k];
             d_lkg_valid = true;
+        }
+    }
+
+    // 2026-05-28 GEAR-SHIFT LMS state update — after the LMS pass.
+    // FAST→SLOW: sustained low err for GEAR_DEBOUNCE batches.
+    // SLOW→FAST: any err spike above GEAR_HIGH_ERR (immediate, no debounce —
+    //            we want fast convergence the moment quality degrades).
+    if (GEAR_ENABLED && nsamples > 0) {
+        if (batch_err_rms < (double)GEAR_LOW_ERR) {
+            gear_low_err_count++;
+            if (gear_state == 0 && gear_low_err_count >= GEAR_DEBOUNCE) {
+                current_mu = BETA_SLOW;
+                gear_state = 1;
+                static uint64_t shift_downs = 0;
+                shift_downs++;
+                if (shift_downs <= 5 || (shift_downs & 0x3F) == 0) {
+                    std::fprintf(stderr,
+                                 "[atsc_equalizer_long] GEAR shift→SLOW #%llu (err_rms=%g, μ %g→%g)\n",
+                                 (unsigned long long)shift_downs,
+                                 batch_err_rms, BETA_FAST, BETA_SLOW);
+                }
+            }
+        } else {
+            gear_low_err_count = 0;
+            if (gear_state == 1 && batch_err_rms > (double)GEAR_HIGH_ERR) {
+                current_mu = BETA_FAST;
+                gear_state = 0;
+                static uint64_t shift_ups = 0;
+                shift_ups++;
+                if (shift_ups <= 5 || (shift_ups & 0x3F) == 0) {
+                    std::fprintf(stderr,
+                                 "[atsc_equalizer_long] GEAR shift→FAST #%llu (err_rms=%g, μ %g→%g)\n",
+                                 (unsigned long long)shift_ups,
+                                 batch_err_rms, BETA_SLOW, BETA_FAST);
+                }
+            }
         }
     }
 
@@ -254,6 +368,34 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
                 std::fprintf(stderr,
                              "[atsc_equalizer_long] periodic LKG reset #%llu (every %ds)\n",
                              (unsigned long long)periodic_resets, RESET_INTERVAL_SEC);
+            }
+        }
+    }
+
+    // 2026-05-27 QUALITY-AWARE LKG reset: react to actual error, not a clock.
+    // err_rms from this LMS batch is the equalizer's own quality signal.
+    // When it spikes above QUALITY_BAD_RMS (and we have a saved snapshot),
+    // taps have drifted badly — restore. Debounced so LMS gets time to
+    // reconverge before we slam it again.
+    if (QUALITY_BAD_RMS > 0.0f && LKG_ENABLED && d_lkg_valid && nsamples > 0) {
+        const double err_rms_now = std::sqrt(err_sq_sum / (double)nsamples);
+        static auto d_last_quality_reset = std::chrono::steady_clock::now()
+                                           - std::chrono::seconds(10);
+        if (err_rms_now > (double)QUALITY_BAD_RMS) {
+            auto _now = std::chrono::steady_clock::now();
+            auto _ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            _now - d_last_quality_reset).count();
+            if (_ms >= QUALITY_DEBOUNCE_MS) {
+                for (int k = 0; k < NTAPS; k++) d_taps[k] = d_taps_lkg[k];
+                d_last_quality_reset = _now;
+                static uint64_t quality_resets = 0;
+                quality_resets++;
+                if (quality_resets <= 5 || (quality_resets & 0x3F) == 0) {
+                    std::fprintf(stderr,
+                                 "[atsc_equalizer_long] QUALITY LKG reset #%llu (err_rms=%g > %g)\n",
+                                 (unsigned long long)quality_resets,
+                                 err_rms_now, (double)QUALITY_BAD_RMS);
+                }
             }
         }
     }
