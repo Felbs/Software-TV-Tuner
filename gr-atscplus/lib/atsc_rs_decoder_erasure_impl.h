@@ -48,7 +48,8 @@ private:
     // block emits `viterbi_metric` stream tags every NCODERS segments
     // with the average best_state_metric (higher = less confident).
     // We read those tags here and use them to gate retry aggressiveness.
-    double d_recent_metric;     // last-seen viterbi_metric value
+    double d_recent_metric;     // last-seen viterbi_metric (avg across 12 decoders)
+    double d_recent_metric_max; // last-seen viterbi_metric_max (worst decoder)
     int    d_metric_tag_count;  // total tags observed (sanity check)
     int    d_effective_max_erasures;  // metric-gated, updated per work()
 

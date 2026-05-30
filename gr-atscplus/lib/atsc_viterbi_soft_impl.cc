@@ -151,9 +151,16 @@ int atsc_viterbi_soft_impl::work(int noutput_items,
         // gate erasure aggressiveness on this signal. Tagging only the
         // first sample of the batch keeps GR overhead low (~1 tag per
         // 12 segments = ~1 tag per 2484 output bytes).
+        // 2026-05-27: ALSO emit the WORST-decoder metric. Average across
+        // 12 decoders dilutes a single-decoder failure mode (1 broken /
+        // 11 healthy ~ same avg as 12 mediocre, but very different bit-
+        // error pattern). Max is more responsive to localized impairment.
         float conf_sum = 0.0f;
+        float conf_max = 0.0f;
         for (int e = 0; e < NCODERS; e++) {
-            conf_sum += viterbi[e].best_state_metric();
+            const float m = viterbi[e].best_state_metric();
+            conf_sum += m;
+            if (m > conf_max) conf_max = m;
         }
         const float avg_metric = conf_sum / float(NCODERS);
         const uint64_t tag_offset = nitems_written(0) + i;
@@ -161,6 +168,10 @@ int atsc_viterbi_soft_impl::work(int noutput_items,
                      tag_offset,
                      pmt::intern("viterbi_metric"),
                      pmt::from_double(double(avg_metric)));
+        add_item_tag(0,
+                     tag_offset,
+                     pmt::intern("viterbi_metric_max"),
+                     pmt::from_double(double(conf_max)));
     }
 
     return noutput_items;

@@ -63,6 +63,7 @@ atsc_rs_decoder_erasure_impl::atsc_rs_decoder_erasure_impl(int max_erasures)
     d_erasure_successes  = 0;
     d_bad_packets        = 0;
     d_recent_metric      = 0.0;
+    d_recent_metric_max  = 0.0;
     d_metric_tag_count   = 0;
     d_effective_max_erasures = d_max_erasures;
 
@@ -182,11 +183,18 @@ atsc_rs_decoder_erasure_impl::~atsc_rs_decoder_erasure_impl()
 // Lower = more confident signal — fewer erasures needed (saves CPU
 // when chain is clean). Higher = noisier — push erasures up to recover
 // more packets. Returns clamped to [1, 20] (RS code allows up to 20).
+// 2026-05-27: now uses the WORSE of (avg, max) for the gate. The avg
+// across 12 decoders dilutes the case where a single decoder is broken
+// (1 broken / 11 healthy → avg barely moves, but the broken decoder's
+// dibits become a fixed-pattern corruption that RS must erase to fix).
+// Using max(avg, max/2) keeps the avg-driven baseline behaviour for
+// uniform noise but kicks the budget up when one decoder is hosed.
 int atsc_rs_decoder_erasure_impl::dynamic_max_erasures() const
 {
     if (d_metric_tag_count == 0) return d_max_erasures;   // no signal yet
-    if (d_recent_metric < 3500.0) return std::max(4, d_max_erasures - 6);
-    if (d_recent_metric < 5500.0) return d_max_erasures;
+    const double m = std::max(d_recent_metric, d_recent_metric_max * 0.5);
+    if (m < 3500.0) return std::max(4, d_max_erasures - 6);
+    if (m < 5500.0) return d_max_erasures;
     return std::min(20, d_max_erasures + 4);
 }
 
@@ -306,6 +314,15 @@ int atsc_rs_decoder_erasure_impl::work(int noutput_items,
             d_metric_tag_count++;
         }
     }
+    // 2026-05-27: also consume the worst-decoder metric for budget gating.
+    std::vector<tag_t> tags_max;
+    get_tags_in_window(tags_max, 0, 0, noutput_items,
+                       pmt::intern("viterbi_metric_max"));
+    for (const auto& t : tags_max) {
+        if (pmt::is_real(t.value) || pmt::is_integer(t.value)) {
+            d_recent_metric_max = pmt::to_double(t.value);
+        }
+    }
     // Day 3: update effective erasure budget from latest metric.
     d_effective_max_erasures = dynamic_max_erasures();
 
@@ -391,14 +408,14 @@ int atsc_rs_decoder_erasure_impl::work(int noutput_items,
                      "era_ok=%d bad=%d "
                      "(last5s: pkts=%d era_dec=%d era_ok=%d bad=%d)  "
                      "weak_pos[%d:%d,%d:%d,%d:%d]  "
-                     "vit_metric=%.3f tags=%d eff_eras=%d\n",
+                     "vit_metric=%.3f vit_max=%.3f tags=%d eff_eras=%d\n",
                      elapsed_ms / 1000.0,
                      d_packets, d_errors_corrected,
                      d_erasure_decodes, d_erasure_successes, d_bad_packets,
                      d_log_packets, d_log_eras_dec, d_log_eras_ok, d_log_bad,
                      top3[0], top3v[0], top3[1], top3v[1], top3[2], top3v[2],
-                     d_recent_metric, d_metric_tag_count,
-                     d_effective_max_erasures);
+                     d_recent_metric, d_recent_metric_max,
+                     d_metric_tag_count, d_effective_max_erasures);
         d_last_log = now;
         d_log_packets  = 0;
         d_log_eras_dec = 0;
