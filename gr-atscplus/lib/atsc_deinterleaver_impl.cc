@@ -79,15 +79,21 @@ int atsc_deinterleaver_impl::work(int noutput_items,
     // Explicit tag forwarding: even though TPP_ALL should do this, observation
     // showed rs_erasure consistently received tags=0 with the stock block. We
     // forward every viterbi_metric tag explicitly at the same sample offset.
+    // 2026-05-27: also forward the new viterbi_metric_max tag (worst-decoder).
     std::vector<tag_t> tags;
     const uint64_t in_start = nitems_read(0);
     const uint64_t in_end   = in_start + (uint64_t)noutput_items;
     get_tags_in_range(tags, 0, in_start, in_end,
                       pmt::intern("viterbi_metric"));
     for (const auto& t : tags) {
-        // Output offset = same as input offset since this is a sync_block (1:1).
         add_item_tag(0, t.offset, t.key, t.value);
         d_total_tags_forwarded++;
+    }
+    std::vector<tag_t> tags_max;
+    get_tags_in_range(tags_max, 0, in_start, in_end,
+                      pmt::intern("viterbi_metric_max"));
+    for (const auto& t : tags_max) {
+        add_item_tag(0, t.offset, t.key, t.value);
     }
 
     for (int i = 0; i < noutput_items; i++) {
