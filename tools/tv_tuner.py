@@ -2131,6 +2131,33 @@ def status_loop(state: PipelineState, stop_event: threading.Event,
     # the stream is suspect yet.
     fwd_frozen_since = 0.0
     rec_frozen_since = 0.0
+    # 2026-05-29 MPV PROBE-STUCK DETECTION: mpv's lavf demuxer reads
+    # ~500KB during initial probe; if no codec params found, it gives up
+    # and sits in cache-pause-idle forever even though chain is producing
+    # good data. Detect by /proc/<pid>/io rchar not growing while chain
+    # is producing >200KB/s. When detected, force ffplay recovery.
+    #
+    # CRITICAL SAFETY LIMIT: if the chain output stream is fundamentally
+    # undecodable (heavy PES corruption, bad PMT), every respawned mpv
+    # will hit the SAME probe-stuck state. Past v1 of this code had no
+    # limit — it burned through 10+ mpv launches in 5 min and caused
+    # NVIDIA Xid 79 (GPU fell off PCIe bus) by exhausting Vulkan context
+    # resources. We now cap retries and require post-recovery success
+    # before resetting the counter.
+    mpv_last_rchar = -1
+    mpv_last_rchar_t = start
+    mpv_stuck_since = 0.0
+    mpv_probe_stuck_recoveries = 0
+    mpv_probe_stuck_given_up = False
+    MPV_STUCK_GRACE_SEC = 30.0     # give mpv full probe window first
+    MPV_STUCK_THRESHOLD_SEC = 30.0  # rchar flat for this long → stuck
+    MPV_STUCK_RECOVERY_MIN_GAP_SEC = 60.0  # ≥ 1 min between recoveries
+    MPV_STUCK_MAX_RECOVERIES = 2          # 2 consecutive failures → give up
+    MPV_STUCK_SUCCESS_RCHAR_DELTA = 5_000_000  # 5 MB read = "mpv healthy"
+    mpv_last_recovery_t = 0.0
+    mpv_rchar_at_recovery = -1     # rchar at time of last recovery — if
+                                   # mpv reads SUCCESS_RCHAR_DELTA past
+                                   # this, treat as healthy + reset counter
     # Cooldown after recovery — don't immediately re-trigger.
     RECOVERY_COOLDOWN_SEC = 15.0
     # Startup grace period — ffmpeg's mp4 muxer buffers the first
@@ -2410,6 +2437,79 @@ def status_loop(state: PipelineState, stop_event: threading.Event,
                           f"(event #{state.recovery_events})")
             except Exception as e:
                 print(f"[tv_tuner] ffplay recovery error: {e}")
+
+        # 2026-05-29 mpv probe-stuck detection. /proc/<pid>/io rchar
+        # is the cumulative bytes read from any source (pipes included).
+        # mpv that's actively playing reads ~1MB/s; mpv stuck on probe
+        # reads ~500KB then stops forever. When chain is producing
+        # >200KB/s and mpv hasn't read more for MPV_STUCK_THRESHOLD_SEC,
+        # the demuxer gave up — restart mpv to re-probe fresher data.
+        # Bounded by MPV_STUCK_MAX_RECOVERIES; if respawned mpv ALSO
+        # hits probe-stuck, the chain output is fundamentally undecodable
+        # and further recoveries will only damage GPU driver state
+        # (see Xid 79 incident 2026-05-29 07:51).
+        if past_grace and play_alive and elapsed > MPV_STUCK_GRACE_SEC \
+                and rate > 200_000 and recover_ffplay \
+                and not in_cooldown \
+                and not mpv_probe_stuck_given_up \
+                and (now - mpv_last_recovery_t) > MPV_STUCK_RECOVERY_MIN_GAP_SEC:
+            try:
+                with open(f"/proc/{state.ffplay_proc.pid}/io") as f:
+                    rchar = next(
+                        int(ln.split()[1]) for ln in f
+                        if ln.startswith("rchar:"))
+            except (FileNotFoundError, OSError, StopIteration, ValueError):
+                rchar = -1
+            if rchar >= 0:
+                # Check if a previously-recovered mpv has now read enough
+                # to qualify as "healthy" — reset counter if so.
+                if mpv_rchar_at_recovery >= 0 \
+                        and rchar - mpv_rchar_at_recovery \
+                            > MPV_STUCK_SUCCESS_RCHAR_DELTA:
+                    if mpv_probe_stuck_recoveries > 0:
+                        print(f"[tv_tuner] mpv post-recovery healthy "
+                              f"(read {(rchar - mpv_rchar_at_recovery)//(1024*1024)}MB "
+                              f"past recovery) — clearing recovery counter")
+                    mpv_probe_stuck_recoveries = 0
+                    mpv_rchar_at_recovery = -1
+                if rchar != mpv_last_rchar:
+                    mpv_last_rchar, mpv_last_rchar_t = rchar, now
+                    mpv_stuck_since = 0.0
+                else:
+                    if mpv_stuck_since == 0.0:
+                        mpv_stuck_since = mpv_last_rchar_t
+                    if now - mpv_stuck_since > MPV_STUCK_THRESHOLD_SEC:
+                        if mpv_probe_stuck_recoveries \
+                                >= MPV_STUCK_MAX_RECOVERIES:
+                            print(f"[tv_tuner] mpv probe-stuck #"
+                                  f"{mpv_probe_stuck_recoveries+1}: "
+                                  f"GIVING UP. Chain output is "
+                                  f"undecodable; further mpv restarts "
+                                  f"would risk GPU driver wedge "
+                                  f"(Xid 79). Leaving stuck mpv alive.")
+                            mpv_probe_stuck_given_up = True
+                            mpv_stuck_since = 0.0
+                        else:
+                            print(f"[tv_tuner] mpv probe-stuck "
+                                  f"(rchar={rchar} unchanged for "
+                                  f"{int(now - mpv_stuck_since)}s while "
+                                  f"chain produces {int(rate/1024)}KB/s) "
+                                  f"— recovering "
+                                  f"[attempt {mpv_probe_stuck_recoveries+1}/"
+                                  f"{MPV_STUCK_MAX_RECOVERIES}]")
+                            try:
+                                if recover_ffplay():
+                                    state.recovery_events += 1
+                                    state.last_recovery_t = now
+                                    mpv_last_recovery_t = now
+                                    mpv_probe_stuck_recoveries += 1
+                                    mpv_rchar_at_recovery = 0
+                                    mpv_last_rchar = -1
+                                    mpv_stuck_since = 0.0
+                                    print(f"[tv_tuner] mpv recovered "
+                                          f"(event #{state.recovery_events})")
+                            except Exception as e:
+                                print(f"[tv_tuner] mpv recovery error: {e}")
 
 
 # ── Pipeline orchestration ───────────────────────────────────────
