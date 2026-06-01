@@ -1,4 +1,4 @@
-# Software TV Tuner (STVT)
+# Software TV Tuner (STVT) — Linux
 
 A free and open source software TV tuner. Watch free over-the-air
 television on an SDR (Software Defined Radio). This is the most
@@ -19,173 +19,160 @@ watched full sports games, news blocks, and overnight programming
 end-to-end on this stack. If your antenna can lock the carrier, the
 software keeps the picture up.
 
-## Download & install (Windows, ~10 minutes)
+> **Looking for the Windows build?** That lives on the `main` branch.
+> This README and branch are Linux-only.
 
-You need:
-- A computer with **GNU Radio 3.10+**, easiest via
-  [`radioconda`](https://github.com/ryanvolz/radioconda) (free).
-- A SoapySDR-supported SDR. Tested with **SDRplay RSPdx** + the
-  SDRplay API v3 driver.
-- **Any antenna** — even ones that weren't designed for TV (we've
-  locked broadcasts on a vertical ham-radio whip). A proper
-  horizontally-polarized TV antenna gives the best signal margin,
-  but it's not required. See
-  [Antennas — what works](#antennas--what-works) below.
-- (Windows only) [`ffmpeg`](https://www.gyan.dev/ffmpeg/builds/) full
-  build extracted to `C:\ffmpeg\`.
+## Install — three steps
 
-```powershell
-# 1. Clone the repo
-git clone https://github.com/Felbs/Software-TV-Tuner.git
-cd Software-TV-Tuner
+Tested on **Ubuntu 22.04 / 24.04** (bare-metal). See the WSL2 note at
+the bottom of this section before you start if you're on Windows.
 
-# 2. Build the C++ decoder OOT module
-#    Windows: VS 2022 BuildTools + NMake. Linux: bootstrap.sh.
-gr-atscplus\_build.bat
-
-# 3. Verify the new blocks load from Python
-python -c "from gnuradio import atscplus; print(dir(atscplus))"
-
-# 4. Install the resilient player's runtime deps
-& "$env:USERPROFILE\radioconda\python.exe" -m pip install opencv-python sounddevice
-
-# 5. Pick + run a channel
-python tools\tv_tuner.py
-```
-
-## Download & install (Linux, ~5 minutes)
-
-Tested on Ubuntu 22.04 / 24.04 (build + decoder pipeline validated;
-end-to-end watchable picture verified on bare-metal Linux. WSL2 has
-a known-issue caveat documented below). The `bootstrap.sh` script
-does the full setup in one shot — apt-installs GNU Radio + ffmpeg +
-SoapySDR + the Python bindings, builds and installs the gr-atscplus
-OOT module, and pip-installs optional player extras.
+### 1. Clone and bootstrap (~5 minutes)
 
 ```bash
-git clone https://github.com/Felbs/Software-TV-Tuner.git
+git clone -b linux-port-stvt-v3 https://github.com/Felbs/Software-TV-Tuner.git
 cd Software-TV-Tuner
 chmod +x bootstrap.sh && ./bootstrap.sh
-
-# Run it
-python3 tools/tv_tuner.py
 ```
 
-SDRplay-specific install steps and the WSL2 caveat are above.
-
-For a separate window per stream (so the picker stays clean), make
-sure one of `gnome-terminal`, `konsole`, `xfce4-terminal`, or
-`xterm` is installed; the launcher detects whichever is available.
-Headless / WSL2 environments without a terminal emulator just print
-the streaming output inline — usable, just less pretty.
-
-### Validated on bare-metal Linux; WSL2 is build-only
-
-The full receive chain (bootstrap → decoder build → SDR enumeration →
-two-phase scan → equalizer lock with `min_pn511_err = 0`) runs
-cleanly under WSL2 Ubuntu via the Windows-side SDR exposed through
-`tools/soapy_server.bat` + SoapyRemote. **However, sustained
-sample-stream integrity over WSL2's NAT loopback is not reliable
-enough for end-to-end MPEG-TS decode** — we measured ~1.8% sample
-loss + ~22k UDP-buffer overflow events per second, which the FS
-checker survives but Reed-Solomon decoding does not. The result:
-the equalizer locks textbook-clean but the TS bytes downstream are
-corrupted, so ffmpeg/ffplay never sees a valid program. This is a
-WSL2 USB / network passthrough limitation, not a project limitation.
-
-Run it natively: dual-boot Ubuntu, native Linux desktop, or a Linux
-machine with USB plugged directly into the host. SDRplay's API +
-`SoapySDRPlay3` install per their docs (vendor `.run` installer +
-build SoapySDRPlay3 from source against `libsoapysdr-dev`):
+`bootstrap.sh` apt-installs GNU Radio 3.10 + ffmpeg + SoapySDR + the
+Python bindings, builds and installs the `gr-atscplus` OOT module,
+and pip-installs optional player extras. After it finishes:
 
 ```bash
+python3 -c "from gnuradio import atscplus; print('OK')"   # should print: OK
+```
+
+### 2. Install your SDR driver
+
+**SDRplay (RSPdx, RSP1A, RSPduo)** — needs the vendor API *and* a
+SoapySDRPlay3 build with our ring-buffer patch. The patch is the
+single biggest quality fix on Linux; without it you get OsO sample
+overruns several times a second.
+
+```bash
+# 2a. SDRplay API v3 (vendor installer)
 wget https://www.sdrplay.com/software/SDRplay_RSP_API-Linux-3.15.2.run
 chmod +x SDRplay_RSP_API-Linux-3.15.2.run
 sudo ./SDRplay_RSP_API-Linux-3.15.2.run
 sudo systemctl enable --now sdrplay
 
+# 2b. SoapySDRPlay3 with the enlarged ring buffer
 sudo apt-get install -y libsoapysdr-dev
 git clone https://github.com/pothosware/SoapySDRPlay3.git
 
-# ── IMPORTANT: enlarge the USB ring buffer BEFORE building ──────────
-# The single biggest quality fix on Linux. The stock 2 MiB / ~83 ms ring
-# overflows several times a second at 6+ MS/s ("OsO" sample overruns) and
-# corrupts the decode. This bumps it to 32 MiB / ~1.3 s of headroom.
-# (Re-run this whenever you rebuild SoapySDRPlay3 from upstream.)
-/path/to/Software-TV-Tuner/tools/patch_soapy_ringbuffer.sh ./SoapySDRPlay3
+# IMPORTANT: patch the ring buffer BEFORE building. Bumps 2 MiB / 83 ms
+# of headroom up to 32 MiB / 1.3 s. Re-run after any SoapySDRPlay3
+# upstream pull.
+~/Software-TV-Tuner/tools/patch_soapy_ringbuffer.sh ./SoapySDRPlay3
 
 cd SoapySDRPlay3 && mkdir build && cd build
 cmake .. && make -j"$(nproc)" && sudo make install && sudo ldconfig
-
-SoapySDRUtil --probe   # should list your RSP* device
+cd ~  # back to home
 ```
 
-### Per-boot tuning (do this every boot — it's what makes live decode stable)
+**RTL-SDR, HackRF, BladeRF, Airspy** — `bootstrap.sh` already pulled
+the SoapySDR module via apt. Nothing more to do.
 
-The decoder's matched filter is single-threaded and runs at the edge of one CPU
-core. Linux defaults (the `schedutil` governor + deep C-states) starve it,
-causing OsO overruns → drift and freezes. One script fixes all of it; **it must
-be re-run after every reboot** (the governor resets on boot):
+Verify your SDR is visible:
+
+```bash
+SoapySDRUtil --probe    # should list driver=... + antennas + sample rates
+```
+
+If `--probe` finds nothing, the driver isn't installed correctly —
+check vendor docs and replug the SDR.
+
+### 3. Per-boot CPU tuning (re-run after every reboot)
+
+The 8-VSB matched filter is single-threaded and pinned to one core.
+Linux's default `schedutil` governor + deep C-states starve it,
+causing OsO overruns → picture freezes. One script fixes everything:
 
 ```bash
 sudo tools/fix_linux_tuning.sh
 ```
 
-It sets the CPU governor to `performance`, disables USB autosuspend on the
-SDRplay, raises the realtime priority limit, and holds CPUs out of deep C-states.
-On a 2017-era CPU this is the difference between freezing after ~90 s and running
-for an hour. On a fast modern CPU it still helps but matters less.
+It sets the CPU governor to `performance`, disables USB autosuspend
+on the SDRplay, raises the realtime priority limit, and holds CPUs
+out of deep C-states. On a 2017-era CPU this is the difference
+between freezing after ~90 s and running for an hour. On a modern
+CPU it matters less but still helps. **Re-run after every reboot** —
+the governor resets on boot.
 
-RTL-SDR, HackRF, BladeRF, and other SoapySDR devices work out of
-the box from `bootstrap.sh`'s apt packages. For any SDR, run
-`SoapySDRUtil --probe` to confirm the device is visible before
-launching `tv_tuner.py`.
+### First run
+
+```bash
+python3 tools/tv_tuner.py
+```
 
 The interactive picker shows every channel in your DMA grouped by RF
 frequency, with on-now show titles, ratings, and signal strength
-pulled live from PSIP / EIT after a successful scan. **Before** the
-first scan succeeds (or if no SDR is plugged in), the picker falls
-back to a **static table** in `tools/default_stations.py` so you
-have something to look at — these names are hardcoded, not scraped
-from the air. The default table covers DC/Baltimore; edit it for
-your DMA. Real PSIP/EIT data (live show titles, ratings, signal %)
-populates only after the SDR successfully tunes a station.
+pulled live from PSIP / EIT after a successful scan. The default
+table covers DC/Baltimore — edit `tools/default_stations.py` for
+your area's RF channels and callsigns.
 
-## Watch live HD on Linux — the proven recipe
+For a separate window per stream (so the picker stays clean), make
+sure one of `gnome-terminal`, `konsole`, `xfce4-terminal`, or
+`xterm` is installed; the launcher detects whichever is available.
+Headless environments without a terminal emulator just print the
+streaming output inline.
 
-This is the exact two-process setup verified end-to-end on bare-metal Ubuntu
-(SDRplay RSPdx, native Wayland desktop): one process decodes the broadcast to a
-growing `live.ts`, a second plays one program from it in mpv.
+### WSL2 note
 
-`tv_tuner.py` (the all-in-one launcher with scan + guide + watchdogs) also works,
-but the two-process split below is the most robust for sustained viewing and is
-what the troubleshooting section assumes.
+The full receive chain (bootstrap → decoder build → SDR enumeration →
+scan → equalizer lock) runs cleanly under WSL2 Ubuntu via the
+Windows-side SDR exposed through SoapyRemote. **However, sustained
+sample-stream integrity over WSL2's NAT loopback is not reliable
+enough for end-to-end MPEG-TS decode** — we measured ~1.8% sample
+loss + ~22k UDP-buffer overflow events per second, which the FS
+checker survives but Reed-Solomon decoding does not. The equalizer
+locks textbook-clean but the TS downstream is corrupted, so ffmpeg
+never sees a valid program.
+
+This is a WSL2 USB / network passthrough limitation, not a project
+limitation. Run it natively: dual-boot Ubuntu, native Linux desktop,
+or any Linux machine with USB plugged directly into the host.
+
+## Watch live HD — the proven recipe
+
+This is the exact two-process setup verified end-to-end on bare-metal
+Ubuntu (SDRplay RSPdx, native Wayland desktop): one process decodes
+the broadcast to a growing `live.ts`, a second plays one program
+from it in mpv.
+
+`tv_tuner.py` (the all-in-one launcher with scan + guide + watchdogs)
+also works, but the two-process split below is the most robust for
+sustained viewing and is what the troubleshooting section assumes.
 
 ### 1. Start the decoder chain
 
 ```bash
 cd tools
-# Lean real-time config — for modest / older CPUs (e.g. Ryzen 1600X). Trades a
-# little decode margin for throughput so the single-thread matched filter keeps
-# up. This is the config validated for sustained live HD.
+# Lean real-time config — for modest / older CPUs (e.g. Ryzen 1600X).
+# Trades a little decode margin for throughput so the single-thread
+# matched filter keeps up. This is the config validated for sustained
+# live HD.
 export STVT_RS=stock STVT_VITERBI=hard STVT_EQ=long
 export STVT_SPS=1.1 STVT_RRC_SYMS=4 STVT_TEISCRUB=0
 export STVT_IFGR=59 STVT_RFGAIN_SEL=5 STVT_ANTENNA="Antenna A"
 python3 tv_live.py --rf 34          # writes tools/data/tv_live/live.ts
 ```
 
-On a **fast modern CPU** you can run full quality instead — drop the lean knobs
-(`STVT_SPS`, `STVT_RRC_SYMS`, `STVT_TEISCRUB`) and it defaults to `SPS=1.5`,
-8-symbol RRC, TEI scrub on. Pick your channel with `--rf N` (find N by running
-`python3 tv_tuner.py --scan` once, or from your local ATSC channel listings).
+On a **fast modern CPU** you can run full quality instead — drop the
+lean knobs (`STVT_SPS`, `STVT_RRC_SYMS`, `STVT_TEISCRUB`) and it
+defaults to `SPS=1.5`, 8-symbol RRC, TEI scrub on. Pick your channel
+with `--rf N` (find N by running `python3 tv_tuner.py --scan` once,
+or from your local ATSC channel listings).
 
 ### 2. Watch one program in HD
 
-An ATSC channel is a **multiplex of several programs** (often 1–2 HD 1080 + some
-SD subchannels). Point a player at the raw multi-program stream and it picks a
-track at random — you may get "Invalid frame dimensions 0x0" garbage even though
-the decode is perfect. The supervisor below stream-copies **one** program and
-feeds it to mpv with a buffer cushion, and self-heals if playback freezes:
+An ATSC channel is a **multiplex of several programs** (often 1–2 HD
+1080 + some SD subchannels). Point a player at the raw multi-program
+stream and it picks a track at random — you may get "Invalid frame
+dimensions 0x0" garbage even though the decode is perfect. The
+supervisor below stream-copies **one** program and feeds it to mpv
+with a buffer cushion, and self-heals if playback freezes:
 
 ```bash
 # from the repo root, in a second terminal:
@@ -198,10 +185,11 @@ List the programs to choose one whose video is `1920x1080`:
 ffprobe -show_programs tools/data/tv_live/live.ts
 ```
 
-`tools/stvt_play_hd.sh [program] [tailMB]` runs `tail -c | ffmpeg -map 0:p:N
--c copy | mpv` with all the flags that took this project a while to get right
-(`-flush_packets`, last-N-bytes tail, software decode, a cache cushion), plus a
-bounded watchdog that relaunches the player — never the chain — if it freezes.
+`tools/stvt_play_hd.sh [program] [tailMB]` runs `tail -c | ffmpeg
+-map 0:p:N -c copy | mpv` with all the flags that took this project
+a while to get right (`-flush_packets`, last-N-bytes tail, software
+decode, a cache cushion), plus a bounded watchdog that relaunches
+the player — never the chain — if it freezes.
 
 ### 3. Verify it's actually working
 
@@ -211,9 +199,10 @@ cd tools/data/tv_live
 # OsO (sample-overflow) count should stay LOW and not climb ~1/s:
 grep -c OsO tv_tuner.tv_live.log
 
-# The single most useful health check — is the chain emitting real TV or noise?
-# A healthy mux has ~20-40 unique PIDs. Hundreds/thousands = the chain locked the
-# carrier but is decoding NOISE (a "drought"); restart the chain.
+# The single most useful health check — is the chain emitting real TV
+# or noise? A healthy mux has ~20-40 unique PIDs. Hundreds/thousands =
+# the chain locked the carrier but is decoding NOISE (a "drought");
+# restart the chain.
 tail -c 2000000 live.ts | python3 -c '
 import sys; d=sys.stdin.buffer.read(); s=set(); i=d.find(b"\x47")
 while i+188<=len(d):
@@ -260,8 +249,7 @@ This project decodes anything **SoapySDR** supports. Tested in-house:
 To check what SoapySDR sees on your machine:
 
 ```bash
-SoapySDRUtil --probe       # Linux / Mac
-SoapySDRUtil.exe --probe   # Windows (in radioconda's terminal)
+SoapySDRUtil --probe
 ```
 
 That should print at minimum a `driver=...` line and list of antennas
@@ -273,8 +261,8 @@ SoapyHackRF for HackRF).
 For deep diagnostics, we ship two helper scripts:
 
 ```bash
-python tools/probe_sdr.py            # antennas, sample-rate, gain elements
-python tools/probe_throughput.py     # streaming sustained-rate test
+python3 tools/probe_sdr.py            # antennas, sample-rate, gain elements
+python3 tools/probe_throughput.py     # streaming sustained-rate test
 ```
 
 ### Pick the right antenna port
@@ -327,34 +315,34 @@ point.
 
 Edit `tools/default_stations.py` to match your area's RF channels +
 callsigns. The format is documented in the file. The first scan
-(`python tools/tv_tuner.py --scan`) populates real PSIP data for any
+(`python3 tools/tv_tuner.py --scan`) populates real PSIP data for any
 channel that locks, but the static table is what shows up in the
 picker before that.
 
 ## Run
 
-```powershell
+```bash
 # Interactive: banner, channel picker, live channel-changer
-python tools\tv_tuner.py
+python3 tools/tv_tuner.py
 
 # Direct: tune RF36 (Fox 5 DC) and play locally
-python tools\tv_tuner.py --rf 36
+python3 tools/tv_tuner.py --rf 36
 
 # Pick a subchannel (4.1 NBC = --program 1, 4.4 Oxygen = --program 4)
-python tools\tv_tuner.py --rf 34 --program 1
+python3 tools/tv_tuner.py --rf 34 --program 1
 
 # Record to MP4 (no playback window)
-python tools\tv_tuner.py --rf 36 --no-play --record fox5_news.mp4
+python3 tools/tv_tuner.py --rf 36 --no-play --record fox5_news.mp4
 
 # Stream live to Twitch / YouTube / any RTMP destination
-python tools\tv_tuner.py --config-set twitch rtmp://live.twitch.tv/app/YOUR_KEY
-python tools\tv_tuner.py --rf 36 --stream twitch
+python3 tools/tv_tuner.py --config-set twitch rtmp://live.twitch.tv/app/YOUR_KEY
+python3 tools/tv_tuner.py --rf 36 --stream twitch
 
 # Closed captions on (English by default, --cc-channel 2 for Spanish)
-python tools\tv_tuner.py --rf 36 --cc
+python3 tools/tv_tuner.py --rf 36 --cc
 
 # Dry-run: print the planned subprocess commands without spawning
-python tools\tv_tuner.py --rf 36 --dry-run
+python3 tools/tv_tuner.py --rf 36 --dry-run
 ```
 
 `tv_tuner.py` uses ffmpeg's `tee` muxer so one command can play
@@ -387,7 +375,7 @@ fastest way to switch.
 Two backends, picked automatically:
 
 - **`ccextractor`** if installed on PATH — handles both CEA-608 and
-  CEA-708. `winget install ccextractor` to add. Recommended.
+  CEA-708. `sudo apt install ccextractor` to add. Recommended.
 - **Bundled pure-Python decoder** (`tools/atsc_cc.py`) — CEA-608
   only, no external deps. Always available. Implements:
   full TS demux (PAT → PMT → video PID), MPEG-2 picture
@@ -408,10 +396,9 @@ Your SoapySDR driver for that SDR isn't installed. Install the
 vendor module:
 
 - **SDRplay**: API v3 from sdrplay.com + SoapySDRPlay3 from source
-  (see Linux install steps above).
-- **HackRF**: `apt install soapysdr-module-hackrf` (Linux) or
-  `radioconda` already includes it (Windows).
-- **RTL-SDR**: `apt install soapysdr-module-rtlsdr` or via radioconda.
+  (see install step 2 above).
+- **HackRF**: `sudo apt install soapysdr-module-hackrf`
+- **RTL-SDR**: `sudo apt install soapysdr-module-rtlsdr`
 
 After install, replug the SDR and re-run `SoapySDRUtil --probe`.
 
@@ -425,7 +412,7 @@ or another SoapySDR app — `pkill -f tv_live.py` to clear).
 ### Scan finds carriers but every channel says "no live.ts growth"
 
 The decoder pipeline started but didn't produce output. Check the
-log at `data/tv_live/tv_tuner.tv_live.log` for errors. Common cause:
+log at `tools/data/tv_live/tv_tuner.tv_live.log` for errors. Common cause:
 the antenna port in `config.py` doesn't match what your physical
 feed is connected to (silent failure — driver accepts the antenna
 name but the port has no signal).
@@ -435,7 +422,7 @@ name but the port has no signal).
 Equalizer convergence is probabilistic on weak signals. Try:
 1. Re-aim the antenna (point at the transmitter; horizontal-V for
    indoor rabbit ears).
-2. Run `python tools/tv_tuner.py --rf <strongest_channel>` and let
+2. Run `python3 tools/tv_tuner.py --rf <strongest_channel>` and let
    it retry up to 6 times — convergence sometimes needs multiple
    cold-starts.
 3. Set `STVT_CONVERGENCE_SEC=30` and `STVT_MIN_PAT=3` env vars to
@@ -450,44 +437,47 @@ antenna or closer to the transmitter.
 
 ### Picture froze but `live.ts` is still growing and OsO is low
 
-The **player** starved, not the decoder. This happens if you point mpv straight
-at the live edge with no buffer, or feed it through a pipe that stalls. Use
-`tools/stvt_play_hd.sh` (above) — it keeps a buffer cushion and self-heals.
-Tell-tale: in mpv's status line the playback clock (1st number) stops advancing
-while `tail -c live.ts` shows the file still growing. The chain is fine; restart
-only the player.
+The **player** starved, not the decoder. This happens if you point
+mpv straight at the live edge with no buffer, or feed it through a
+pipe that stalls. Use `tools/stvt_play_hd.sh` (above) — it keeps a
+buffer cushion and self-heals. Tell-tale: in mpv's status line the
+playback clock (1st number) stops advancing while `tail -c live.ts`
+shows the file still growing. The chain is fine; restart only the
+player.
 
 ### Video turned into garbage / random blocks after running a while
 
-The chain fell into a **noise drought**: it still locks the carrier (FPLL fine,
-`live.ts` growing, ~0% NULL) but is decoding noise — the live edge shows hundreds
-or thousands of unique PIDs instead of ~20-40 (run the PID-count check above).
-This is usually OsO accumulation after a long uptime, **not** RF. Fix: restart
-the decoder chain.
+The chain fell into a **noise drought**: it still locks the carrier
+(FPLL fine, `live.ts` growing, ~0% NULL) but is decoding noise — the
+live edge shows hundreds or thousands of unique PIDs instead of
+~20-40 (run the PID-count check above). This is usually OsO
+accumulation after a long uptime, **not** RF. Fix: restart the
+decoder chain.
 
 ```bash
 pkill -f tv_live.py
 rm tools/data/tv_live/live.ts            # start a fresh capture
-# then relaunch the chain (step 1 above); stvt_play_hd.sh will pick it back up
+# then relaunch the chain (step 1 above); stvt_play_hd.sh will pick
+# it back up
 ```
 
-If it droughts again quickly, make sure `sudo tools/fix_linux_tuning.sh` was run
-this boot and that the SoapySDRPlay3 ring-buffer patch is applied — both directly
-reduce OsO.
+If it droughts again quickly, make sure `sudo tools/fix_linux_tuning.sh`
+was run this boot and that the SoapySDRPlay3 ring-buffer patch is
+applied — both directly reduce OsO.
 
 ### "Unknown codec / PID 0x30" when piping live.ts to ffmpeg
 
 You're either reading the file before the equalizer converged
 (wait ~30 seconds after `tv_live` starts), or sample loss in the
-SDR-to-decoder path is breaking RS decoding (WSL2 caveat — see
-the Linux section above).
+SDR-to-decoder path is breaking RS decoding (WSL2 caveat — see the
+install section above).
 
-### No window pops up on Linux
+### No window pops up
 
-ffplay needs an X server. Ubuntu Desktop has one by default; Ubuntu
-Server doesn't. If you're SSH'd in, run `ssh -Y` from your local
-machine (X11 forwarding) or install a desktop environment on the
-server. WSLg (WSL2 on Windows 11) provides X11 automatically.
+You need a display server. Ubuntu Desktop has one by default;
+Ubuntu Server doesn't. If you're SSH'd in, run `ssh -Y` from your
+local machine (X11 forwarding) or install a desktop environment on
+the server.
 
 ## Watchdogs
 
@@ -566,18 +556,19 @@ the equalizer's tracking margin cover a lot of sins.
 
 ```
 gr-atscplus/                  GNU Radio OOT module (custom C++ blocks)
-  _build.bat                  Windows VS 2022 + NMake build
-  _rebuild.bat                Windows incremental rebuild
 tools/
   tv_tuner.py                 Channel picker, player, recorder, streamer,
                               and live channel changer all in one CLI
   tv_live.py                  Continuous SDR → MPEG-TS pipeline
   tv_live_softvit.py          Same pipeline, soft-Viterbi variant
+  stvt_play_hd.sh             Single-program HD playback supervisor
   sdr_sweep.py                Fast carrier-presence pre-scanner
   atsc_psip.py                PSIP parser (virtual channels + EIT)
   default_stations.py         Sample channel table (edit for your DMA)
   config.py                   Default tuner/antenna/gain config
   tv_player.py                Resilient video player (decoupled A/V clocks)
+  fix_linux_tuning.sh         Per-boot CPU governor + USB tuning
+  patch_soapy_ringbuffer.sh   SoapySDRPlay3 USB ring-buffer enlargement
 docs/                         Science explainer, capture recipe, session log
 bootstrap.sh                  Linux setup + build + install
 ```
