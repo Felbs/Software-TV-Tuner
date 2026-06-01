@@ -106,11 +106,35 @@ sudo systemctl enable --now sdrplay
 
 sudo apt-get install -y libsoapysdr-dev
 git clone https://github.com/pothosware/SoapySDRPlay3.git
+
+# ── IMPORTANT: enlarge the USB ring buffer BEFORE building ──────────
+# The single biggest quality fix on Linux. The stock 2 MiB / ~83 ms ring
+# overflows several times a second at 6+ MS/s ("OsO" sample overruns) and
+# corrupts the decode. This bumps it to 32 MiB / ~1.3 s of headroom.
+# (Re-run this whenever you rebuild SoapySDRPlay3 from upstream.)
+/path/to/Software-TV-Tuner/tools/patch_soapy_ringbuffer.sh ./SoapySDRPlay3
+
 cd SoapySDRPlay3 && mkdir build && cd build
 cmake .. && make -j"$(nproc)" && sudo make install && sudo ldconfig
 
 SoapySDRUtil --probe   # should list your RSP* device
 ```
+
+### Per-boot tuning (do this every boot — it's what makes live decode stable)
+
+The decoder's matched filter is single-threaded and runs at the edge of one CPU
+core. Linux defaults (the `schedutil` governor + deep C-states) starve it,
+causing OsO overruns → drift and freezes. One script fixes all of it; **it must
+be re-run after every reboot** (the governor resets on boot):
+
+```bash
+sudo tools/fix_linux_tuning.sh
+```
+
+It sets the CPU governor to `performance`, disables USB autosuspend on the
+SDRplay, raises the realtime priority limit, and holds CPUs out of deep C-states.
+On a 2017-era CPU this is the difference between freezing after ~90 s and running
+for an hour. On a fast modern CPU it still helps but matters less.
 
 RTL-SDR, HackRF, BladeRF, and other SoapySDR devices work out of
 the box from `bootstrap.sh`'s apt packages. For any SDR, run
@@ -126,6 +150,93 @@ have something to look at — these names are hardcoded, not scraped
 from the air. The default table covers DC/Baltimore; edit it for
 your DMA. Real PSIP/EIT data (live show titles, ratings, signal %)
 populates only after the SDR successfully tunes a station.
+
+## Watch live HD on Linux — the proven recipe
+
+This is the exact two-process setup verified end-to-end on bare-metal Ubuntu
+(SDRplay RSPdx, native Wayland desktop): one process decodes the broadcast to a
+growing `live.ts`, a second plays one program from it in mpv.
+
+`tv_tuner.py` (the all-in-one launcher with scan + guide + watchdogs) also works,
+but the two-process split below is the most robust for sustained viewing and is
+what the troubleshooting section assumes.
+
+### 1. Start the decoder chain
+
+```bash
+cd tools
+# Lean real-time config — for modest / older CPUs (e.g. Ryzen 1600X). Trades a
+# little decode margin for throughput so the single-thread matched filter keeps
+# up. This is the config validated for sustained live HD.
+export STVT_RS=stock STVT_VITERBI=hard STVT_EQ=long
+export STVT_SPS=1.1 STVT_RRC_SYMS=4 STVT_TEISCRUB=0
+export STVT_IFGR=59 STVT_RFGAIN_SEL=5 STVT_ANTENNA="Antenna A"
+python3 tv_live.py --rf 34          # writes tools/data/tv_live/live.ts
+```
+
+On a **fast modern CPU** you can run full quality instead — drop the lean knobs
+(`STVT_SPS`, `STVT_RRC_SYMS`, `STVT_TEISCRUB`) and it defaults to `SPS=1.5`,
+8-symbol RRC, TEI scrub on. Pick your channel with `--rf N` (find N by running
+`python3 tv_tuner.py --scan` once, or from your local ATSC channel listings).
+
+### 2. Watch one program in HD
+
+An ATSC channel is a **multiplex of several programs** (often 1–2 HD 1080 + some
+SD subchannels). Point a player at the raw multi-program stream and it picks a
+track at random — you may get "Invalid frame dimensions 0x0" garbage even though
+the decode is perfect. The supervisor below stream-copies **one** program and
+feeds it to mpv with a buffer cushion, and self-heals if playback freezes:
+
+```bash
+# from the repo root, in a second terminal:
+tools/stvt_play_hd.sh 3        # play program 3 (an HD 1080 feed)
+```
+
+List the programs to choose one whose video is `1920x1080`:
+
+```bash
+ffprobe -show_programs tools/data/tv_live/live.ts
+```
+
+`tools/stvt_play_hd.sh [program] [tailMB]` runs `tail -c | ffmpeg -map 0:p:N
+-c copy | mpv` with all the flags that took this project a while to get right
+(`-flush_packets`, last-N-bytes tail, software decode, a cache cushion), plus a
+bounded watchdog that relaunches the player — never the chain — if it freezes.
+
+### 3. Verify it's actually working
+
+```bash
+cd tools/data/tv_live
+
+# OsO (sample-overflow) count should stay LOW and not climb ~1/s:
+grep -c OsO tv_tuner.tv_live.log
+
+# The single most useful health check — is the chain emitting real TV or noise?
+# A healthy mux has ~20-40 unique PIDs. Hundreds/thousands = the chain locked the
+# carrier but is decoding NOISE (a "drought"); restart the chain.
+tail -c 2000000 live.ts | python3 -c '
+import sys; d=sys.stdin.buffer.read(); s=set(); i=d.find(b"\x47")
+while i+188<=len(d):
+    if d[i]==0x47: s.add(((d[i+1]&0x1f)<<8)|d[i+2])
+    i+=188 if d[i]==0x47 else 1
+print(len(s), "unique PIDs")'
+```
+
+### Environment / config reference
+
+All knobs are env vars read by `tv_live.py` (defaults in parentheses):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `STVT_RS` | `stock` | Reed-Solomon decoder: `stock` or `erasure` |
+| `STVT_VITERBI` | `hard` | Viterbi: `hard` (fast) or `soft` (heavier) |
+| `STVT_EQ` | `long` | Equalizer variant |
+| `STVT_SPS` | `1.5` | Internal samples/symbol. `1.1` = lean (less CPU); `1.0` breaks timing |
+| `STVT_RRC_SYMS` | `8` | Matched-filter RRC half-span. `4` = lean (fewer taps) |
+| `STVT_TEISCRUB` | `1` | Rewrite RS-failed packets to NULL. `0` = lean (skip, saves CPU) |
+| `STVT_IFGR` | `59` | SDRplay IF gain reduction (20–59 dB) |
+| `STVT_RFGAIN_SEL` | `5` | SDRplay LNA stage selector |
+| `STVT_ANTENNA` | `Antenna A` | SDRplay antenna port |
 
 ## Configure for your SDR + antenna
 
@@ -336,6 +447,33 @@ This is normal on marginal signals. The three watchdogs (decoder,
 ffmpeg, optional player) auto-respawn the failing stage. If freezes
 last more than 10s and don't recover, your SNR is too low — better
 antenna or closer to the transmitter.
+
+### Picture froze but `live.ts` is still growing and OsO is low
+
+The **player** starved, not the decoder. This happens if you point mpv straight
+at the live edge with no buffer, or feed it through a pipe that stalls. Use
+`tools/stvt_play_hd.sh` (above) — it keeps a buffer cushion and self-heals.
+Tell-tale: in mpv's status line the playback clock (1st number) stops advancing
+while `tail -c live.ts` shows the file still growing. The chain is fine; restart
+only the player.
+
+### Video turned into garbage / random blocks after running a while
+
+The chain fell into a **noise drought**: it still locks the carrier (FPLL fine,
+`live.ts` growing, ~0% NULL) but is decoding noise — the live edge shows hundreds
+or thousands of unique PIDs instead of ~20-40 (run the PID-count check above).
+This is usually OsO accumulation after a long uptime, **not** RF. Fix: restart
+the decoder chain.
+
+```bash
+pkill -f tv_live.py
+rm tools/data/tv_live/live.ts            # start a fresh capture
+# then relaunch the chain (step 1 above); stvt_play_hd.sh will pick it back up
+```
+
+If it droughts again quickly, make sure `sudo tools/fix_linux_tuning.sh` was run
+this boot and that the SoapySDRPlay3 ring-buffer patch is applied — both directly
+reduce OsO.
 
 ### "Unknown codec / PID 0x30" when piping live.ts to ffmpeg
 
