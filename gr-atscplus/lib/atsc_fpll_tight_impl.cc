@@ -93,11 +93,23 @@ int atsc_fpll_tight_impl::work(int noutput_items,
             }
             return 4.0f;
         }();
+        // 2026-05-30 phase-error gate. Drift-localization showed carrier-slip
+        // onsets coincide with large phase errors (|x|→π/2) that aren't caught
+        // by the old razor-thin [π/2-1e-4, π/2] freeze band, so they kick the
+        // NCO at near-full strength. STVT_FPLL_XGATE=<rad> widens the freeze:
+        // any |x| > XGATE is treated as a degenerate/noise sample and frozen.
+        // Default = π/2-1e-4 (EXACTLY the old behavior — zero change when unset).
+        static const float XGATE = []() -> float {
+            if (const char* p = std::getenv("STVT_FPLL_XGATE")) {
+                char* e = nullptr; float v = std::strtof(p, &e);
+                if (e != p && v > 0.0f && v <= (float)M_PI_2) return v;
+            }
+            return (float)M_PI_2 - 1e-4f;
+        }();
         const float mag2_min = MAG_MIN_RMS * MAG_MIN_RMS;
         float mag2 = filtered.real() * filtered.real()
                    + filtered.imag() * filtered.imag();
-        bool degenerate = (mag2 < mag2_min) || (x >= M_PI_2 - 1e-4f)
-                                            || (x <= -M_PI_2 + 1e-4f);
+        bool degenerate = (mag2 < mag2_min) || (x >= XGATE) || (x <= -XGATE);
         if (degenerate) {
             if (SAT_MODE == 1) {
                 if (x > M_PI_2) x = M_PI_2;

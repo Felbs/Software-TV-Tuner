@@ -61,6 +61,7 @@ atsc_rs_decoder_erasure_impl::atsc_rs_decoder_erasure_impl(int max_erasures)
     d_errors_corrected   = 0;
     d_erasure_decodes    = 0;
     d_erasure_successes  = 0;
+    d_miscorrections     = 0;
     d_bad_packets        = 0;
     d_recent_metric      = 0.0;
     d_recent_metric_max  = 0.0;
@@ -266,12 +267,31 @@ int atsc_rs_decoder_erasure_impl::decode_block(const unsigned char* in207,
     d_erasure_decodes++;
     d_log_eras_dec++;
     n = decode_rs_char(d_rs, tmp, eras_pos, no_eras);
-    if (n >= 0) {
+
+    // MISCORRECTION GUARD (2026-05-31). RS(207,187) with up to 20 erasures can
+    // satisfy all parity for a WRONG codeword when the true errors are NOT at
+    // the guessed histogram positions: decode_rs_char returns n>=0 ("success")
+    // but the packet is garbage with a random PID. Emitting those is the entire
+    // clean->noise "drift" (proven by deterministic replay — see memory
+    // drift_is_erasure_rs_miscorrection). Byte 0 of the codeword is the TS sync
+    // (0x47): RS-protected and known-constant, so a decoded sync != 0x47 is a
+    // definite miscorrection (catches ~255/256 of them). Reject it — treat as
+    // uncorrectable so teiscrub NULLs it (brief freeze) instead of showing
+    // noise. The first (hard) decode is unchanged, so clean packets are still
+    // byte-identical to stock. STVT_RS_MISCORR_GUARD=0 restores old behavior.
+    static const bool MISCORR_GUARD = []() {
+        const char* p = std::getenv("STVT_RS_MISCORR_GUARD");
+        return !(p && p[0] == '0');
+    }();
+    const bool miscorrect =
+        (n >= 0) && MISCORR_GUARD && (tmp[PAD_BYTES] != 0x47);
+
+    if (n >= 0 && !miscorrect) {
         d_erasure_successes++;
         d_log_eras_ok++;
-        // Update histogram: positions actually-corrected (could include some
-        // of the erasure positions or different ones). Compare tmp to in207
-        // across the full codeword.
+        // Update histogram ONLY for validated erasure decodes (poisoning the
+        // histogram from miscorrections was a positive-feedback loop that
+        // sustained the drift). Positions actually-corrected vs in207.
         for (int i = 0; i < CODE_LEN; i++) {
             if (tmp[PAD_BYTES + i] != in207[i]) {
                 int v = d_hist_pos[i] + 1;
@@ -284,7 +304,8 @@ int atsc_rs_decoder_erasure_impl::decode_block(const unsigned char* in207,
         return n;
     }
 
-    // Still uncorrectable — return data as-is for caller to mark TEI.
+    if (miscorrect) d_miscorrections++;
+    // Uncorrectable (or rejected miscorrection) — return data as-is, mark TEI.
     std::memcpy(out188, in207, PKT_LEN);
     return -1;
 }
@@ -405,13 +426,14 @@ int atsc_rs_decoder_erasure_impl::work(int noutput_items,
         }
         std::fprintf(stderr,
                      "[rs_erasure t=%6.1fs] pkts=%d ec=%d era_dec=%d "
-                     "era_ok=%d bad=%d "
+                     "era_ok=%d miscorr=%d bad=%d "
                      "(last5s: pkts=%d era_dec=%d era_ok=%d bad=%d)  "
                      "weak_pos[%d:%d,%d:%d,%d:%d]  "
                      "vit_metric=%.3f vit_max=%.3f tags=%d eff_eras=%d\n",
                      elapsed_ms / 1000.0,
                      d_packets, d_errors_corrected,
-                     d_erasure_decodes, d_erasure_successes, d_bad_packets,
+                     d_erasure_decodes, d_erasure_successes, d_miscorrections,
+                     d_bad_packets,
                      d_log_packets, d_log_eras_dec, d_log_eras_ok, d_log_bad,
                      top3[0], top3v[0], top3[1], top3v[1], top3[2], top3v[2],
                      d_recent_metric, d_recent_metric_max,
