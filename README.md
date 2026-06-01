@@ -231,28 +231,35 @@ picker before that.
 
 ## Run
 
-```powershell
+For sustained live viewing on WSL, the helper scripts in the WSL
+Version section above (`tools/stvt_live_remote.sh` + `tools/stvt_watch.sh`)
+are the smoothest path. `tv_tuner.py` is the full channel-picker /
+recorder / streamer CLI — under WSL, point it at the Windows SoapyServer
+the same way the helper scripts do (`STVT_SOAPY_ARGS` /
+`STVT_STREAM_ARGS`, see `tools/stvt_live_remote.sh`).
+
+```bash
 # Interactive: banner, channel picker, live channel-changer
-python tools\tv_tuner.py
+python3 tools/tv_tuner.py
 
 # Direct: tune RF36 (Fox 5 DC) and play locally
-python tools\tv_tuner.py --rf 36
+python3 tools/tv_tuner.py --rf 36
 
 # Pick a subchannel (4.1 NBC = --program 1, 4.4 Oxygen = --program 4)
-python tools\tv_tuner.py --rf 34 --program 1
+python3 tools/tv_tuner.py --rf 34 --program 1
 
 # Record to MP4 (no playback window)
-python tools\tv_tuner.py --rf 36 --no-play --record fox5_news.mp4
+python3 tools/tv_tuner.py --rf 36 --no-play --record fox5_news.mp4
 
 # Stream live to Twitch / YouTube / any RTMP destination
-python tools\tv_tuner.py --config-set twitch rtmp://live.twitch.tv/app/YOUR_KEY
-python tools\tv_tuner.py --rf 36 --stream twitch
+python3 tools/tv_tuner.py --config-set twitch rtmp://live.twitch.tv/app/YOUR_KEY
+python3 tools/tv_tuner.py --rf 36 --stream twitch
 
 # Closed captions on (English by default, --cc-channel 2 for Spanish)
-python tools\tv_tuner.py --rf 36 --cc
+python3 tools/tv_tuner.py --rf 36 --cc
 
 # Dry-run: print the planned subprocess commands without spawning
-python tools\tv_tuner.py --rf 36 --dry-run
+python3 tools/tv_tuner.py --rf 36 --dry-run
 ```
 
 `tv_tuner.py` uses ffmpeg's `tee` muxer so one command can play
