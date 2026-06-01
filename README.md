@@ -53,25 +53,58 @@ python -c "from gnuradio import atscplus; print(dir(atscplus))"
 python tools\tv_tuner.py
 ```
 
-## Download & install (Linux, ~5 minutes)
+## Download & install (WSL Version, ~10 minutes)
 
-Tested on Ubuntu 22.04 / 24.04 (build + decoder pipeline validated;
-end-to-end watchable picture verified on bare-metal Linux. WSL2 has
-a known-issue caveat documented below). The `bootstrap.sh` script
-does the full setup in one shot — apt-installs GNU Radio + ffmpeg +
-SoapySDR + the Python bindings, builds and installs the gr-atscplus
-OOT module, and pip-installs optional player extras.
+> **This branch is the WSL version.** GNU Radio decodes inside WSL2
+> Ubuntu while the SDR stays on the **Windows host**, streamed in over
+> **SoapyRemote-over-TCP**. WSL here uses **plain system GNU Radio from
+> `apt` — not radioconda** (radioconda lives on the Windows-host side).
+> A separate native-Linux version is maintained on its own branch.
+
+Earlier notes called WSL2 "build-only." That was the **usbip**
+transport starving the RSPdx to ~1 MS/s (vs 8 requested) — the gappy
+stream locked the FPLL pilot but killed segment sync, so no video.
+Feeding the SDR over **SoapyRemote-over-TCP instead of usbip** fixed
+it completely: sustained 8.04 MS/s, 0 overflows, clean end-to-end
+1080i (segs_aligned ~96%, TEI 0%).
+
+**1. On the Windows host** — expose the SDR over TCP. Needs the SDRplay
+API v3 + PothosSDR (or radioconda) installed:
+
+```powershell
+# if the SDR was attached via usbip, release it first
+usbipd detach --busid <your-RSPdx-busid>
+
+# serve it over TCP. The IPv4 bind matters — the default IPv6-only
+# bind is unreachable from WSL.
+& "C:\Program Files\PothosSDR\bin\SoapySDRServer.exe" --bind=0.0.0.0:55132
+```
+
+**2. Inside WSL2 Ubuntu** — build the decoder (system GNU Radio via apt):
 
 ```bash
 git clone https://github.com/Felbs/Software-TV-Tuner.git
 cd Software-TV-Tuner
-chmod +x bootstrap.sh && ./bootstrap.sh
+chmod +x bootstrap.sh && ./bootstrap.sh   # apt GNU Radio + ffmpeg + SoapySDR, builds gr-atscplus
 
-# Run it
-python3 tools/tv_tuner.py
+# one-time: enlarge socket buffers for the TCP IQ stream
+sudo sysctl -w net.core.rmem_max=67108864 net.core.wmem_max=67108864
+
+# launch the live chain over SoapyRemote (RF34 example)
+tools/stvt_live_remote.sh 34
+
+# watch it under WSLg in mpv (software VO + cache cushion)
+tools/stvt_watch.sh
 ```
 
-SDRplay-specific install steps and the WSL2 caveat are above.
+`stvt_live_remote.sh` points the chain at the Windows SoapySDRServer
+(`driver=remote,remote=127.0.0.1:55132,remote:driver=sdrplay` with
+`remote:prot=tcp`) and uses the lean real-time config (internal
+oversampling 1.1, RRC half-span 4) that sustains live 8 MS/s without
+overflow. `stvt_watch.sh` plays via mpv with `--vo=wlshm` (software —
+WSLg's GPU VO stalls) and a ~25s cache cushion so brief chain hiccups
+don't freeze the picture. See [HANDOFF.md](HANDOFF.md) for the full
+metric breakdown and tuning levers.
 
 For a separate window per stream (so the picker stays clean), make
 sure one of `gnome-terminal`, `konsole`, `xfce4-terminal`, or
@@ -79,38 +112,14 @@ sure one of `gnome-terminal`, `konsole`, `xfce4-terminal`, or
 Headless / WSL2 environments without a terminal emulator just print
 the streaming output inline — usable, just less pretty.
 
-### Validated on bare-metal Linux; WSL2 is build-only
+### Native SDRplay drivers (not needed for the WSL path)
 
-The full receive chain (bootstrap → decoder build → SDR enumeration →
-two-phase scan → equalizer lock with `min_pn511_err = 0`) runs
-cleanly under WSL2 Ubuntu via the Windows-side SDR exposed through
-`tools/soapy_server.bat` + SoapyRemote. **However, sustained
-sample-stream integrity over WSL2's NAT loopback is not reliable
-enough for end-to-end MPEG-TS decode** — we measured ~1.8% sample
-loss + ~22k UDP-buffer overflow events per second, which the FS
-checker survives but Reed-Solomon decoding does not. The result:
-the equalizer locks textbook-clean but the TS bytes downstream are
-corrupted, so ffmpeg/ffplay never sees a valid program. This is a
-WSL2 USB / network passthrough limitation, not a project limitation.
-
-Run it natively: dual-boot Ubuntu, native Linux desktop, or a Linux
-machine with USB plugged directly into the host. SDRplay's API +
-`SoapySDRPlay3` install per their docs (vendor `.run` installer +
-build SoapySDRPlay3 from source against `libsoapysdr-dev`):
-
-```bash
-wget https://www.sdrplay.com/software/SDRplay_RSP_API-Linux-3.15.2.run
-chmod +x SDRplay_RSP_API-Linux-3.15.2.run
-sudo ./SDRplay_RSP_API-Linux-3.15.2.run
-sudo systemctl enable --now sdrplay
-
-sudo apt-get install -y libsoapysdr-dev
-git clone https://github.com/pothosware/SoapySDRPlay3.git
-cd SoapySDRPlay3 && mkdir build && cd build
-cmake .. && make -j"$(nproc)" && sudo make install && sudo ldconfig
-
-SoapySDRUtil --probe   # should list your RSP* device
-```
+The WSL version above reaches the SDR over SoapyRemote, so it does
+**not** need `SoapySDRPlay3` inside WSL — the SDRplay driver lives on
+the Windows host. Native-Linux SDRplay setup (the vendor `.run` API
+installer + building `SoapySDRPlay3` from source against
+`libsoapysdr-dev`) belongs to the separate native-Linux branch, where
+the SDR plugs directly into the host.
 
 RTL-SDR, HackRF, BladeRF, and other SoapySDR devices work out of
 the box from `bootstrap.sh`'s apt packages. For any SDR, run
@@ -341,8 +350,9 @@ antenna or closer to the transmitter.
 
 You're either reading the file before the equalizer converged
 (wait ~30 seconds after `tv_live` starts), or sample loss in the
-SDR-to-decoder path is breaking RS decoding (WSL2 caveat — see
-the Linux section above).
+SDR-to-decoder path is breaking RS decoding (on WSL, make sure the
+SDR is fed via SoapyRemote-over-TCP, **not** usbip — see the WSL
+Version section above).
 
 ### No window pops up on Linux
 
@@ -441,7 +451,7 @@ tools/
   config.py                   Default tuner/antenna/gain config
   tv_player.py                Resilient video player (decoupled A/V clocks)
 docs/                         Science explainer, capture recipe, session log
-bootstrap.sh                  Linux setup + build + install
+bootstrap.sh                  WSL/Linux setup + build + install
 ```
 
 ## License
