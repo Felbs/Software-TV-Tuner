@@ -1,4 +1,4 @@
-# STVT handoff — 2026-05-31 (branch `linux-port-stvt-v2`)
+# STVT handoff — 2026-05-31 (branch `wsl-port-stvt-v2`, the WSL version)
 
 ## UPDATE 2026-05-31 (later) — LIVE DECODE WORKS on the Threadripper (WSL)
 
