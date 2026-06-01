@@ -19,39 +19,24 @@ watched full sports games, news blocks, and overnight programming
 end-to-end on this stack. If your antenna can lock the carrier, the
 software keeps the picture up.
 
-## Download & install (Windows, ~10 minutes)
+## Windows host setup (for the WSL version)
 
-You need:
-- A computer with **GNU Radio 3.10+**, easiest via
-  [`radioconda`](https://github.com/ryanvolz/radioconda) (free).
-- A SoapySDR-supported SDR. Tested with **SDRplay RSPdx** + the
-  SDRplay API v3 driver.
-- **Any antenna** — even ones that weren't designed for TV (we've
-  locked broadcasts on a vertical ham-radio whip). A proper
-  horizontally-polarized TV antenna gives the best signal margin,
-  but it's not required. See
-  [Antennas — what works](#antennas--what-works) below.
-- (Windows only) [`ffmpeg`](https://www.gyan.dev/ffmpeg/builds/) full
-  build extracted to `C:\ffmpeg\`.
+For the WSL version you do **not** install GNU Radio, build the decoder,
+or run ffmpeg on Windows — all decoding happens in WSL. Windows only has
+to hand the SDR to WSL over the network. On the Windows host you need:
 
-```powershell
-# 1. Clone the repo
-git clone https://github.com/Felbs/Software-TV-Tuner.git
-cd Software-TV-Tuner
+- The **SDRplay API v3** driver (from sdrplay.com).
+- A **SoapySDR server** — `SoapySDRServer.exe`, bundled with
+  [PothosSDR](https://github.com/pothosware/PothosSDR) (or radioconda).
+- Your SDR (tested: **SDRplay RSPdx**) + any antenna
+  (see [Antennas — what works](#antennas--what-works)).
 
-# 2. Build the C++ decoder OOT module
-#    Windows: VS 2022 BuildTools + NMake. Linux: bootstrap.sh.
-gr-atscplus\_build.bat
+Then jump to the **WSL Version** section below — its step 1 starts the
+server and step 2 builds + runs everything inside WSL.
 
-# 3. Verify the new blocks load from Python
-python -c "from gnuradio import atscplus; print(dir(atscplus))"
-
-# 4. Install the resilient player's runtime deps
-& "$env:USERPROFILE\radioconda\python.exe" -m pip install opencv-python sounddevice
-
-# 5. Pick + run a channel
-python tools\tv_tuner.py
-```
+> Want to run the whole tuner natively on Windows (GNU Radio via
+> radioconda, no WSL)? That's the separate **Windows version**, which
+> has its own README.
 
 ## Download & install (WSL Version, ~10 minutes)
 
