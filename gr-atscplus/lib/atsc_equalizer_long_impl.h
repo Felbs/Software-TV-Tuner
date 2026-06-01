@@ -41,8 +41,29 @@ private:
                 const float* training_pattern,
                 float* output_samples,
                 int nsamples);
+    // 2026-05-30 Confidence-gated decision-directed tracking. Runs on DATA
+    // segments (between field syncs) when STVT_EQ_DD_MU>0. Filters, slices to
+    // the nearest 8-VSB level, and does a normalized-LMS (NLMS) tap update
+    // gated by slicer confidence (skip when |decision-y|>gate). Closes the
+    // "taps frozen 312/313 of the time → drift to noise" hole in the
+    // field-sync-only design, WITHOUT CMA's wrong-modulus convergence: DD
+    // minimizes the same symbol-error objective as the FS-LMS anchor.
+    void filterN_dd(const float* input_samples, float* output_samples, int nsamples);
+    // 2026-05-30 RLS (Recursive Least Squares) field-sync adaptation. Optional
+    // (STVT_EQ_RLS=1). Converges the equalizer far faster + tracks better than
+    // LMS each field sync — the classic fix for "LMS too slow → drift". Runs
+    // only on the ~728-symbol field-sync segment (per-symbol RLS over all 256
+    // taps is feasible there, NOT over full data segments). Pairs with the DD
+    // path for between-field tracking. Double-precision inverse-correlation
+    // matrix for numerical stability.
+    void adaptN_rls(const float* input_samples,
+                    const float* training_pattern,
+                    float* output_samples,
+                    int nsamples);
 
     std::vector<float> d_taps;
+    std::vector<double> d_rls_P;   // NTAPS*NTAPS inverse-correlation matrix (RLS)
+    bool   d_rls_inited = false;
     // Last-known-good snapshot: saved when taps look healthy (low energy,
     // finite, not in a divergence-induced delta-reset state). On
     // divergence, restored from snapshot instead of cold-resetting to a

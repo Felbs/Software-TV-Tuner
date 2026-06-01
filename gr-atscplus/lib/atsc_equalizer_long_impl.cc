@@ -96,6 +96,123 @@ void atsc_equalizer_long_impl::filterN(const float* input_samples,
     }
 }
 
+void atsc_equalizer_long_impl::filterN_dd(const float* input_samples,
+                                          float* output_samples,
+                                          int nsamples)
+{
+    // 2026-05-30 ROOT-CAUSE DRIFT FIX. The field-sync-only design freezes the
+    // taps for 312 of every 313 segments; on a time-varying / noisy channel
+    // the frozen taps go stale and, because each FS update only constrains the
+    // ~728-symbol field-sync subspace (NTAPS can exceed that), the
+    // unexcited tap directions random-walk under noise until the response is
+    // garbage — the ~tens-of-seconds "clean then noise" drift we observe.
+    //
+    // The fix: track continuously between field syncs with confidence-gated
+    // NLMS decision-directed adaptation. Three guards keep it from doing what
+    // naive DD did before (diverge):
+    //   1) GATE  — only adapt on confident decisions (|decision-y|<=gate); a
+    //              closing eye stops feeding the loop wrong references, which
+    //              is what causes the DD positive-feedback death spiral.
+    //   2) NLMS  — step normalized by input power (μ/(ε+||x||²)); immune to
+    //              the AGC/clipping power spikes that blow up fixed-step LMS.
+    //   3) ANCHOR— the supervised FS-LMS still runs every field sync, pulling
+    //              the taps back to ground truth so DD can only wander within
+    //              one field (~24 ms), never permanently.
+    // DD minimizes the SAME symbol-error objective as the FS-LMS anchor (unlike
+    // CMA's constant-modulus objective, which fights the anchor and converged
+    // to a wrong solution in testing — fs_mse≈90). Default OFF (μ=0).
+    static const float DD_MU = []() -> float {
+        if (const char* p = std::getenv("STVT_EQ_DD_MU")) {
+            char* e = nullptr; double v = std::strtod(p, &e);
+            if (e != p) return (float)v;
+        }
+        return 0.0f;
+    }();
+    static const float DD_GATE = []() -> float {
+        if (const char* p = std::getenv("STVT_EQ_DD_GATE")) {
+            char* e = nullptr; double v = std::strtod(p, &e);
+            if (e != p) return (float)v;
+        }
+        return 1.0f;
+    }();
+    // BUGFIX 2026-05-30: default was 1e-4 applied PER DATA SEGMENT (~312×/field),
+    // which collapsed the taps ~3%/field → output→0 → 0% clean even at μ=5e-7.
+    // The field-sync LMS (adaptN) already leaks once per field on the SAME
+    // d_taps; the data-segment path should not re-leak. Default 0 (no-op);
+    // still tunable for experiments. If a gentle DD-path leak is ever wanted,
+    // match the per-field rate: ~ (FS_LEAK / 312) ≈ 3e-6, NOT 1e-4.
+    static const float DD_LEAK = []() -> float {
+        if (const char* p = std::getenv("STVT_EQ_DD_LEAK")) {
+            char* e = nullptr; double v = std::strtod(p, &e);
+            if (e != p) return (float)v;
+        }
+        return 0.0f;
+    }();
+    static const float DD_EPS = 1.0f;  // NLMS regularizer, ~ noise floor power
+
+    // μ==0 → behave exactly like the legacy passive filter (zero behavior
+    // change when the knob is off).
+    if (DD_MU <= 0.0f) {
+        filterN(input_samples, output_samples, nsamples);
+        return;
+    }
+
+    for (int j = 0; j < nsamples; j++) {
+        const float* x = &input_samples[j];
+        float y = 0.0f;
+        volk_32f_x2_dot_prod_32f(&y, x, &d_taps[0], NTAPS);
+        output_samples[j] = y;
+
+        // 8-VSB slicer (levels ±1,±3,±5,±7 — same normalization as the FS
+        // training, which sits at ±5).
+        float decision;
+        if      (y >=  6.0f) decision =  7.0f;
+        else if (y >=  4.0f) decision =  5.0f;
+        else if (y >=  2.0f) decision =  3.0f;
+        else if (y >=  0.0f) decision =  1.0f;
+        else if (y >= -2.0f) decision = -1.0f;
+        else if (y >= -4.0f) decision = -3.0f;
+        else if (y >= -6.0f) decision = -5.0f;
+        else                 decision = -7.0f;
+
+        float e = decision - y;             // target − output
+        if (std::fabs(e) > DD_GATE) continue;   // unconfident — don't adapt
+
+        float xnorm2 = 0.0f;
+        volk_32f_x2_dot_prod_32f(&xnorm2, x, x, NTAPS);
+        float mu_eff = DD_MU / (DD_EPS + xnorm2);
+        float scale = mu_eff * e;
+        if (!std::isfinite(scale)) continue;
+
+        float tmp_taps[NTAPS];
+        volk_32f_s32f_multiply_32f(tmp_taps, x, scale, NTAPS);
+        volk_32f_x2_add_32f(&d_taps[0], &d_taps[0], tmp_taps, NTAPS);
+    }
+
+    // Optional leak (default 0 — see BUGFIX note above). When enabled, bounds
+    // the unexcited-direction random walk between FS anchors.
+    if (DD_LEAK > 0.0f) {
+        float keep = 1.0f - DD_LEAK;
+        for (int k = 0; k < NTAPS; k++) d_taps[k] *= keep;
+    }
+
+    // Cheap divergence backstop so a bad patch can't run away before the next
+    // field sync. Mirror adaptN's policy: restore LKG if we have one, else
+    // reset to a delta (pass-through).
+    double tap_e = 0.0;
+    for (int k = 0; k < NTAPS; k++) tap_e += (double)d_taps[k] * (double)d_taps[k];
+    if (!std::isfinite(tap_e) || tap_e > 50.0 * 50.0) {
+        if (d_lkg_valid) {
+            for (int k = 0; k < NTAPS; k++) d_taps[k] = d_taps_lkg[k];
+        } else {
+            for (int k = 0; k < NTAPS; k++) d_taps[k] = 0.0f;
+            d_taps[NPRETAPS] = 1.0f;
+        }
+        for (int j = 0; j < nsamples; j++)
+            output_samples[j] = input_samples[j + NPRETAPS];
+    }
+}
+
 void atsc_equalizer_long_impl::adaptN(const float* input_samples,
                                  const float* training_pattern,
                                  float* output_samples,
@@ -316,6 +433,30 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
         }
     }
 
+    // 2026-05-30 DRIFT-LOCALIZATION TELEMETRY. Emit timestamped equalizer
+    // quality every 8 field syncs (mirrors the CMA block's cadence) so it can
+    // be correlated against [fpll t=...] to pin WHERE a drift starts — carrier
+    // (FPLL nco/max|x|), equalizer (this fs_err_rms / |taps|), or downstream
+    // (viterbi_metric). Gated by STVT_EQ_TELEM=1 (default off, zero overhead).
+    static const bool TELEM = []() {
+        const char* p = std::getenv("STVT_EQ_TELEM"); return p && std::atoi(p) != 0;
+    }();
+    if (TELEM && nsamples > 0) {
+        static auto telem_t0 = std::chrono::steady_clock::now();
+        static uint64_t telem_fs = 0;
+        telem_fs++;
+        if ((telem_fs % 8) == 0) {
+            double tap_e = 0.0;
+            for (int k = 0; k < NTAPS; k++) tap_e += (double)d_taps[k] * (double)d_taps[k];
+            double t = std::chrono::duration<double>(
+                           std::chrono::steady_clock::now() - telem_t0).count();
+            std::fprintf(stderr,
+                "[eq-long t=%6.2fs] fs=%llu fs_err_rms=%.4f |taps|=%.3f mu=%g\n",
+                t, (unsigned long long)telem_fs, batch_err_rms,
+                std::sqrt(tap_e), effective_mu);
+        }
+    }
+
     // 2026-05-28 GEAR-SHIFT LMS state update — after the LMS pass.
     // FAST→SLOW: sustained low err for GEAR_DEBOUNCE batches.
     // SLOW→FAST: any err spike above GEAR_HIGH_ERR (immediate, no debounce —
@@ -424,6 +565,119 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
     }
 }
 
+void atsc_equalizer_long_impl::adaptN_rls(const float* input_samples,
+                                          const float* training_pattern,
+                                          float* output_samples,
+                                          int nsamples)
+{
+    // Recursive Least Squares on the field-sync training sequence. RLS tracks
+    // a time-varying channel far better than LMS (the drift cause), converging
+    // in ~N samples instead of LMS's many fields. Forgetting factor LAMBDA<1
+    // weights recent data — smaller = faster tracking, less stable. P is the
+    // (inverse autocorrelation) matrix, init P = (1/DELTA)·I. Standard RLS:
+    //   pi   = P x
+    //   k    = pi / (LAMBDA + xᵀ pi)
+    //   xi   = d - wᵀx            (a-priori error)
+    //   w   += k · xi
+    //   P    = (P - k piᵀ) / LAMBDA
+    // Double precision throughout for stability; taps cast to float for volk.
+    static const double LAMBDA = []() -> double {
+        if (const char* p = std::getenv("STVT_EQ_RLS_LAMBDA")) {
+            char* e=nullptr; double v=std::strtod(p,&e); if(e!=p) return v; }
+        return 0.9995;
+    }();
+    static const double DELTA = []() -> double {
+        if (const char* p = std::getenv("STVT_EQ_RLS_DELTA")) {
+            char* e=nullptr; double v=std::strtod(p,&e); if(e!=p) return v; }
+        return 0.01;
+    }();
+    static const bool TELEM = []() {
+        const char* p = std::getenv("STVT_EQ_TELEM"); return p && std::atoi(p)!=0;
+    }();
+    static const bool LKG_ENABLED = []() {
+        const char* p = std::getenv("STVT_EQ_LKG"); return p && std::atoi(p)!=0;
+    }();
+
+    if (!d_rls_inited) {
+        d_rls_P.assign((size_t)NTAPS * NTAPS, 0.0);
+        for (int i = 0; i < NTAPS; i++) d_rls_P[(size_t)i*NTAPS + i] = 1.0/DELTA;
+        d_rls_inited = true;
+    }
+    double* P = d_rls_P.data();
+    const double invLam = 1.0 / LAMBDA;
+    std::vector<double> pi(NTAPS), kk(NTAPS);
+    double err_sq_sum = 0.0;
+
+    for (int j = 0; j < nsamples; j++) {
+        const float* x = &input_samples[j];
+        float yf = 0.0f;
+        volk_32f_x2_dot_prod_32f(&yf, x, &d_taps[0], NTAPS);
+        output_samples[j] = yf;
+
+        // pi = P x   (O(N^2))
+        for (int r = 0; r < NTAPS; r++) {
+            const double* Pr = &P[(size_t)r*NTAPS];
+            double s = 0.0;
+            for (int c = 0; c < NTAPS; c++) s += Pr[c] * (double)x[c];
+            pi[r] = s;
+        }
+        double xpi = 0.0;
+        for (int c = 0; c < NTAPS; c++) xpi += (double)x[c] * pi[c];
+        double denom = LAMBDA + xpi;
+        if (denom < 1e-12) denom = 1e-12;
+        for (int r = 0; r < NTAPS; r++) kk[r] = pi[r] / denom;
+
+        double xi = (double)training_pattern[j] - (double)yf;
+        err_sq_sum += xi * xi;
+        for (int r = 0; r < NTAPS; r++) d_taps[r] += (float)(kk[r] * xi);
+
+        // P = (P - k piᵀ)/LAMBDA   (O(N^2))
+        for (int r = 0; r < NTAPS; r++) {
+            double kr = kk[r];
+            double* Pr = &P[(size_t)r*NTAPS];
+            for (int c = 0; c < NTAPS; c++) Pr[c] = (Pr[c] - kr*pi[c]) * invLam;
+        }
+    }
+
+    const double batch_err_rms = (nsamples > 0)
+        ? std::sqrt(err_sq_sum / (double)nsamples) : 0.0;
+    if (LKG_ENABLED && nsamples > 0 && batch_err_rms < 1.5) {
+        for (int k = 0; k < NTAPS; k++) d_taps_lkg[k] = d_taps[k];
+        d_lkg_valid = true;
+    }
+
+    // Divergence backstop: if taps blow up or go non-finite, reset taps AND
+    // reinitialize P (a diverged P keeps re-diverging otherwise).
+    double tap_e = 0.0;
+    for (int k = 0; k < NTAPS; k++) tap_e += (double)d_taps[k]*(double)d_taps[k];
+    if (!std::isfinite(tap_e) || tap_e > 2500.0) {
+        if (LKG_ENABLED && d_lkg_valid) {
+            for (int k = 0; k < NTAPS; k++) d_taps[k] = d_taps_lkg[k];
+        } else {
+            for (int k = 0; k < NTAPS; k++) d_taps[k] = 0.0f;
+            d_taps[NPRETAPS] = 1.0f;
+        }
+        std::fill(d_rls_P.begin(), d_rls_P.end(), 0.0);
+        for (int i = 0; i < NTAPS; i++) d_rls_P[(size_t)i*NTAPS + i] = 1.0/DELTA;
+        for (int j = 0; j < nsamples; j++)
+            output_samples[j] = input_samples[j + NPRETAPS];
+    }
+
+    if (TELEM && nsamples > 0) {
+        static auto rls_t0 = std::chrono::steady_clock::now();
+        static uint64_t rls_fs = 0;
+        rls_fs++;
+        if ((rls_fs % 8) == 0) {
+            double t = std::chrono::duration<double>(
+                           std::chrono::steady_clock::now() - rls_t0).count();
+            std::fprintf(stderr,
+                "[eq-rls t=%6.2fs] fs=%llu fs_err_rms=%.4f |taps|=%.3f lambda=%g\n",
+                t, (unsigned long long)rls_fs, batch_err_rms,
+                std::sqrt(tap_e), LAMBDA);
+        }
+    }
+}
+
 int atsc_equalizer_long_impl::general_work(int noutput_items,
                                       gr_vector_int& ninput_items,
                                       gr_vector_const_void_star& input_items,
@@ -457,13 +711,22 @@ int atsc_equalizer_long_impl::general_work(int noutput_items,
                (NTAPS - NPRETAPS) * sizeof(float));
 
         if (d_segno == -1) {
-            if (d_flags & 0x0010) {
+            // RLS field-sync adaptation when STVT_EQ_RLS=1, else LMS (default).
+            static const bool RLS_ENABLED = []() {
+                const char* p = std::getenv("STVT_EQ_RLS"); return p && std::atoi(p) != 0;
+            }();
+            const float* trn = (d_flags & 0x0010) ? training_sequence2 : training_sequence1;
+            if (RLS_ENABLED) {
+                adaptN_rls(data_mem, trn, data_mem2, KNOWN_FIELD_SYNC_LENGTH);
+            } else if (d_flags & 0x0010) {
                 adaptN(data_mem, training_sequence2, data_mem2, KNOWN_FIELD_SYNC_LENGTH);
             } else {
                 adaptN(data_mem, training_sequence1, data_mem2, KNOWN_FIELD_SYNC_LENGTH);
             }
         } else {
-            filterN(data_mem, data_mem2, ATSC_DATA_SEGMENT_LENGTH);
+            // Continuous decision-directed tracking on data segments (no-op
+            // passive filter when STVT_EQ_DD_MU is unset/0).
+            filterN_dd(data_mem, data_mem2, ATSC_DATA_SEGMENT_LENGTH);
 
             memcpy(&out[output_produced * ATSC_DATA_SEGMENT_LENGTH],
                    data_mem2,

@@ -41,6 +41,7 @@ private:
     int d_errors_corrected;
     int d_erasure_decodes;
     int d_erasure_successes;
+    int d_miscorrections;
     int d_bad_packets;
 
     // Viterbi-confidence integration (Day 2/3 of the soft-Viterbi →

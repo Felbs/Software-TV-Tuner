@@ -36,6 +36,28 @@ from gnuradio import network
 # which is too wide; the shipped combo is alpha=0.001 + AFC tau=50us.
 from gnuradio import atscplus
 from gnuradio.dtv.atsc_rx_filter import atsc_rx_filter, ATSC_SYMBOL_RATE
+from gnuradio.filter import firdes
+
+
+def make_rx_filter(input_rate, sps):
+    """Tunable matched RRC filter (replica of dtv.atsc_rx_filter with a
+    shorter RRC span). STVT_RRC_SYMS (default 8 = stock) sets the half-span;
+    fewer symbols = fewer taps = less work in the chain's single-threaded
+    bottleneck. Offline replay confirmed decode stays 100% clean down to ~3
+    symbols. See memory live_drought_is_oso_not_rf."""
+    rrc_syms = int(os.environ.get("STVT_RRC_SYMS", "8"))
+    nfilts = int(os.environ.get("STVT_RX_NFILTS", "16"))
+    output_rate = ATSC_SYMBOL_RATE * sps
+    filter_rate = input_rate * nfilts
+    symbol_rate = ATSC_SYMBOL_RATE / 2.0
+    excess_bw = 0.1152
+    ntaps = int((2 * rrc_syms + 1) * sps * nfilts)
+    interp = output_rate / input_rate
+    gain = nfilts * symbol_rate / filter_rate
+    rrc_taps = firdes.root_raised_cosine(gain, filter_rate, symbol_rate,
+                                         excess_bw, ntaps)
+    LOG.info(f"rx_filter: rrc_syms={rrc_syms} nfilts={nfilts} ntaps={ntaps}")
+    return gr_filter.pfb_arb_resampler_ccf(interp, rrc_taps, nfilts)
 
 import numpy as np
 
@@ -211,8 +233,14 @@ class LiveTVTopBlock(gr.top_block):
         #   2. dc_blocker_ff post-PLL
         #   3. agc_ff between dc-block and sync
         #   4. fpll runs at output_rate (16143357), NOT 6.25M
-        SPS         = 1.5
-        output_rate = ATSC_SYMBOL_RATE * SPS    # ~16,143,357 Hz
+        # SPS = internal oversampling. 1.5 = stock (16.14 MS/s). Lowering it
+        # cuts the matched-filter/resampler + all front-end blocks ~proportionally
+        # — the real-time throughput lever for OsO. STVT_SPS overrides. Offline
+        # replay confirmed decode stays 100% clean down to ~1.0 (align tapers
+        # below ~1.1). See memory live_drought_is_oso_not_rf.
+        SPS         = float(os.environ.get("STVT_SPS", "1.5"))
+        output_rate = ATSC_SYMBOL_RATE * SPS    # ~16,143,357 Hz at SPS=1.5
+        LOG.info(f"SPS={SPS} output_rate={output_rate:.0f}")
 
         # ── SCALING MATCH ──
         # run_combo.py's file_source(short) -> interleaved_short_to_complex
@@ -293,7 +321,9 @@ class LiveTVTopBlock(gr.top_block):
         else:
             LOG.info("adaptive_notch: disabled (STVT_NOTCH=0)")
         # Front-end matched filter; outputs samples at output_rate (16.14 MS/s).
-        rxf  = atsc_rx_filter(ATSC_RX_SAMPLE_RATE, SPS)
+        rxf  = (make_rx_filter(ATSC_RX_SAMPLE_RATE, SPS)
+                if os.environ.get("STVT_RRC_SYMS")
+                else atsc_rx_filter(ATSC_RX_SAMPLE_RATE, SPS))
         # FPLL knobs via STVT_FPLL_ALPHA / STVT_FPLL_AFC_TAU env vars.
         _fpll_alpha   = float(os.environ.get("STVT_FPLL_ALPHA",   "0.001"))
         _fpll_afc_tau = float(os.environ.get("STVT_FPLL_AFC_TAU", "25"))
