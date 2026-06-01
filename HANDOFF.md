@@ -1,5 +1,53 @@
 # STVT handoff — 2026-05-31 (branch `linux-port-stvt-v2`)
 
+## UPDATE 2026-05-31 (later) — LIVE DECODE WORKS on the Threadripper (WSL)
+
+Direction B (live SDR test in WSL) succeeded. Key finding: **feed the RSPdx via
+SoapyRemote-over-TCP, NOT usbip.** usbip attaches the device fine but starves it
+to ~1 MS/s (vs 8 requested) — that gappy stream locks the FPLL pilot but kills
+segment sync (segs_aligned ~40%, no video). Running PothosSDR's SoapySDRServer
+natively on Windows and streaming IQ over TCP sustains 8.04 MS/s, 0 overflows.
+
+Result with full-quality config below: **segs_aligned 96.2%, TEI 0%, OsO ~8/45s,
+ffprobe shows mpeg2video 1920x1080 + AC3 + SD subchannels.** Full quality runs
+with huge headroom here — the lean Ryzen levers are NOT needed.
+
+Setup (see memory `wsl_sdr_use_soapyremote_not_usbip`):
+```
+usbipd.exe detach --busid 9-4                                   # release from usbip
+"/mnt/c/Program Files/PothosSDR/bin/SoapySDRServer.exe" --bind=0.0.0.0:55132   # IPv4 bind matters
+sudo sysctl -w net.core.rmem_max=67108864 net.core.wmem_max=67108864
+export STVT_SOAPY_ARGS="driver=remote,remote=127.0.0.1:55132,remote:driver=sdrplay"
+export STVT_STREAM_ARGS="remote:prot=tcp"      # key is remote:prot (gr-soapy rejects bare 'prot')
+export STVT_RS=stock STVT_VITERBI=hard STVT_EQ=long STVT_SPS=1.5 STVT_TEISCRUB=1 \
+       STVT_IFGR=59 STVT_RFGAIN_SEL=5 STVT_ANTENNA="Antenna A"
+python3 tools/tv_live.py --rf 34
+```
+Test harness used: `~/stvt_live_test.sh <label> <secs> [rf]` + `~/ts_analyze.py`.
+
+### Sustained live (for WATCHING, not 45s bursts)
+The 1.5/8-tap full-quality config is ~1.28x real-time → OsO creep over minutes.
+Use the LEAN real-time config for sustained viewing — verified clean for 11.7 min
+(t=700s, OsO=45 total, non-climbing, FPLL locked throughout, 98-100% real, TEI 0%):
+`tools/stvt_live_remote.sh [rf]` sets STVT_SPS=1.1 STVT_RRC_SYMS=4 STVT_TEISCRUB=1 + remote args.
+
+### Watching via mpv (WSLg)
+`tools/stvt_watch.sh [vid]` — follows live.ts ~25s behind the write head for a buffer
+cushion. Critical mpv flags learned the hard way:
+- `--vo=wlshm` — WSLg's GPU VO (zink/vdpau/EGL) stalls; software wlshm is smooth.
+- `--hwdec=no`, `--cache-pause=no` — never freeze on a brief underrun; plow through.
+- Result: 20s cache cushion, A-V 0.000, 0 buffering events.
+- mpv `--vid=N` numbering shuffles per start; press `_` in the window to cycle to
+  the 1080 HD video track. Audio (AC3) plays via PulseAudio (WSLg).
+
+### Crash-resilience
+Launch the server (`Start-Process` on Windows), chain, and mpv with `setsid` so a
+Claude-Code session crash doesn't kill them. SoapySDRServer launched via WSL interop
+dies with its launching session unless started detached via Start-Process.
+
+---
+
+
 Software ATSC TV tuner (SDRplay RSPdx → gr-atscplus chain → live.ts → mpv).
 This session found that the two long-standing live problems were **software/CPU,
 not RF** (proven by deterministic offline replay), and fixed both.
