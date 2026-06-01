@@ -22,7 +22,10 @@ tools/scan_lab/fixtures/
 # Build artifacts (not tracked)
 gr-atscplus/build/
 gr-atscplus/build_*/
-gr-atscplus/build.znver1.test/
+gr-atscplus/build.*/
+
+# Screenshots
+mpv-shot*.jpg
 
 # Editor / archive backups
 tools/*.pre_*
