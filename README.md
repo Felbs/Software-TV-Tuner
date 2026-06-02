@@ -145,6 +145,29 @@ from it in mpv.
 also works, but the two-process split below is the most robust for
 sustained viewing and is what the troubleshooting section assumes.
 
+### Easiest: one command, hands-off (recommended)
+
+```bash
+tools/stvt_run.sh 34 3        # RF channel 34, play program 3 (HD 1080)
+```
+
+`stvt_run.sh` supervises the whole pipeline for you: it starts the
+decoder chain with the lean config, starts the HD player once the
+chain locks, and **auto-recovers**. On a modest CPU the chain
+periodically slips into a "noise drought" (locks the carrier but
+decodes garbage — see Troubleshooting); the supervisor detects it and
+restarts the chain, then brings the player back, with a hard cap on
+restarts so a dead SDR can't spin forever. A drought shows up as a
+~40 s blip (picture freezes, window closes and reopens) instead of a
+permanent freeze. Stop everything with:
+
+```bash
+pkill -f stvt_run.sh; pkill -f tv_live.py; pkill -f stvt_play_hd.sh
+```
+
+The two steps below are what `stvt_run.sh` runs internally — use them
+directly if you want to drive the chain and player by hand.
+
 ### 1. Start the decoder chain
 
 ```bash
@@ -454,6 +477,10 @@ live edge shows hundreds or thousands of unique PIDs instead of
 accumulation after a long uptime, **not** RF. Fix: restart the
 decoder chain.
 
+**`tools/stvt_run.sh` does this automatically** — it watches the live
+edge and restarts the chain on a drought, so you rarely need to do it
+by hand. To restart manually:
+
 ```bash
 pkill -f tv_live.py
 rm tools/data/tv_live/live.ts            # start a fresh capture
@@ -463,7 +490,9 @@ rm tools/data/tv_live/live.ts            # start a fresh capture
 
 If it droughts again quickly, make sure `sudo tools/fix_linux_tuning.sh`
 was run this boot and that the SoapySDRPlay3 ring-buffer patch is
-applied — both directly reduce OsO.
+applied — both directly reduce OsO. Avoid running other CPU-heavy work
+(the matched filter needs a full core); even frequent `ffprobe`/PID
+sampling can tip a marginal CPU into more droughts.
 
 ### "Unknown codec / PID 0x30" when piping live.ts to ffmpeg
 
