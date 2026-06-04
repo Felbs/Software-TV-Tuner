@@ -3512,8 +3512,16 @@ def interactive_loop(cfg: dict, args) -> int:
     # None = off; 1 = CC1 (primary, English); 2 = CC2 (SAP, Spanish).
     cc_channel: int | None = (getattr(args, "cc_channel", 1)
                               if getattr(args, "cc", False) else None)
+    # Audio language state cycles English → Spanish → All-tracks.
+    # When changed, the user types 'a' to immediately kill+respawn the
+    # current channel with the new STVT_AUDIO_LANGUAGE, so they hear the
+    # new language within ~3 seconds of pressing 'a'.
+    audio_lang: str = os.environ.get("STVT_AUDIO_LANGUAGE", "eng")
+    if audio_lang not in ("eng", "spa", "all"):
+        audio_lang = "eng"
     current: subprocess.Popen | None = None
     last_label = ""
+    last_pick: dict | None = None   # remember last channel for 'a' respawn
 
     def _shutdown(*_):
         _kill_streaming(current)
@@ -3526,18 +3534,40 @@ def interactive_loop(cfg: dict, args) -> int:
         pass
 
     cc_label = {None: "OFF", 1: "EN", 2: "ES"}
+    audio_label = {"eng": "EN", "spa": "ES", "all": "BOTH"}
     try:
         while True:
             try:
                 tag = f" — now: {last_label}" if last_label else ""
                 ans = input(
                     f"\n📺  Channel?{tag}  [row #, virt 5.1, "
+                    f"a=audio ({audio_label[audio_lang]}), "
                     f"c=CC ({cc_label[cc_channel]}), g=guide, q=quit]: "
                 ).strip().lower()
             except EOFError:
                 break
             if ans in ("q", "quit", "exit"):
                 break
+            if ans in ("a", "audio"):
+                # Cycle: eng → spa → all → eng
+                audio_lang = {"eng": "spa", "spa": "all", "all": "eng"}[audio_lang]
+                os.environ["STVT_AUDIO_LANGUAGE"] = audio_lang
+                friendly = {"eng": "English only", "spa": "Spanish only",
+                            "all": "All audio tracks (VLC picks)"}[audio_lang]
+                print(f"  audio: {friendly}")
+                if last_pick is not None:
+                    print(f"  respawning current channel ({last_label}) "
+                          f"with new audio...")
+                    _kill_streaming(current)
+                    current = None
+                    _nuke_streaming_orphans()
+                    time.sleep(2)
+                    try:
+                        current = _launch_streaming(
+                            last_pick["rf"], last_pick["program"], cc_channel)
+                    except Exception as e:
+                        print(f"  respawn failed: {e}")
+                continue
             if ans in ("c", "cc"):
                 # Cycle: OFF → EN (CC1) → ES (CC2) → OFF
                 cc_channel = {None: 1, 1: 2, 2: None}[cc_channel]
@@ -3569,6 +3599,7 @@ def interactive_loop(cfg: dict, args) -> int:
             time.sleep(2)
             try:
                 current = _launch_streaming(r["rf"], r["program"], cc_channel)
+                last_pick = r
                 last_label = (f"{r['virtual']} {r['callsign']}"
                               + (f" {r.get('network', '')}"
                                  if r.get('network') and

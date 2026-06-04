@@ -47,30 +47,66 @@ def save_state(state: dict):
     STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
-def find_tv_tuner_pids() -> list[int]:
-    """Find python.exe processes currently running tv_tuner.py."""
+def find_tv_tuner_procs() -> list[tuple[int, str]]:
+    """Find python.exe processes running tv_tuner.py. Returns [(pid, cmdline)]."""
     if sys.platform != "win32":
         out = subprocess.run(
             ["pgrep", "-af", "tv_tuner.py"],
             capture_output=True, text=True,
         ).stdout
-        return [int(line.split()[0]) for line in out.splitlines()
-                if "tv_tuner.py" in line]
-    # Windows: use wmic to scan command lines
+        results = []
+        for line in out.splitlines():
+            if "tv_tuner.py" not in line:
+                continue
+            parts = line.split(maxsplit=1)
+            try:
+                results.append((int(parts[0]), parts[1] if len(parts) > 1 else ""))
+            except (ValueError, IndexError):
+                pass
+        return results
     out = subprocess.run(
         ["wmic", "process", "where", "name='python.exe'",
          "get", "ProcessId,CommandLine", "/format:csv"],
         capture_output=True, text=True,
     ).stdout
-    pids = []
+    results = []
     for line in out.splitlines():
-        if "tv_tuner.py" in line:
-            try:
-                pid = int(line.strip().rsplit(",", 1)[-1])
-                pids.append(pid)
-            except (ValueError, IndexError):
-                pass
-    return pids
+        if "tv_tuner.py" not in line:
+            continue
+        try:
+            parts = line.strip().rsplit(",", 1)
+            pid = int(parts[-1])
+            cmdline = parts[0] if len(parts) > 1 else ""
+            results.append((pid, cmdline))
+        except (ValueError, IndexError):
+            pass
+    return results
+
+
+def find_tv_tuner_pids() -> list[int]:
+    return [pid for pid, _ in find_tv_tuner_procs()]
+
+
+def detect_current_rf_program() -> tuple[int | None, int | None]:
+    """Inspect the running tv_tuner.py command line for --rf and --program-id.
+    Used so the toggle can respawn the exact channel the user is watching
+    without reading state files. Returns (rf, program) — None on either if
+    not detectable."""
+    rf = program = None
+    for _, cmdline in find_tv_tuner_procs():
+        toks = cmdline.split()
+        for i, t in enumerate(toks):
+            if t in ("--rf",) and i + 1 < len(toks):
+                try:
+                    rf = int(toks[i + 1])
+                except ValueError:
+                    pass
+            if t in ("--program-id", "--program") and i + 1 < len(toks):
+                try:
+                    program = int(toks[i + 1])
+                except ValueError:
+                    pass
+    return rf, program
 
 
 def kill_running():
@@ -98,17 +134,46 @@ def kill_running():
     time.sleep(2)
 
 
+# Winning chain config the tuner discovered. Set these whenever we
+# spawn a fresh chain so the user doesn't have to remember them.
+CHAIN_DEFAULTS = {
+    "STVT_EQ":           "long",
+    "STVT_RS":           "stock",
+    "STVT_VITERBI":      "soft",
+    "STVT_SPS":          "1.1",
+    "STVT_RRC_SYMS":     "8",
+    "STVT_TEISCRUB":     "1",
+    "STVT_EQ_LKG":       "1",
+    "STVT_EQ_LKG_RMS":   "1.0",
+    "STVT_IFGR":         "45",
+    "STVT_RFGAIN_SEL":   "3",
+    "STVT_ANTENNA":      "Antenna A",
+    "STVT_SUB_MARGIN":   "10",
+}
+
+
 def respawn(rf: int, program: int, language: str):
-    """Spawn a fresh tv_tuner.py with the requested audio language."""
+    """Spawn a fresh tv_tuner.py with the requested audio language.
+    Always set the winning chain env vars so the user can launch
+    from any shell (even a desktop shortcut) and get clean decode."""
     env = os.environ.copy()
+    # Don't override if user already exported a value, but seed any missing.
+    for k, v in CHAIN_DEFAULTS.items():
+        env.setdefault(k, v)
     env["STVT_AUDIO_LANGUAGE"] = language
     cmd = [sys.executable, "-u", str(TV_TUNER_PY),
            "--rf", str(rf), "--player", "vlc"]
     if program and program != 1:
         cmd += ["--program-id", str(program)]
     if sys.platform == "win32":
-        DETACHED = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-        proc = subprocess.Popen(cmd, env=env, creationflags=DETACHED)
+        # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+        # The NO_WINDOW flag is what stops the console pop-ups when called
+        # from the hotkey listener or a desktop shortcut.
+        DETACHED = 0x00000008 | 0x00000200 | 0x08000000
+        proc = subprocess.Popen(
+            cmd, env=env, creationflags=DETACHED,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
     else:
         proc = subprocess.Popen(cmd, env=env, start_new_session=True)
     print(f"[audio-lang] respawned tv_tuner.py (PID {proc.pid}) "
@@ -142,8 +207,12 @@ def main() -> int:
     else:
         new = args.action
 
-    rf = args.rf or state.get("rf") or 34
-    program = args.program or state.get("program") or 1
+    # Priority: --rf arg -> currently running tv_tuner -> saved state -> default
+    detected_rf, detected_program = detect_current_rf_program()
+    rf = args.rf or detected_rf or state.get("rf") or 34
+    program = args.program or detected_program or state.get("program") or 1
+    print(f"[audio-lang] using rf={rf} program={program} (detected from "
+          f"running picker: rf={detected_rf} program={detected_program})")
 
     kill_running()
     respawn(rf, program, new)
