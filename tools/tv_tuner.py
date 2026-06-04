@@ -110,6 +110,7 @@ PYTHON_EXE = _resolve_python_exe()
 FFMPEG = _resolve_binary("ffmpeg", r"C:\ffmpeg\bin\ffmpeg.exe")
 FFPLAY = _resolve_binary("ffplay", r"C:\ffmpeg\bin\ffplay.exe")
 FFPROBE = _resolve_binary("ffprobe", r"C:\ffmpeg\bin\ffprobe.exe")
+VLC = _resolve_binary("vlc", r"C:\Program Files\VideoLAN\VLC\vlc.exe")
 # ffmpeg analyzeduration / probesize for the live-TS pipeline.
 # ffmpeg sees the raw noisy TS straight from the GR flowgraph, so on
 # Linux/Mac it needs a larger probe budget to find programs through
@@ -1073,22 +1074,70 @@ def build_ffmpeg_cmd(play: bool, record_path: Path | None,
                      stream_url: str | None,
                      program: int = 1,
                      captions: bool = False,
-                     passthrough: bool = False) -> list[str]:
+                     passthrough: bool = False,
+                     copy_mode: bool = False) -> list[str]:
     """Build the central ffmpeg command line.
 
-    Two modes:
-      * Default (transcoding): Always re-encodes — passthrough exposes
-        raw 1080i interlace combing and unconcealed mpeg2 macroblock
-        breakage from TEI scrubs. Local play uses h264_nvenc + yadif;
-        record/stream same encoder fanned through tee.
-      * passthrough=True (Linux fast-play): Minimal copy-mode pipeline.
-        Selects one program with -map and re-muxes to mpegts on stdout
-        with -c copy — no transcoding, no encoders involved. Used on
-        Linux to dodge the NVENC-encoder-init fragility that fails on
-        the corrupt USB-fed MPEG-TS, while still filtering down to a
-        single program so ffplay doesn't rotate through the multiplex.
-        Only valid when play=True with no record/stream sinks.
+    Three modes:
+      * Default (transcoding): h264_nvenc + AAC re-encode for ffplay.
+      * copy_mode=True: TRUE passthrough — `-c copy` for video and audio.
+        Preserves original mpeg2video frames with CEA-608 user_data + the
+        AC3 audio + original PTS. Players like VLC render captions in
+        perfect sync because they see the same frames the broadcaster sent.
+        Used when player='vlc' and we're only playing.
+      * passthrough=True (Linux fast-play): libx264 re-encode for ffplay
+        on Linux to dodge NVENC init issues.
     """
+    if copy_mode:
+        # Pure passthrough for VLC. -c copy keeps mpeg2video + AC3 + CEA-608
+        # user_data untouched so VLC's CEA-608 decoder reads captions from
+        # the SAME frames it decodes for video — guaranteed sync.
+        #
+        # Audio track selection: VLC's stdin mpegts demuxer is unreliable
+        # at switching between multiple audio tracks (the B-key cycle
+        # falls back to English regardless of --audio-track / --audio-language).
+        # Workaround: have ffmpeg deliver ONLY the language we want.
+        # STVT_AUDIO_LANGUAGE=eng (default) sends English; spa sends
+        # Spanish SAP; empty/"all" sends everything (VLC can choose).
+        lang = os.environ.get("STVT_AUDIO_LANGUAGE", "eng").lower()
+        cmd = [
+            FFMPEG,
+            "-hide_banner", "-loglevel", "warning",
+            "-fflags", "+genpts+igndts+discardcorrupt",
+            "-err_detect", "ignore_err",
+            "-analyzeduration", "5000000",
+            "-probesize", "5000000",
+            "-thread_queue_size", "4096",
+            "-f", "mpegts",
+            "-i", "pipe:0",
+        ]
+        if lang in ("", "all"):
+            cmd += ["-map", f"0:p:{program}"]
+        elif lang in ("eng", "english", "en"):
+            # English = first audio track on US ATSC. -map by index is
+            # cheapest and most reliable (no language-tag fallback path).
+            cmd += [
+                "-map", f"0:p:{program}:v",
+                "-map", f"0:p:{program}:a:0",
+            ]
+        else:
+            # Other language (typically "spa"): match by language tag.
+            # NO backstop — if the channel doesn't carry that language,
+            # we get video+silence so the user knows. Adding a fallback
+            # to first-audio would silently include English alongside,
+            # which is exactly what we were trying to avoid.
+            cmd += [
+                "-map", f"0:p:{program}:v",
+                "-map", f"0:p:{program}:m:language:{lang}",
+            ]
+        cmd += [
+            "-c", "copy",
+            "-copy_unknown",
+            "-f", "mpegts",
+            "pipe:1",
+        ]
+        return cmd
+
     if passthrough:
         # 2026-05-26 late evening: libx264 re-encode. `-c copy` is smoother
         # when mpv's probe succeeds, but probe failure is too common on this
@@ -1223,12 +1272,68 @@ def spawn_ffmpeg(cmd: list[str], log_fh, want_stdout_pipe: bool):
 
 
 def spawn_ffplay(window_title: str, log_fh):
-    # Optional alternative player — mpv has a more robust mpegts demuxer than
-    # ffplay's (better recovery from PES corruption, larger built-in buffer).
-    # On marginal/CPU-bound systems where ffplay drops the window with
-    # "could not find codec parameters", mpv often still renders. Activate
-    # via STVT_PLAYER=mpv. Default remains ffplay (Windows runtime).
-    if os.environ.get("STVT_PLAYER", "ffplay") == "mpv":
+    # Optional alternative players — mpv has a more robust mpegts demuxer than
+    # ffplay's; VLC has a built-in 3s buffer + native CEA-608 caption overlay +
+    # easy audio-track switching (B key cycles Spanish/English on multi-lingual
+    # programs, V key toggles captions). Activate via STVT_PLAYER=mpv or
+    # STVT_PLAYER=vlc. Default remains ffplay for back-compat on Linux.
+    player_choice = os.environ.get("STVT_PLAYER", "ffplay")
+
+    if player_choice == "vlc":
+        # VLC eats raw mpegts on stdin if we tell it the access method and the
+        # demux. Caches absorb the chain's drought windows. Native CC overlay
+        # is on by default (--sub-track 0 picks the first CEA-608 track when
+        # ATSC user_data exposes one).
+        #
+        # Caption styling matches traditional broadcast CC: monospaced white
+        # text on solid black box, bottom strip of the screen. All knobs
+        # overridable via STVT_SUB_* env vars.
+        sub_margin     = os.environ.get("STVT_SUB_MARGIN",      "40")    # px from bottom
+        sub_fontsize   = os.environ.get("STVT_SUB_FONTSIZE",    "20")    # relative
+        sub_font       = os.environ.get("STVT_SUB_FONT",        "Lucida Console")
+        sub_color      = os.environ.get("STVT_SUB_COLOR",       "16777215")  # white
+        sub_bg_color   = os.environ.get("STVT_SUB_BG_COLOR",    "0")     # black
+        sub_bg_opacity = os.environ.get("STVT_SUB_BG_OPACITY",  "255")   # solid
+        sub_outline    = os.environ.get("STVT_SUB_OUTLINE",     "0")     # no outline
+        sub_shadow_op  = os.environ.get("STVT_SUB_SHADOW",      "0")     # no shadow
+        cmd = [VLC,
+               "--no-video-title-show",
+               "--meta-title", window_title,
+               "--file-caching", "3000",
+               "--network-caching", "3000",
+               "--live-caching", "3000",
+               "--sout-mux-caching", "3000",
+               "--clock-jitter", "1000",
+               "--no-osd",
+               # Default: track 0 = first audio (usually English on US ATSC).
+               # Set STVT_AUDIO_TRACK=1 to start on Spanish SAP; B key cycles
+               # English → Spanish → Disabled → English → ... (three states).
+               # --audio-language is more reliable than --audio-track for
+               # stdin mpegts (VLC's track indexing is inconsistent across
+               # versions). Default "eng" if unset; set STVT_AUDIO_LANGUAGE=spa
+               # to start on the Spanish SAP track when present.
+               "--sub-track", "0",
+               "--audio-track", os.environ.get("STVT_AUDIO_TRACK", "0"),
+               "--audio-language", os.environ.get("STVT_AUDIO_LANGUAGE", "eng"),
+               # Traditional CC look — white monospaced on solid black box
+               "--sub-margin",                sub_margin,
+               "--freetype-rel-fontsize",     sub_fontsize,
+               "--freetype-font",             sub_font,
+               "--freetype-color",            sub_color,
+               "--freetype-background-color", sub_bg_color,
+               "--freetype-background-opacity", sub_bg_opacity,
+               "--freetype-outline-thickness", sub_outline,
+               "--freetype-shadow-opacity",   sub_shadow_op,
+               "-"]
+        return subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=log_fh,
+            stderr=log_fh,
+            creationflags=NEW_PROCESS_GROUP,
+        )
+
+    if player_choice == "mpv":
         # 2026-05-15: bumped cache-secs 4→20 and added demuxer-max-bytes
         # so the cache absorbs the ~25-30s drought windows we observed
         # in the chain log. Tradeoff: ~20s startup delay (cache must
@@ -2544,7 +2649,12 @@ def run_pipeline(rf: int, callsign: str, play: bool,
         if player == "magic":
             print("[tv_tuner] --record/--stream require ffplay player path; "
                   "switching player from 'magic' to 'ffplay'.")
-        player = "ffplay"
+    # Propagate player choice to spawn_ffplay (it reads STVT_PLAYER from env).
+    # vlc / mpv take over here even though the function is named spawn_ffplay.
+    # DO NOT also rebind `player` itself — downstream code (vlc_copy_mode
+    # check) needs to see the actual choice.
+    if player in ("vlc", "mpv", "ffplay"):
+        os.environ["STVT_PLAYER"] = player
     if not (play or stream_url or record_path):
         # No outputs requested → still allow it if user is just locking
         # the tuner; emit warning.
@@ -2577,11 +2687,22 @@ def run_pipeline(rf: int, callsign: str, play: bool,
         and player == "ffplay"
         and os.environ.get("STVT_LINUX_FAST_PLAY", "1") != "0"
     )
+    # VLC handles raw mpeg2 + AC3 natively AND extracts CEA-608 from
+    # user_data in sync with video frames — only works if we pass the
+    # original stream through untouched (no h264_nvenc re-encode).
+    vlc_copy_mode = (
+        play
+        and record_path is None
+        and stream_url is None
+        and player == "vlc"
+        and os.environ.get("STVT_VLC_COPY_MODE", "1") != "0"
+    )
 
     cmd = build_ffmpeg_cmd(play=play, record_path=record_path,
                            stream_url=stream_url, program=program,
                            captions=captions,
-                           passthrough=linux_fast_play)
+                           passthrough=linux_fast_play,
+                           copy_mode=vlc_copy_mode)
 
     if dry_run:
         print("── DRY RUN ──")
@@ -2907,7 +3028,8 @@ def run_pipeline(rf: int, callsign: str, play: bool,
                         play=play, record_path=record_path,
                         stream_url=stream_url, program=actual_pid,
                         captions=captions,
-                        passthrough=linux_fast_play)
+                        passthrough=linux_fast_play,
+                        copy_mode=vlc_copy_mode)
                 elif actual_pid is None:
                     print(f"[tv_tuner] WARN: could not probe program list; "
                           f"using --program {program} as program_id "
@@ -2976,7 +3098,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "1-based-index translation — for the interactive "
                         "picker and other callers that already know the "
                         "real id.")
-    p.add_argument("--player", choices=["magic", "ffplay"], default="ffplay",
+    p.add_argument("--player", choices=["magic", "ffplay", "vlc", "mpv"], default="ffplay",
                    help="Playback engine. 'ffplay' (default) uses ffmpeg "
                         "re-encode + ffplay — single window, simpler UX. "
                         "'magic' uses our resilient tv_player.py with "
@@ -3114,16 +3236,32 @@ def _launch_streaming(rf: int, program: int,
     window. The streaming output ([2s] tv=OK ff=OK ...) appears in
     that window; the picker console stays clean for the next pick.
 
+    Player choice: VLC on Windows when available (smooth playback +
+    native CC overlay + audio-track hotkey B for Spanish), else ffplay.
+    Override with $STVT_PLAYER=ffplay|vlc|mpv.
+
     `caption_channel` selects which CEA-608 channel the side window
     decodes: 1 = primary (English), 2 = SAP/secondary (Spanish), or
-    None = captions off entirely."""
+    None = captions off entirely. When VLC is the player, captions are
+    rendered ON the video instead of a separate console — VLC's V key
+    cycles tracks live and B cycles audio (English/Spanish)."""
+    player = os.environ.get("STVT_PLAYER")
+    if player not in ("ffplay", "vlc", "mpv"):
+        # Auto-pick: VLC on Windows if installed (smoothest), else ffplay.
+        if sys.platform == "win32" and os.path.exists(VLC):
+            player = "vlc"
+        else:
+            player = "ffplay"
     cmd = [
         PYTHON_EXE, "-u", str(Path(__file__).resolve()),
         "--rf", str(rf),
         "--program-id", str(program),
-        "--player", "ffplay",
+        "--player", player,
     ]
-    if caption_channel is not None:
+    # VLC overlays CC on the video itself, so we DON'T spawn the side
+    # console window when VLC is the player. The caller still tracks the
+    # CC channel choice so the picker UI label stays in sync.
+    if caption_channel is not None and player != "vlc":
         cmd.extend(["--cc", "--cc-channel", str(caption_channel)])
     return _spawn_in_new_console(cmd)
 
