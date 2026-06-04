@@ -27,6 +27,20 @@ try:
 except Exception:
     pass
 
+# ── Windows: surface SDRplay API DLL to radioconda ───────────
+# The SDRplay vendor installer puts sdrplay_api.dll at C:\Program Files\
+# SDRplay\API\x64\ but radioconda's env doesn't inherit that PATH entry,
+# so SoapySDR's sdrPlaySupport.dll fails to load. Both PATH (for child
+# procs) and add_dll_directory (for LoadLibrary in this proc) are needed.
+if sys.platform == "win32":
+    _sdrplay_api_x64 = r"C:\Program Files\SDRplay\API\x64"
+    if os.path.isdir(_sdrplay_api_x64):
+        os.environ["PATH"] = _sdrplay_api_x64 + os.pathsep + os.environ.get("PATH", "")
+        try:
+            os.add_dll_directory(_sdrplay_api_x64)
+        except (AttributeError, OSError):
+            pass
+
 from gnuradio import gr, blocks, analog, dtv
 from gnuradio import filter as gr_filter
 from gnuradio import soapy
