@@ -19,6 +19,15 @@ set(CMAKE_BUILD_TYPE
 cmake_minimum_required(VERSION 3.8)
 project(gr-atscplus CXX C)
 enable_testing()
+########################################################################
+# Eco-mode equalizer (NTAPS=128)
+########################################################################
+option(ATSC_EQ_ECO "Eco-mode equalizer: NTAPS=128 instead of 256" OFF)
+if(ATSC_EQ_ECO)
+    add_definitions(-DATSC_EQ_ECO)
+    message(STATUS "ATSC_EQ_ECO enabled: equalizer NTAPS=128")
+endif()
+
 
 # Install to PyBOMBS target prefix if defined
 if(DEFINED ENV{PYBOMBS_PREFIX})
@@ -34,7 +43,7 @@ endif()
 # Make sure our local CMake Modules path comes first
 list(INSERT CMAKE_MODULE_PATH 0 ${PROJECT_SOURCE_DIR}/cmake/Modules)
 # Find gnuradio to get access to the cmake modules
-find_package(Gnuradio "3.10" REQUIRED COMPONENTS runtime dtv filter analog blocks fft)
+find_package(Gnuradio "3.10" REQUIRED COMPONENTS runtime dtv fec filter analog blocks fft)
 find_package(Volk REQUIRED)
 
 # Set the version information here

@@ -36,6 +36,28 @@ from gnuradio import network
 # which is too wide; the shipped combo is alpha=0.001 + AFC tau=50us.
 from gnuradio import atscplus
 from gnuradio.dtv.atsc_rx_filter import atsc_rx_filter, ATSC_SYMBOL_RATE
+from gnuradio.filter import firdes
+
+
+def make_rx_filter(input_rate, sps):
+    """Tunable matched RRC filter (replica of dtv.atsc_rx_filter with a
+    shorter RRC span). STVT_RRC_SYMS (default 8 = stock) sets the half-span;
+    fewer symbols = fewer taps = less work in the chain's single-threaded
+    bottleneck. Offline replay confirmed decode stays 100% clean down to ~3
+    symbols. See memory live_drought_is_oso_not_rf."""
+    rrc_syms = int(os.environ.get("STVT_RRC_SYMS", "8"))
+    nfilts = int(os.environ.get("STVT_RX_NFILTS", "16"))
+    output_rate = ATSC_SYMBOL_RATE * sps
+    filter_rate = input_rate * nfilts
+    symbol_rate = ATSC_SYMBOL_RATE / 2.0
+    excess_bw = 0.1152
+    ntaps = int((2 * rrc_syms + 1) * sps * nfilts)
+    interp = output_rate / input_rate
+    gain = nfilts * symbol_rate / filter_rate
+    rrc_taps = firdes.root_raised_cosine(gain, filter_rate, symbol_rate,
+                                         excess_bw, ntaps)
+    LOG.info(f"rx_filter: rrc_syms={rrc_syms} nfilts={nfilts} ntaps={ntaps}")
+    return gr_filter.pfb_arb_resampler_ccf(interp, rrc_taps, nfilts)
 
 import numpy as np
 
@@ -143,22 +165,64 @@ class LiveTVTopBlock(gr.top_block):
                     raise
         if src is None:
             raise RuntimeError(f"SDR open gave up: {last_err}")
+        # Gain knobs: STVT_IFGR, STVT_RFGAIN_SEL, STVT_ANTENNA env vars override config defaults.
+        _ifgr    = int(os.environ.get("STVT_IFGR",        ATSC_IF_GAIN_REDUCTION))
+        _rfgsel  = int(os.environ.get("STVT_RFGAIN_SEL",  ATSC_RFGAIN_SEL))
+        _antenna = os.environ.get("STVT_ANTENNA",         ATSC_ANTENNA)
+        LOG.info(f"gain knobs: IFGR={_ifgr} rfgain_sel={_rfgsel} antenna={_antenna}")
+
         src.set_sample_rate(0, ATSC_NATIVE_SAMPLE_RATE)
         src.set_frequency(0, freq)
-        src.set_antenna(0, ATSC_ANTENNA)
-        # Disable AGC so manual IFGR/RFGR settings stick.
+        src.set_antenna(0, _antenna)
+        # AGC: default OFF (manual gain via IFGR/RFGR), but STVT_SDR_AGC=1
+        # enables the SDR's internal AGC. Useful when RF level drifts and
+        # samples clip faster than manual gain can compensate. Observed
+        # 2026-05-22 with max|x|=1.57 clips ~50s after lock, killing chain.
+        # Hardware AGC adapts in microseconds.
+        _sdr_agc = int(os.environ.get("STVT_SDR_AGC", "0"))
         try:
-            src.set_gain_mode(0, False)
+            src.set_gain_mode(0, bool(_sdr_agc))
         except Exception:
             pass
         try:
-            src.set_gain(0, "IFGR", float(ATSC_IF_GAIN_REDUCTION))
+            src.set_gain(0, "IFGR", float(_ifgr))
         except Exception:
-            src.set_gain(0, float(ATSC_IF_GAIN_REDUCTION))
+            src.set_gain(0, float(_ifgr))
         try:
-            src.write_setting("rfgain_sel", str(ATSC_RFGAIN_SEL))
+            src.write_setting("rfgain_sel", str(_rfgsel))
         except Exception:
             pass
+
+        # 2026-05-22 Day 16: expose RSPdx-specific SoapySDR tunables. These
+        # are no-ops on RSP1/RSP2 (write_setting just fails silently). All
+        # default to "leave alone" — opt-in via env vars.
+        #
+        #   STVT_RFNOTCH=1   enable RF notch (FM/AM rejection). Harmless
+        #                    for UHF ATSC (FM is 88-108 MHz, far away),
+        #                    but can suppress intermod from strong nearby
+        #                    FM broadcasts. Worth trying on marginal lock.
+        #   STVT_DABNOTCH=1  enable DAB-band notch (174-240 MHz). Not
+        #                    useful for UHF ATSC unless you have a strong
+        #                    DAB transmitter near the antenna.
+        #   STVT_IQCORR=1    enable IQ correction (DC offset + imbalance).
+        #                    Generally improves dynamic range; cost is
+        #                    a tiny CPU bump. Try ON if image rejection
+        #                    issues are suspected.
+        #   STVT_BIAST=1     enable bias-T (only for active antennas).
+        #
+        for env_key, soapy_key in [
+            ("STVT_RFNOTCH",  "rfnotch_ctrl"),
+            ("STVT_DABNOTCH", "dabnotch_ctrl"),
+            ("STVT_IQCORR",   "iqcorr_ctrl"),
+            ("STVT_BIAST",    "biasT_ctrl"),
+        ]:
+            v = os.environ.get(env_key)
+            if v is not None:
+                try:
+                    src.write_setting(soapy_key, "true" if v == "1" else "false")
+                    LOG.info(f"soapy: {soapy_key}={'true' if v == '1' else 'false'} ({env_key})")
+                except Exception as exc:
+                    LOG.info(f"soapy: {soapy_key} write failed ({exc!r})")
 
         # ── EXACT REPLICA OF run_combo.py fpll_a002_tau20 PIPELINE ──
         # The proven offline chain that gave clean decode:
@@ -169,8 +233,14 @@ class LiveTVTopBlock(gr.top_block):
         #   2. dc_blocker_ff post-PLL
         #   3. agc_ff between dc-block and sync
         #   4. fpll runs at output_rate (16143357), NOT 6.25M
-        SPS         = 1.5
-        output_rate = ATSC_SYMBOL_RATE * SPS    # ~16,143,357 Hz
+        # SPS = internal oversampling. 1.5 = stock (16.14 MS/s). Lowering it
+        # cuts the matched-filter/resampler + all front-end blocks ~proportionally
+        # — the real-time throughput lever for OsO. STVT_SPS overrides. Offline
+        # replay confirmed decode stays 100% clean down to ~1.0 (align tapers
+        # below ~1.1). See memory live_drought_is_oso_not_rf.
+        SPS         = float(os.environ.get("STVT_SPS", "1.5"))
+        output_rate = ATSC_SYMBOL_RATE * SPS    # ~16,143,357 Hz at SPS=1.5
+        LOG.info(f"SPS={SPS} output_rate={output_rate:.0f}")
 
         # ── SCALING MATCH ──
         # run_combo.py's file_source(short) -> interleaved_short_to_complex
@@ -181,31 +251,140 @@ class LiveTVTopBlock(gr.top_block):
         # to the offline chain's input (and AGC will trim per-block anyway).
         scaler = blocks.multiply_const_cc(32768.0)
 
-        # Software resample 8 MS/s -> 6.25 MS/s with the proven 25/32 ratio.
-        resamp = gr_filter.rational_resampler_ccc(
-            interpolation=RESAMP_INTERP, decimation=RESAMP_DECIM,
-        )
+        # 2026-05-22 Day 18: optional impulse noise blanker BEFORE resamp.
+        # Enable with STVT_NB=1 (default off). Clips samples above
+        # STVT_NB_THRESHOLD × running |sample| EMA, blanks STVT_NB_BLANK_SAMPLES
+        # consecutive samples per trigger. Helps with impulse interference
+        # (lightning, ignition, electrical arcing) that would otherwise saturate
+        # the matched filter / equalizer.
+        nb = None
+        if int(os.environ.get("STVT_NB", "0")):
+            _nb_thresh = float(os.environ.get("STVT_NB_THRESHOLD",     "3.0"))
+            _nb_blank  = int  (os.environ.get("STVT_NB_BLANK_SAMPLES", "8"))
+            _nb_alpha  = float(os.environ.get("STVT_NB_ALPHA",         "1e-4"))
+            nb = atscplus.atsc_noise_blanker(_nb_thresh, _nb_blank, _nb_alpha)
+            LOG.info(f"noise_blanker: ENABLED thresh={_nb_thresh} "
+                     f"blank_samples={_nb_blank} alpha={_nb_alpha}")
+        else:
+            LOG.info("noise_blanker: disabled (STVT_NB=0)")
+
+        # Software resample to 6.25 MS/s. If STVT_SKIP_RESAMP=1, the SDR
+        # is already running at the right rate (set STVT_NATIVE_RATE=6250000)
+        # and we omit the resampler entirely — saves a CPU stage that was
+        # contributing to OsO sample-overflow bursts.
+        if int(os.environ.get("STVT_SKIP_RESAMP", "0")):
+            resamp = None
+            LOG.info("resampler: SKIPPED (STVT_SKIP_RESAMP=1)")
+        else:
+            resamp = gr_filter.rational_resampler_ccc(
+                interpolation=RESAMP_INTERP, decimation=RESAMP_DECIM,
+            )
+            LOG.info(f"resampler: {RESAMP_INTERP}/{RESAMP_DECIM}")
+        # 2026-05-29 SPECTRAL SMOOTHER — FFT-domain outlier suppression.
+        # Per-block (no IIR transients), suppresses bins that are >K×
+        # the local-median neighborhood. Smooth proportional pull-down
+        # (no flapping). Same chain position as the (disabled) adaptive
+        # notch. Disabled by default (STVT_SPECTRAL=0).
+        smoother = None
+        if int(os.environ.get("STVT_SPECTRAL", "0")):
+            _sm_fft   = int  (os.environ.get("STVT_SPECTRAL_FFT",          "1024"))
+            _sm_nbr   = int  (os.environ.get("STVT_SPECTRAL_NEIGHBORHOOD", "32"))
+            _sm_thr   = float(os.environ.get("STVT_SPECTRAL_THRESH",       "3.0"))
+            smoother = atscplus.atsc_spectral_smoother(
+                ATSC_RX_SAMPLE_RATE, _sm_fft, _sm_nbr, _sm_thr)
+            LOG.info(f"spectral_smoother: ENABLED fft={_sm_fft} "
+                     f"neighborhood={_sm_nbr} thresh={_sm_thr}")
+        else:
+            LOG.info("spectral_smoother: disabled (STVT_SPECTRAL=0)")
+
+        # 2026-05-29 ADAPTIVE NOTCH — narrowband interferer suppression.
+        # Inserted between the resampler and the matched filter so it runs
+        # at the chain's working sample rate (ATSC_RX_SAMPLE_RATE = 6.25 MS/s)
+        # where the pilot offset and ATSC band edges are well-defined.
+        # Disabled by default (STVT_NOTCH=0); when enabled, periodically
+        # FFTs the input, finds the strongest non-pilot peak, and notches
+        # it with a sharp complex IIR.
+        notch = None
+        if int(os.environ.get("STVT_NOTCH", "0")):
+            _notch_fft    = int  (os.environ.get("STVT_NOTCH_FFT",         "1024"))
+            _notch_thresh = float(os.environ.get("STVT_NOTCH_THRESH_DB",   "12.0"))
+            _notch_r      = float(os.environ.get("STVT_NOTCH_R",           "0.985"))
+            _notch_pilot  = float(os.environ.get("STVT_NOTCH_PILOT_HZ",   "-2.69e6"))
+            _notch_guard  = float(os.environ.get("STVT_NOTCH_GUARD_HZ",    "200e3"))
+            notch = atscplus.atsc_adaptive_notch(
+                ATSC_RX_SAMPLE_RATE,
+                _notch_fft, _notch_thresh, _notch_r,
+                _notch_pilot, _notch_guard)
+            LOG.info(f"adaptive_notch: ENABLED fft={_notch_fft} "
+                     f"thresh_db={_notch_thresh} r={_notch_r} "
+                     f"pilot_offset={_notch_pilot} guard={_notch_guard}")
+        else:
+            LOG.info("adaptive_notch: disabled (STVT_NOTCH=0)")
         # Front-end matched filter; outputs samples at output_rate (16.14 MS/s).
-        rxf  = atsc_rx_filter(ATSC_RX_SAMPLE_RATE, SPS)
-        # Tight-FPLL — the unlock. Operates at output_rate. Tightened
-        # from (0.002, 20.0) to (0.001, 50.0) per Tier 7 finding: the
-        # post-t=60s "equalizer drift" was actually FPLL margin loss.
-        # 90s real-RF test: PAT=97 distinct=34 TEI=0% zero CC jumps.
-        fpll = atscplus.atsc_fpll_tight(output_rate, 0.001, 50.0)
-        # Smaller DC blocker (32 taps vs 4096) — cuts CPU significantly
-        # while still removing residual DC at 16.14 MS/s.
-        dcr  = gr_filter.dc_blocker_ff(32)
-        # Slower AGC (1e-6) lets the long equalizer settle on stable amplitude.
-        agc  = analog.agc_ff(1e-6, 4.0)
-        sync = dtv.atsc_sync(output_rate)
+        rxf  = (make_rx_filter(ATSC_RX_SAMPLE_RATE, SPS)
+                if os.environ.get("STVT_RRC_SYMS")
+                else atsc_rx_filter(ATSC_RX_SAMPLE_RATE, SPS))
+        # FPLL knobs via STVT_FPLL_ALPHA / STVT_FPLL_AFC_TAU env vars.
+        _fpll_alpha   = float(os.environ.get("STVT_FPLL_ALPHA",   "0.001"))
+        _fpll_afc_tau = float(os.environ.get("STVT_FPLL_AFC_TAU", "25"))
+        fpll = atscplus.atsc_fpll_tight(output_rate, _fpll_alpha, _fpll_afc_tau)
+        LOG.info(f"fpll: alpha={_fpll_alpha} afc_tau_us={_fpll_afc_tau}")
+
+        # DC blocker tap count via STVT_DCR_TAPS env var.
+        _dcr_taps = int(os.environ.get("STVT_DCR_TAPS", "32"))
+        dcr  = gr_filter.dc_blocker_ff(_dcr_taps)
+
+        # AGC knobs via STVT_AGC_ALPHA / STVT_AGC_REFERENCE env vars.
+        _agc_alpha = float(os.environ.get("STVT_AGC_ALPHA",     "1e-6"))
+        _agc_ref   = float(os.environ.get("STVT_AGC_REFERENCE", "4.0"))
+        agc  = analog.agc_ff(_agc_alpha, _agc_ref)
+        LOG.info(f"agc: alpha={_agc_alpha} ref={_agc_ref}  dc_blocker_taps={_dcr_taps}")
+        sync = atscplus.atsc_sync_soft(output_rate)
         fs_check = atscplus.atsc_fs_checker_inst()
-        # 256-tap LMS equalizer from the gr-atscplus fork — drops PAT count
-        # from 2/14MB → 97/14MB, distinct PIDs 7841 → 29, TEI 100% → 0%.
-        # Convergence is probabilistic (~1 in 3 cold-starts); see watchdog.
-        equalizer = atscplus.atsc_equalizer_long()
-        viterbi = dtv.atsc_viterbi_decoder()
-        deinterleaver = dtv.atsc_deinterleaver()
-        rs = dtv.atsc_rs_decoder()
+        # Equalizer selected by STVT_EQ env var. Menu in run_ab.sh.
+        _eq_name = os.environ.get("STVT_EQ", "long")
+        if   _eq_name == "long":          equalizer = atscplus.atsc_equalizer_long()
+        elif _eq_name == "pilot":         equalizer = atscplus.atsc_equalizer_pilot()
+        elif _eq_name == "pilot_dd":      equalizer = atscplus.atsc_equalizer_pilot_dd()
+        elif _eq_name == "pilot_dd_soft": equalizer = atscplus.atsc_equalizer_pilot_dd_soft()
+        elif _eq_name == "cma":           equalizer = atscplus.atsc_equalizer_cma()
+        elif _eq_name == "multifs":       equalizer = atscplus.atsc_equalizer_pilot_multifs()
+        elif _eq_name == "multifs_dd":    equalizer = atscplus.atsc_equalizer_pilot_multifs_dd()
+        elif _eq_name == "stock":         equalizer = dtv.atsc_equalizer()
+        else: raise ValueError(f"Unknown STVT_EQ={_eq_name}")
+        LOG.info(f"equalizer: {_eq_name} (STVT_EQ)")
+
+        # Viterbi: hard (gr-dtv default) or soft (atscplus fork, ~1-2 dB BER gain)
+        _vit_name = os.environ.get("STVT_VITERBI", "hard")
+        if   _vit_name == "hard": viterbi = dtv.atsc_viterbi_decoder()
+        elif _vit_name == "soft": viterbi = atscplus.atsc_viterbi_soft()
+        else: raise ValueError(f"Unknown STVT_VITERBI={_vit_name}")
+        LOG.info(f"viterbi: {_vit_name} (STVT_VITERBI)")
+        # 2026-05-22: when both soft viterbi AND erasure RS are active, use
+        # atscplus.atsc_deinterleaver (tag-forwarding clone) so the
+        # viterbi_metric tags emitted by atsc_viterbi_soft reach
+        # atsc_rs_decoder_erasure. The stock dtv.atsc_deinterleaver was
+        # observed to deliver tags=0 in this configuration.
+        _use_tagged_dei = (_vit_name == "soft" and
+                           os.environ.get("STVT_RS", "stock") == "erasure")
+        if _use_tagged_dei:
+            deinterleaver = atscplus.atsc_deinterleaver()
+            LOG.info("deinterleaver: atscplus (tag-forwarding)")
+        else:
+            deinterleaver = dtv.atsc_deinterleaver()
+            LOG.info("deinterleaver: dtv (stock)")
+        # STVT_RS=erasure switches to the empirical-erasure RS decoder.
+        _rs_kind = os.environ.get("STVT_RS", "stock")
+        if _rs_kind == "erasure":
+            _rs_eras = int(os.environ.get("STVT_RS_ERASURES", "14"))
+            rs = atscplus.atsc_rs_decoder_erasure(_rs_eras)
+            # 2026-05-21 Day 4: erasure block now 2-port (matches stock).
+            _rs_is_2port = True
+            LOG.info(f"rs: erasure (max_erasures={_rs_eras}) (STVT_RS)")
+        else:
+            rs = dtv.atsc_rs_decoder()
+            _rs_is_2port = True
+            LOG.info("rs: stock dtv.atsc_rs_decoder (STVT_RS)")
         derand = dtv.atsc_derandomizer()
         depad = dtv.atsc_depad()
 
@@ -223,16 +402,97 @@ class LiveTVTopBlock(gr.top_block):
         #   src -> scaler(*32768) -> resamp -> rxf -> fpll -> dcr -> agc -> sync -> fs_check
         # fs_checker through rs_decoder carry TWO streams (data + tag);
         # derandomizer collapses to one, then depad emits raw TS bytes.
-        self.connect(src, scaler, resamp, rxf, fpll, dcr, agc, sync, fs_check)
-        for blk_in, blk_out in [(fs_check, equalizer),
-                                 (equalizer, viterbi),
-                                 (viterbi, deinterleaver),
-                                 (deinterleaver, rs),
-                                 (rs, derand)]:
-            self.connect((blk_in, 0), (blk_out, 0))
-            self.connect((blk_in, 1), (blk_out, 1))
+        # Skip the resampler stage when STVT_SKIP_RESAMP=1 (SDR runs at 6.25 MS/s).
+        # Day 18: insert noise blanker between scaler and (resamp or rxf)
+        # so it operates on the raw scaled SDR samples — earliest point
+        # impulse spikes show up. Disabled by default; the variable `nb` is
+        # None when STVT_NB=0 and falls back to the original chain.
+        # 2026-05-29: adaptive notch sits between (resamp output / scaler)
+        # and rxf, so it runs at the working sample rate of 6.25 MS/s.
+        # `notch` is None when STVT_NOTCH=0 and falls back to legacy chain.
+        chain_blocks = [src, scaler]
+        if nb is not None:
+            chain_blocks.append(nb)
+        if resamp is not None:
+            chain_blocks.append(resamp)
+        if notch is not None:
+            chain_blocks.append(notch)
+        if smoother is not None:
+            chain_blocks.append(smoother)
+        chain_blocks += [rxf, fpll, dcr, agc, sync, fs_check]
+        self.connect(*chain_blocks)
+        if _rs_is_2port:
+            for blk_in, blk_out in [(fs_check, equalizer),
+                                     (equalizer, viterbi),
+                                     (viterbi, deinterleaver),
+                                     (deinterleaver, rs),
+                                     (rs, derand)]:
+                self.connect((blk_in, 0), (blk_out, 0))
+                self.connect((blk_in, 1), (blk_out, 1))
+        else:
+            for blk_in, blk_out in [(fs_check, equalizer),
+                                     (equalizer, viterbi),
+                                     (viterbi, deinterleaver)]:
+                self.connect((blk_in, 0), (blk_out, 0))
+                self.connect((blk_in, 1), (blk_out, 1))
+            self.connect((deinterleaver, 0), (rs, 0))
+            self.connect((rs, 0), (derand, 0))
+            self.connect((deinterleaver, 1), (derand, 1))
         self.connect(derand, depad)
-        self.connect(depad, ts_file)
+        # TEI-scrub: pack depad's byte stream into 188-byte TS packets,
+        # rewrite RS-uncorrectable packets to NULL packets (preserves CC),
+        # then back to a byte stream into the file sink.
+        # Hold strong refs on `self` — Python sync_block instances must
+        # outlive top_block.start(); otherwise GR's block_executor crashes
+        # when its weakref to the deallocated Python wrapper is cleared.
+        self._v2s_in   = blocks.stream_to_vector(gr.sizeof_char, 188)
+        self._teiscrub = TEIScrub()
+        self._v2s_out  = blocks.vector_to_stream(gr.sizeof_char, 188)
+        if os.environ.get("STVT_TEISCRUB", "1") == "1":
+            self.connect(depad, self._v2s_in, self._teiscrub, self._v2s_out, ts_file)
+        else:
+            self.connect(depad, ts_file)
+
+        # Diagnostic taps — capture bytes at 5 decode-chain points.
+        # OFF by default (2026-05-16): a multi-hour chain run filled /tmp
+        # tmpfs with 6.1 GB of diag data and broke the system with
+        # "Disk quota exceeded". Set STVT_DIAG=1 to re-enable during
+        # algorithm tuning; for normal viewing the chain doesn't need them.
+        if os.environ.get("STVT_DIAG"):
+            diag_dir = "/tmp/diag_taps"
+            os.makedirs(diag_dir, exist_ok=True)
+
+            # RS input bytes (post-deinterleaver, 207-byte RS code blocks).
+            self._diag_dei_v2s  = blocks.vector_to_stream(gr.sizeof_char, 207)
+            self._diag_dei_sink = blocks.file_sink(gr.sizeof_char, f"{diag_dir}/dei_out.bin")
+            self._diag_dei_sink.set_unbuffered(True)
+            self.connect((deinterleaver, 0), self._diag_dei_v2s, self._diag_dei_sink)
+
+            # RS output bytes (corrected, 188-byte packets, sync 0x47 at offset 0).
+            self._diag_rs_v2s   = blocks.vector_to_stream(gr.sizeof_char, 188)
+            self._diag_rs_sink  = blocks.file_sink(gr.sizeof_char, f"{diag_dir}/rs_out.bin")
+            self._diag_rs_sink.set_unbuffered(True)
+            self.connect((rs, 0), self._diag_rs_v2s, self._diag_rs_sink)
+
+            # RS metadata stream (4 bytes per packet — plinfo: sync, errors, ...).
+            # Erasure RS variant has no plinfo port; skip when in use.
+            if _rs_is_2port:
+                self._diag_rs_meta_sink = blocks.file_sink(4, f"{diag_dir}/rs_meta.bin")
+                self._diag_rs_meta_sink.set_unbuffered(True)
+                self.connect((rs, 1), self._diag_rs_meta_sink)
+
+            # Derand output (descrambled, 188-byte packets).
+            self._diag_derand_v2s  = blocks.vector_to_stream(gr.sizeof_char, 188)
+            self._diag_derand_sink = blocks.file_sink(gr.sizeof_char, f"{diag_dir}/derand_out.bin")
+            self._diag_derand_sink.set_unbuffered(True)
+            self.connect(derand, self._diag_derand_v2s, self._diag_derand_sink)
+
+            # Depad output — raw TS bytes BEFORE TEIScrub rewrites failed packets.
+            # This is the real RS failure rate (live.ts hides it because scrub
+            # converts TEI=1 packets into NULL packets, hiding the loss rate).
+            self._diag_depad_sink = blocks.file_sink(gr.sizeof_char, f"{diag_dir}/depad_out.bin")
+            self._diag_depad_sink.set_unbuffered(True)
+            self.connect(depad, self._diag_depad_sink)
 
 
 def main():
