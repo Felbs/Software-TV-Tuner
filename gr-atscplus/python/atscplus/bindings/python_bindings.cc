@@ -22,11 +22,26 @@ namespace py = pybind11;
 /**************************************/
 // BINDING_FUNCTION_PROTOTYPES(
 void bind_atsc_equalizer_long(py::module& m);
+void bind_atsc_equalizer_pilot(py::module& m);
+void bind_atsc_equalizer_pilot_dd(py::module& m);
+void bind_atsc_equalizer_pilot_dd_soft(py::module& m);
+void bind_atsc_equalizer_pilot_multifs(py::module& m);
+void bind_atsc_equalizer_pilot_multifs_dd(py::module& m);
 void bind_atsc_equalizer_cma(py::module& m);
 void bind_atsc_viterbi_soft(py::module& m);
 void bind_atsc_fs_checker_inst(py::module& m);
 void bind_atsc_fpll_tight(py::module& m);
 void bind_atsc_sync_tunable(py::module& m);
+void bind_atsc_sync_soft(py::module& m);
+void bind_atsc_sync_kalman(py::module& m);
+void bind_atsc_sync_fieldlock(py::module& m);
+void bind_atsc_sync_slidefs(py::module& m);
+void bind_atsc_sync_pathA(py::module& m);
+void bind_atsc_rs_decoder_erasure(py::module& m);
+void bind_atsc_noise_blanker(py::module& m);
+void bind_atsc_adaptive_notch(py::module& m);
+void bind_atsc_spectral_smoother(py::module& m);
+void bind_atsc_deinterleaver(py::module& m);
 // ) END BINDING_FUNCTION_PROTOTYPES
 
 
@@ -56,10 +71,25 @@ PYBIND11_MODULE(atscplus_python, m)
     /**************************************/
     // BINDING_FUNCTION_CALLS(
     bind_atsc_equalizer_long(m);
+    bind_atsc_equalizer_pilot(m);
+    bind_atsc_equalizer_pilot_dd(m);
+    bind_atsc_equalizer_pilot_dd_soft(m);
+    bind_atsc_equalizer_pilot_multifs(m);
+    bind_atsc_equalizer_pilot_multifs_dd(m);
     bind_atsc_equalizer_cma(m);
     bind_atsc_viterbi_soft(m);
     bind_atsc_fs_checker_inst(m);
     bind_atsc_fpll_tight(m);
     bind_atsc_sync_tunable(m);
+    bind_atsc_sync_soft(m);
+    bind_atsc_sync_kalman(m);
+    bind_atsc_sync_fieldlock(m);
+    bind_atsc_sync_slidefs(m);
+    bind_atsc_sync_pathA(m);
+    bind_atsc_rs_decoder_erasure(m);
+    bind_atsc_noise_blanker(m);
+    bind_atsc_adaptive_notch(m);
+    bind_atsc_spectral_smoother(m);
+    bind_atsc_deinterleaver(m);
     // ) END BINDING_FUNCTION_CALLS
 }

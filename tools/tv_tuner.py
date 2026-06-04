@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -122,8 +123,14 @@ if sys.platform == "win32":
     FFMPEG_ANALYZE_DURATION = "2000000"   # 2 s
     FFMPEG_PROBE_SIZE       = "3000000"   # 3 MB
 else:
-    FFMPEG_ANALYZE_DURATION = "10000000"  # 10 s
-    FFMPEG_PROBE_SIZE       = "50000000"  # 50 MB
+    # 2026-05-22 19:59: bumped from 10s/50MB. On marginal RF, the chain's
+    # mpeg2video stream has very rare seq_headers (most are corrupted).
+    # ffmpeg-from-pipe needs to ingest enough TS to find ONE before it can
+    # probe dimensions and feed them to the libx264 encoder. From-file works
+    # because ffmpeg can read ahead; from-pipe is rate-limited to chain's
+    # 1.5MB/s output. 60s × 1.5MB/s = 90MB which fits a seq_header.
+    FFMPEG_ANALYZE_DURATION = "60000000"  # 60 s
+    FFMPEG_PROBE_SIZE       = "200000000" # 200 MB
 FFPLAY_ANALYZE_DURATION = "3000000"       # 3 s — both platforms
 FFPLAY_PROBE_SIZE       = "3000000"       # 3 MB — both platforms
 TV_PLAYER = HERE / "tv_player.py"   # bundled with the repo
@@ -1083,10 +1090,14 @@ def build_ffmpeg_cmd(play: bool, record_path: Path | None,
         Only valid when play=True with no record/stream sinks.
     """
     if passthrough:
+        # 2026-05-26 late evening: libx264 re-encode. `-c copy` is smoother
+        # when mpv's probe succeeds, but probe failure is too common on this
+        # RF (mpv "could not find codec parameters" on mpeg2 seq_header_code).
+        # libx264 ALWAYS produces output by re-encoding what it can decode.
         return [
             FFMPEG,
             "-hide_banner", "-loglevel", "warning",
-            "-fflags", "+genpts+igndts+discardcorrupt+nobuffer",
+            "-fflags", "+genpts+igndts",
             "-err_detect", "ignore_err",
             "-flags", "+output_corrupt",
             "-analyzeduration", FFMPEG_ANALYZE_DURATION,
@@ -1096,7 +1107,9 @@ def build_ffmpeg_cmd(play: bool, record_path: Path | None,
             "-i", "pipe:0",
             "-map", f"0:p:{program}:v",
             "-map", f"0:p:{program}:a?",
-            "-c", "copy",
+            "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+            "-crf", "28", "-g", "30", "-keyint_min", "30",
+            "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
             "-f", "mpegts",
             "pipe:1",
         ]
@@ -1210,19 +1223,77 @@ def spawn_ffmpeg(cmd: list[str], log_fh, want_stdout_pipe: bool):
 
 
 def spawn_ffplay(window_title: str, log_fh):
+    # Optional alternative player — mpv has a more robust mpegts demuxer than
+    # ffplay's (better recovery from PES corruption, larger built-in buffer).
+    # On marginal/CPU-bound systems where ffplay drops the window with
+    # "could not find codec parameters", mpv often still renders. Activate
+    # via STVT_PLAYER=mpv. Default remains ffplay (Windows runtime).
+    if os.environ.get("STVT_PLAYER", "ffplay") == "mpv":
+        # 2026-05-15: bumped cache-secs 4→20 and added demuxer-max-bytes
+        # so the cache absorbs the ~25-30s drought windows we observed
+        # in the chain log. Tradeoff: ~20s startup delay (cache must
+        # fill before play starts) and ~20s live latency. Tune via
+        # $STVT_MPV_CACHE_SECS if startup feels too long.
+        cache_secs = os.environ.get("STVT_MPV_CACHE_SECS", "20")
+        # 2026-05-17: reverted experimental psi_repair wrap + audio-stream-
+        # silence flags. They broke mpv probe (couldn't find codec params)
+        # and caused 20+s freezes during user test. Going back to the
+        # config that worked overnight last week — accepts some audio
+        # skipping but actually plays.
+        cmd = ["mpv",
+               "--no-terminal",
+               "--keep-open=yes",
+               f"--title={window_title}",
+               "--demuxer=lavf",
+               "--demuxer-lavf-format=mpegts",
+               # 2026-05-22 18:00: REVERTED to pre-today baseline (commit
+               # 7224446 state). Today's experiments made things WORSE:
+               #   probesize=200M + analyzeduration=60M → mpv OOMs/timeouts,
+               #     crashed 4× in 50s
+               #   anti-freeze flags (framedrop=vo, video-sync=desync, etc)
+               #     never resolved the freeze
+               #   audio-stream-silence flip-flopped (memory says it broke
+               #     things, but the code that worked yesterday HAD it).
+               # Pre-today baseline plays (with freezes) — today's changes
+               # don't play at all. Going back, then iterating from there.
+               # 2026-05-26: bumped analyzeduration 15s→45s and probesize
+               # 20MB→50MB. Needed when ffmpeg uses -c copy (raw mpegts
+               # passthrough) — mpv has to find mpeg2 seq_header_code itself,
+               # and on marginal RF the first occurrence may be 20-40s in.
+               "--demuxer-lavf-analyzeduration=45",
+               "--demuxer-lavf-probesize=50000000",
+               "--cache=yes",
+               f"--cache-secs={cache_secs}",
+               "--demuxer-max-bytes=200MiB",
+               "--demuxer-max-back-bytes=200MiB",
+               "--audio-stream-silence=yes",
+               "-"]
+        return subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=log_fh,
+            stderr=log_fh,
+            creationflags=NEW_PROCESS_GROUP,
+        )
+    cmd = [FFPLAY,
+           "-hide_banner", "-loglevel", "warning",
+           "-window_title", window_title,
+           "-fflags", "+genpts+igndts+discardcorrupt",
+           "-err_detect", "ignore_err",
+           "-analyzeduration", FFPLAY_ANALYZE_DURATION,
+           "-probesize", FFPLAY_PROBE_SIZE]
+    # Linux: hardware MPEG-2 decode via NVDEC frees CPU for the flowgraph,
+    # which closes the gap with Windows on older CPUs (Ryzen 1600X-class).
+    # Opt-out: STVT_FFPLAY_HWACCEL=none. Windows untouched.
+    if sys.platform != "win32" and os.environ.get("STVT_FFPLAY_HWACCEL", "cuda") != "none":
+        cmd += ["-hwaccel", os.environ.get("STVT_FFPLAY_HWACCEL", "cuda")]
+    cmd += ["-f", "mpegts",
+            "-i", "pipe:0",
+            "-sync", "audio",
+            "-framedrop",
+            "-infbuf"]
     return subprocess.Popen(
-        [FFPLAY,
-         "-hide_banner", "-loglevel", "warning",
-         "-window_title", window_title,
-         "-fflags", "+genpts+igndts+discardcorrupt",
-         "-err_detect", "ignore_err",
-         "-analyzeduration", FFPLAY_ANALYZE_DURATION,
-         "-probesize", FFPLAY_PROBE_SIZE,
-         "-f", "mpegts",
-         "-i", "pipe:0",
-         "-sync", "audio",
-         "-framedrop",
-         "-infbuf"],
+        cmd,
         stdin=subprocess.PIPE,
         stdout=log_fh,
         stderr=log_fh,
@@ -2060,6 +2131,33 @@ def status_loop(state: PipelineState, stop_event: threading.Event,
     # the stream is suspect yet.
     fwd_frozen_since = 0.0
     rec_frozen_since = 0.0
+    # 2026-05-29 MPV PROBE-STUCK DETECTION: mpv's lavf demuxer reads
+    # ~500KB during initial probe; if no codec params found, it gives up
+    # and sits in cache-pause-idle forever even though chain is producing
+    # good data. Detect by /proc/<pid>/io rchar not growing while chain
+    # is producing >200KB/s. When detected, force ffplay recovery.
+    #
+    # CRITICAL SAFETY LIMIT: if the chain output stream is fundamentally
+    # undecodable (heavy PES corruption, bad PMT), every respawned mpv
+    # will hit the SAME probe-stuck state. Past v1 of this code had no
+    # limit — it burned through 10+ mpv launches in 5 min and caused
+    # NVIDIA Xid 79 (GPU fell off PCIe bus) by exhausting Vulkan context
+    # resources. We now cap retries and require post-recovery success
+    # before resetting the counter.
+    mpv_last_rchar = -1
+    mpv_last_rchar_t = start
+    mpv_stuck_since = 0.0
+    mpv_probe_stuck_recoveries = 0
+    mpv_probe_stuck_given_up = False
+    MPV_STUCK_GRACE_SEC = 30.0     # give mpv full probe window first
+    MPV_STUCK_THRESHOLD_SEC = 30.0  # rchar flat for this long → stuck
+    MPV_STUCK_RECOVERY_MIN_GAP_SEC = 60.0  # ≥ 1 min between recoveries
+    MPV_STUCK_MAX_RECOVERIES = 2          # 2 consecutive failures → give up
+    MPV_STUCK_SUCCESS_RCHAR_DELTA = 5_000_000  # 5 MB read = "mpv healthy"
+    mpv_last_recovery_t = 0.0
+    mpv_rchar_at_recovery = -1     # rchar at time of last recovery — if
+                                   # mpv reads SUCCESS_RCHAR_DELTA past
+                                   # this, treat as healthy + reset counter
     # Cooldown after recovery — don't immediately re-trigger.
     RECOVERY_COOLDOWN_SEC = 15.0
     # Startup grace period — ffmpeg's mp4 muxer buffers the first
@@ -2089,12 +2187,27 @@ def status_loop(state: PipelineState, stop_event: threading.Event,
     # tv_live to grab a fresh equalizer convergence. This is what makes
     # playback usable indefinitely instead of permafreezing after drift.
     DECODER_CHECK_INTERVAL_SEC = 5.0
-    DECODER_BAD_PAT = 3        # PAT in 5MB; below this = lost lock
-    # 3 consecutive bad checks (~15s) before forcing a restart. Tier 21's
-    # FS-spacing validator means real drifts are rare; brief PAT dips
-    # are usually atmospheric / RF transients that recover on their own,
-    # so we tolerate them rather than flashing the player window.
-    DECODER_BAD_GRACE = 3
+    # Was PAT_min=3 with 3 strikes (~15s). Observed: with the patched
+    # libsdrplay ring (32 MiB) the chain holds lock for ~2 min then has
+    # brief PAT droughts that the player rides through fine; old
+    # threshold flashed the screen with restarts every ~2min. Relax:
+    # only count PAT=0 (true loss) as bad, and demand 6 consecutive
+    # (~30s) before restarting.
+    DECODER_BAD_PAT = 1        # need <1 PAT in 5MB window = true loss
+    # 2026-05-14: bumped 6→12 (~30s → ~60s tolerance). Observation: eq
+    # naturally drifts into fs_mse=0.15 islands then recovers on its own
+    # (one run sustained 599s with these dips). Old grace caused user-
+    # visible freezes from restarts during recoverable drift events.
+    # 2026-05-16: env-overridable via STVT_BAD_GRACE; default bumped to 36
+    # (3 min) because long-EQ runs at 1.7 MB/s with lock=YES were getting
+    # killed at 60s of PAT=0 even though bytes were flowing (PAT/PMT just
+    # RS-corrupted, ts_psi_repair injects cached copies for the player).
+    DECODER_BAD_GRACE = 36
+    try:
+        DECODER_BAD_GRACE = int(os.environ.get(
+            "STVT_BAD_GRACE", DECODER_BAD_GRACE))
+    except ValueError:
+        pass
     last_decoder_check_t = start
     decoder_bad_count = 0
 
@@ -2217,7 +2330,18 @@ def status_loop(state: PipelineState, stop_event: threading.Event,
                 pat = measure_convergence()
             except Exception:
                 pat = -1
-            if pat >= 0 and pat < DECODER_BAD_PAT:
+            # Skip striking if bytes are flowing through to the player.
+            # Two regimes:
+            #   - long/cma at nominal: locked (rate>500KB) → 1.5-1.7 MB/s
+            #   - multifs sparse-but-locked: ~0.35 MB/s (lock=no per the
+            #     500KB threshold, but the equalizer IS locked, it's just
+            #     dropping ~80% of TS packets by design)
+            # In both, if rate > 200KB/s, the chain is alive. ffmpeg_freeze
+            # detection (above) catches truly-dead chains via fwd stalling.
+            # PAT droughts alone shouldn't kill — RS can corrupt PSI while
+            # video bytes still flow, and ts_psi_repair injects cached PAT.
+            chain_healthy = rate > 200_000
+            if pat >= 0 and pat < DECODER_BAD_PAT and not chain_healthy:
                 decoder_bad_count += 1
                 print(f"[tv_tuner] decoder quality low: PAT={pat} "
                       f"(strike {decoder_bad_count}/{DECODER_BAD_GRACE})")
@@ -2313,6 +2437,79 @@ def status_loop(state: PipelineState, stop_event: threading.Event,
                           f"(event #{state.recovery_events})")
             except Exception as e:
                 print(f"[tv_tuner] ffplay recovery error: {e}")
+
+        # 2026-05-29 mpv probe-stuck detection. /proc/<pid>/io rchar
+        # is the cumulative bytes read from any source (pipes included).
+        # mpv that's actively playing reads ~1MB/s; mpv stuck on probe
+        # reads ~500KB then stops forever. When chain is producing
+        # >200KB/s and mpv hasn't read more for MPV_STUCK_THRESHOLD_SEC,
+        # the demuxer gave up — restart mpv to re-probe fresher data.
+        # Bounded by MPV_STUCK_MAX_RECOVERIES; if respawned mpv ALSO
+        # hits probe-stuck, the chain output is fundamentally undecodable
+        # and further recoveries will only damage GPU driver state
+        # (see Xid 79 incident 2026-05-29 07:51).
+        if past_grace and play_alive and elapsed > MPV_STUCK_GRACE_SEC \
+                and rate > 200_000 and recover_ffplay \
+                and not in_cooldown \
+                and not mpv_probe_stuck_given_up \
+                and (now - mpv_last_recovery_t) > MPV_STUCK_RECOVERY_MIN_GAP_SEC:
+            try:
+                with open(f"/proc/{state.ffplay_proc.pid}/io") as f:
+                    rchar = next(
+                        int(ln.split()[1]) for ln in f
+                        if ln.startswith("rchar:"))
+            except (FileNotFoundError, OSError, StopIteration, ValueError):
+                rchar = -1
+            if rchar >= 0:
+                # Check if a previously-recovered mpv has now read enough
+                # to qualify as "healthy" — reset counter if so.
+                if mpv_rchar_at_recovery >= 0 \
+                        and rchar - mpv_rchar_at_recovery \
+                            > MPV_STUCK_SUCCESS_RCHAR_DELTA:
+                    if mpv_probe_stuck_recoveries > 0:
+                        print(f"[tv_tuner] mpv post-recovery healthy "
+                              f"(read {(rchar - mpv_rchar_at_recovery)//(1024*1024)}MB "
+                              f"past recovery) — clearing recovery counter")
+                    mpv_probe_stuck_recoveries = 0
+                    mpv_rchar_at_recovery = -1
+                if rchar != mpv_last_rchar:
+                    mpv_last_rchar, mpv_last_rchar_t = rchar, now
+                    mpv_stuck_since = 0.0
+                else:
+                    if mpv_stuck_since == 0.0:
+                        mpv_stuck_since = mpv_last_rchar_t
+                    if now - mpv_stuck_since > MPV_STUCK_THRESHOLD_SEC:
+                        if mpv_probe_stuck_recoveries \
+                                >= MPV_STUCK_MAX_RECOVERIES:
+                            print(f"[tv_tuner] mpv probe-stuck #"
+                                  f"{mpv_probe_stuck_recoveries+1}: "
+                                  f"GIVING UP. Chain output is "
+                                  f"undecodable; further mpv restarts "
+                                  f"would risk GPU driver wedge "
+                                  f"(Xid 79). Leaving stuck mpv alive.")
+                            mpv_probe_stuck_given_up = True
+                            mpv_stuck_since = 0.0
+                        else:
+                            print(f"[tv_tuner] mpv probe-stuck "
+                                  f"(rchar={rchar} unchanged for "
+                                  f"{int(now - mpv_stuck_since)}s while "
+                                  f"chain produces {int(rate/1024)}KB/s) "
+                                  f"— recovering "
+                                  f"[attempt {mpv_probe_stuck_recoveries+1}/"
+                                  f"{MPV_STUCK_MAX_RECOVERIES}]")
+                            try:
+                                if recover_ffplay():
+                                    state.recovery_events += 1
+                                    state.last_recovery_t = now
+                                    mpv_last_recovery_t = now
+                                    mpv_probe_stuck_recoveries += 1
+                                    mpv_rchar_at_recovery = 0
+                                    mpv_last_rchar = -1
+                                    mpv_stuck_since = 0.0
+                                    print(f"[tv_tuner] mpv recovered "
+                                          f"(event #{state.recovery_events})")
+                            except Exception as e:
+                                print(f"[tv_tuner] mpv recovery error: {e}")
 
 
 # ── Pipeline orchestration ───────────────────────────────────────
@@ -2871,19 +3068,26 @@ def _spawn_in_new_console(cmd: list[str]) -> subprocess.Popen:
     # window scrolls past or closes. `exec bash` keeps the window alive
     # after the inner command exits so the user can still read it.
     quoted = " ".join(_shell_quote(a) for a in cmd)
+    # Wayland-native terminals (gnome-terminal under GNOME-Wayland) strip
+    # DISPLAY/XAUTHORITY when spawned, leaving the X11 child (ffplay) with
+    # no place to draw. Re-export from the picker's own env into the popup
+    # bash so ffplay can find the X server.
+    _display = os.environ.get("DISPLAY", ":0")
+    _xauth = os.environ.get("XAUTHORITY", "")
+    _display_prefix = f"export DISPLAY={_display}; export XAUTHORITY={_xauth}; "
     tee_suffix = " 2>&1 | tee ~/stvt_stream.log; exec bash"
     for emu, wrap in (
         ("gnome-terminal", ["gnome-terminal", "--", "bash", "-c",
-                            f"{quoted}{tee_suffix}"]),
+                            f"{_display_prefix}{quoted}{tee_suffix}"]),
         ("konsole",        ["konsole", "-e", "bash", "-c",
-                            f"{quoted}{tee_suffix}"]),
+                            f"{_display_prefix}{quoted}{tee_suffix}"]),
         ("xfce4-terminal", ["xfce4-terminal", "-e",
-                            f"bash -c '{quoted}{tee_suffix}'"]),
+                            f"bash -c '{_display_prefix}{quoted}{tee_suffix}'"]),
         ("x-terminal-emulator",
                            ["x-terminal-emulator", "-e",
-                            "bash", "-c", f"{quoted}{tee_suffix}"]),
+                            "bash", "-c", f"{_display_prefix}{quoted}{tee_suffix}"]),
         ("xterm",          ["xterm", "-e", "bash", "-c",
-                            f"{quoted}{tee_suffix}"]),
+                            f"{_display_prefix}{quoted}{tee_suffix}"]),
     ):
         if shutil.which(emu):
             return subprocess.Popen(wrap, start_new_session=True)

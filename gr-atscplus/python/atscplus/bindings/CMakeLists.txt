@@ -26,11 +26,26 @@ include(GrPybind)
 
 list(APPEND atscplus_python_files
     atsc_equalizer_long_python.cc
+    atsc_equalizer_pilot_python.cc
+    atsc_equalizer_pilot_dd_python.cc
+    atsc_equalizer_pilot_dd_soft_python.cc
+    atsc_equalizer_pilot_multifs_python.cc
+    atsc_equalizer_pilot_multifs_dd_python.cc
     atsc_equalizer_cma_python.cc
     atsc_viterbi_soft_python.cc
     atsc_fs_checker_inst_python.cc
     atsc_fpll_tight_python.cc
     atsc_sync_tunable_python.cc
+    atsc_sync_soft_python.cc
+    atsc_sync_kalman_python.cc
+    atsc_sync_fieldlock_python.cc
+    atsc_sync_slidefs_python.cc
+    atsc_sync_pathA_python.cc
+    atsc_rs_decoder_erasure_python.cc
+    atsc_noise_blanker_python.cc
+    atsc_adaptive_notch_python.cc
+    atsc_spectral_smoother_python.cc
+    atsc_deinterleaver_python.cc
     python_bindings.cc)
 
 gr_pybind_make_oot(atscplus ../../.. gr::atscplus "${atscplus_python_files}")

@@ -21,7 +21,14 @@ namespace atscplus {
 class atsc_equalizer_long_impl : public atsc_equalizer_long
 {
 private:
+#ifdef ATSC_EQ_ECO
+    static constexpr int NTAPS = 128;
+#elif defined(ATSC_EQ_LONG_TAPS)
+    // Wider equalizer: 32μs span (was 16μs). Captures longer multipath echoes.
+    static constexpr int NTAPS = 512;
+#else
     static constexpr int NTAPS = 256;
+#endif
     static constexpr int NPRETAPS = (int)(NTAPS * 0.2);
 
     static constexpr int KNOWN_FIELD_SYNC_LENGTH = 4 + 511 + 3 * 63;
@@ -34,8 +41,41 @@ private:
                 const float* training_pattern,
                 float* output_samples,
                 int nsamples);
+    // 2026-05-30 Confidence-gated decision-directed tracking. Runs on DATA
+    // segments (between field syncs) when STVT_EQ_DD_MU>0. Filters, slices to
+    // the nearest 8-VSB level, and does a normalized-LMS (NLMS) tap update
+    // gated by slicer confidence (skip when |decision-y|>gate). Closes the
+    // "taps frozen 312/313 of the time → drift to noise" hole in the
+    // field-sync-only design, WITHOUT CMA's wrong-modulus convergence: DD
+    // minimizes the same symbol-error objective as the FS-LMS anchor.
+    void filterN_dd(const float* input_samples, float* output_samples, int nsamples);
+    // 2026-05-30 RLS (Recursive Least Squares) field-sync adaptation. Optional
+    // (STVT_EQ_RLS=1). Converges the equalizer far faster + tracks better than
+    // LMS each field sync — the classic fix for "LMS too slow → drift". Runs
+    // only on the ~728-symbol field-sync segment (per-symbol RLS over all 256
+    // taps is feasible there, NOT over full data segments). Pairs with the DD
+    // path for between-field tracking. Double-precision inverse-correlation
+    // matrix for numerical stability.
+    void adaptN_rls(const float* input_samples,
+                    const float* training_pattern,
+                    float* output_samples,
+                    int nsamples);
 
     std::vector<float> d_taps;
+    std::vector<double> d_rls_P;   // NTAPS*NTAPS inverse-correlation matrix (RLS)
+    bool   d_rls_inited = false;
+    // Last-known-good snapshot: saved when taps look healthy (low energy,
+    // finite, not in a divergence-induced delta-reset state). On
+    // divergence, restored from snapshot instead of cold-resetting to a
+    // delta function — which is what previously caused 30+s reconvergence
+    // windows during channel walks.
+    std::vector<float> d_taps_lkg;
+    bool   d_lkg_valid = false;
+    int    d_lkg_save_counter = 0;          // packets since last save
+    double d_last_tap_e = 1.0;
+    int    d_lkg_restore_count = 0;
+    int    d_lkg_save_count = 0;
+    int    d_divergence_count = 0;
 
     float data_mem[gr::dtv::ATSC_DATA_SEGMENT_LENGTH + NTAPS];
     float data_mem2[gr::dtv::ATSC_DATA_SEGMENT_LENGTH];
@@ -43,6 +83,14 @@ private:
     short d_segno;
 
     bool d_buff_not_filled = true;
+
+    // FIX #3 (2026-05-23): coherent field-sync averaging.
+    // Accumulate N field syncs' input buffers, run LMS on the average.
+    // Signal=fixed (PN511/PN63), noise=iid → √N SNR gain.
+    // Tunable via STVT_EQ_FS_AVG_DEPTH (default 1 = off).
+    static constexpr int FS_ACC_LEN = gr::dtv::ATSC_DATA_SEGMENT_LENGTH + NTAPS;
+    float d_fs_acc[FS_ACC_LEN];
+    int   d_fs_count = 0;
 
 public:
     atsc_equalizer_long_impl();
