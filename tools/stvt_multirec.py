@@ -83,7 +83,17 @@ def safe_callsign(s: str) -> str:
 
 
 def build_ffmpeg_cmd(programs: list[dict], out_dir: Path,
-                     timestamp: str) -> tuple[list[str], list[Path]]:
+                     timestamp: str, rf: int) -> tuple[list[str], list[Path]]:
+    """Build the ffmpeg command for per-program demux outputs.
+
+    The whole-mux passthrough (mux_FULL_rfN_*.ts), when enabled, is
+    written separately by a parallel tail thread — NOT by ffmpeg. That's
+    because `ffmpeg -map 0 -c copy -f mpegts` rewrites the PAT into a
+    single synthetic program containing all source streams, losing the
+    multi-program structure that makes the FULL file useful (VLC's
+    Playback > Program submenu, ffprobe -show_programs, etc.). Raw
+    byte-for-byte tee of live.ts preserves the original 7-program PAT.
+    """
     cmd = [
         FFMPEG,
         "-hide_banner",
@@ -117,16 +127,27 @@ def build_ffmpeg_cmd(programs: list[dict], out_dir: Path,
     return cmd, out_files
 
 
+def mux_full_path(out_dir: Path, rf: int, timestamp: str) -> Path:
+    return out_dir / f"mux_FULL_rf{rf}_{timestamp}.ts"
+
+
 def fmt_mb(n: int) -> str:
     return f"{n / (1024 * 1024):6.1f} MB"
 
 
 def tail_into_pipe(src_path: Path, dest_fh, stop_evt: threading.Event,
-                   start_offset: int = 0):
+                   start_offset: int = 0, tee_fh=None):
     """Tail-and-pipe: read new bytes from src_path as it grows and write
     them to dest_fh. Mirrors `tail -F` for ffmpeg's stdin so it sees an
     endless stream rather than a finite file. Returns when stop_evt is
-    set or dest_fh becomes unwritable."""
+    set or dest_fh becomes unwritable.
+
+    If tee_fh is supplied, the same bytes are also written to it. We use
+    this in multirec to write the whole-mux passthrough file directly
+    from the raw live.ts stream (preserving the multi-program PAT that
+    ffmpeg's remux would otherwise flatten). A tee_fh write failure does
+    not interrupt the primary pipe; the tee is dropped silently after a
+    failure to keep ffmpeg fed."""
     chunk = 256 * 1024
     pos = start_offset
     while not stop_evt.is_set():
@@ -143,6 +164,11 @@ def tail_into_pipe(src_path: Path, dest_fh, stop_evt: threading.Event,
                         dest_fh.flush()
                     except (BrokenPipeError, OSError, ValueError):
                         return
+                    if tee_fh is not None:
+                        try:
+                            tee_fh.write(data)
+                        except (OSError, ValueError):
+                            tee_fh = None
                     pos += len(data)
         except FileNotFoundError:
             time.sleep(0.2)
@@ -158,15 +184,19 @@ def status_printer(out_files: list[Path], programs: list[dict],
         remaining = max(0, duration_sec - elapsed)
         print(f"\n[multirec] +{int(elapsed):>4}s / -{int(remaining):>4}s    "
               f"file sizes:")
-        for p, f in zip(programs, out_files):
+        for i, f in enumerate(out_files):
             try:
                 sz = f.stat().st_size
             except FileNotFoundError:
                 sz = 0
             rate_kbs = (sz / max(1, elapsed)) / 1024
-            print(f"  prog {p['program_number']:>3}  "
-                  f"{p['virtual']:<6}  {p['callsign']:<10}  "
-                  f"{fmt_mb(sz)}  ({rate_kbs:5.0f} KB/s)")
+            if i < len(programs):
+                p = programs[i]
+                label = (f"prog {p['program_number']:>3}  "
+                         f"{p['virtual']:<6}  {p['callsign']:<10}")
+            else:
+                label = f"[FULL MUX]                       "
+            print(f"  {label}  {fmt_mb(sz)}  ({rate_kbs:5.0f} KB/s)")
         if stop_evt.wait(timeout=5):
             return
 
@@ -182,6 +212,16 @@ def main() -> int:
                     help="Comma-separated program numbers (default: all)")
     ap.add_argument("--output-dir", default=str(DEFAULT_OUT_DIR),
                     help=f"Output directory (default {DEFAULT_OUT_DIR})")
+    ap.add_argument("--keep-mux", action="store_true", default=None,
+                    help="Force-write the whole-mux passthrough as a single "
+                         "mux_FULL_rfN_<ts>.ts file (every program, every "
+                         "PID). Default: ON for whole-RF records (no "
+                         "--programs filter), OFF when --programs is set so "
+                         "single-channel records stay small. Pass this flag "
+                         "to force ON even with --programs.")
+    ap.add_argument("--no-keep-mux", action="store_true",
+                    help="Skip the whole-mux file even on whole-RF records, "
+                         "to save disk.")
     args = ap.parse_args()
 
     duration_sec = args.duration * 60.0
@@ -208,6 +248,15 @@ def main() -> int:
     for p in programs:
         print(f"  prog {p['program_number']:>3}  {p['virtual']:<6}  "
               f"{p['callsign']:<10}  ({p['video_codec']})")
+    if args.no_keep_mux:
+        mux_msg = "off (--no-keep-mux)"
+    elif args.keep_mux:
+        mux_msg = "on (--keep-mux force)"
+    elif args.programs:
+        mux_msg = "off (--programs filter set; single-channel mode)"
+    else:
+        mux_msg = "ON (whole-RF record; one big file with every program)"
+    print(f"[multirec] whole-mux passthrough file: {mux_msg}")
     print(f"[multirec] output: {out_dir}")
 
     try:
@@ -229,6 +278,8 @@ def main() -> int:
     stop_evt = threading.Event()
     status_thread = None
     out_files: list[Path] = []
+    full_mux_fh = None
+    keep_mux = False
     started_at = 0.0
     try:
         print(f"[multirec] waiting for chain to lock (up to 30s)...")
@@ -276,7 +327,27 @@ def main() -> int:
             time.sleep(1.0)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        cmd, out_files = build_ffmpeg_cmd(programs, out_dir, timestamp)
+        # Smart default for keep_mux:
+        #   --programs N      -> off (small single-channel file)
+        #   no --programs     -> on  (whole-RF; one file with all channels
+        #                              so VLC can switch programs)
+        #   --no-keep-mux     -> always off (override, save disk)
+        #   --keep-mux        -> always on  (override, force include)
+        if args.no_keep_mux:
+            keep_mux = False
+        elif args.keep_mux:
+            keep_mux = True
+        else:
+            keep_mux = not args.programs
+        cmd, out_files = build_ffmpeg_cmd(programs, out_dir, timestamp,
+                                          args.rf)
+        # The FULL mux file is written by the tail thread as a raw tee
+        # of live.ts (NOT by ffmpeg) so the original multi-program PAT
+        # is preserved. See build_ffmpeg_cmd's docstring for why.
+        if keep_mux:
+            full_path = mux_full_path(out_dir, args.rf, timestamp)
+            full_mux_fh = open(full_path, "wb")
+            out_files.append(full_path)
         ffmpeg_log = out_dir / f"ffmpeg_rf{args.rf}_{timestamp}.log"
         ffmpeg_log_fh = ffmpeg_log.open("w", encoding="utf-8", errors="replace")
         print(f"[multirec] spawning ffmpeg with {len(programs)} parallel outputs...")
@@ -290,9 +361,12 @@ def main() -> int:
         # Start tail thread feeding live.ts -> ffmpeg stdin. Start at
         # offset 0 so ffmpeg sees a fresh stream (it owns its own analyze
         # buffer; replaying from the start is the same cost either way).
+        # When keep_mux is on, tail_into_pipe also tees the raw bytes
+        # to full_mux_fh, preserving the source PAT (7 programs).
         tail_thread = threading.Thread(
             target=tail_into_pipe,
             args=(LIVE_TS, ffmpeg_proc.stdin, stop_evt, 0),
+            kwargs={"tee_fh": full_mux_fh},
             daemon=True,
         )
         tail_thread.start()
@@ -334,6 +408,12 @@ def main() -> int:
                 pass
         kill_proc(ffmpeg_proc, "ffmpeg")
         kill_proc(tv_live, "tv_live")
+        if full_mux_fh is not None:
+            try:
+                full_mux_fh.flush()
+                full_mux_fh.close()
+            except (OSError, ValueError):
+                pass
         try:
             log_fh.close()
         except Exception:
@@ -342,16 +422,20 @@ def main() -> int:
     elapsed = time.time() - started_at if started_at else 0
     print(f"\n[multirec] recap:")
     total = 0
-    for p, f in zip(programs, out_files):
+    for i, f in enumerate(out_files):
         try:
             sz = f.stat().st_size
         except FileNotFoundError:
             sz = 0
         total += sz
         verdict = "ok  " if sz > 1_000_000 else "tiny"
-        print(f"  {verdict} prog {p['program_number']:>3}  "
-              f"{p['virtual']:<6} {p['callsign']:<10}  "
-              f"{fmt_mb(sz)}  -> {f.name}")
+        if i < len(programs):
+            p = programs[i]
+            label = (f"prog {p['program_number']:>3}  "
+                     f"{p['virtual']:<6} {p['callsign']:<10}")
+        else:
+            label = f"[FULL MUX] (all programs, all PIDs)        "
+        print(f"  {verdict} {label}  {fmt_mb(sz)}  -> {f.name}")
     rate = (total / max(1, elapsed)) / 1024 if elapsed else 0
     print(f"\n[multirec] total: {fmt_mb(total)} across {len(programs)} programs "
           f"in {elapsed:.0f}s ({rate:.0f} KB/s aggregate)")
