@@ -177,5 +177,45 @@ class TestComputeSkipReason(unittest.TestCase):
         self.assertIn("alpha", reason)
 
 
+class TestComputeFireAction(unittest.TestCase):
+    """compute_fire_action replaces compute_skip_reason in the daemon's
+    fire loop. Same-mux conflicts still skip (multirec on a busy SDR
+    produces a stub), but different-mux conflicts now DEFER instead of
+    skipping — that's what makes back-to-back schedules actually work.
+    """
+
+    def test_no_active_means_fire(self):
+        new = _entry(1_780_000_000, 1800, eid="new")
+        action, reason = sched.compute_fire_action(new, [], [])
+        self.assertEqual(action, "fire")
+        self.assertIsNone(reason)
+
+    def test_same_rf_active_skips(self):
+        active = _entry(1_780_000_000, 1800, eid="active")
+        new = _entry(1_780_000_300, 1800, eid="new")
+        new["rf"] = active["rf"]
+        action, reason = sched.compute_fire_action(new, ["active"], [active])
+        self.assertEqual(action, "skip")
+        self.assertIn("same-mux", reason)
+        self.assertIn("use rmux", reason)
+
+    def test_different_rf_active_defers(self):
+        active = _entry(1_780_000_000, 1800, eid="active")
+        active["rf"] = 34
+        new = _entry(1_780_000_300, 1800, eid="new")
+        new["rf"] = 36
+        action, reason = sched.compute_fire_action(new, ["active"], [active])
+        self.assertEqual(action, "defer")
+        self.assertIn("waiting for", reason)
+        self.assertIn("RF34", reason)
+        self.assertIn("RF36", reason)
+
+    def test_active_id_missing_from_queue_falls_through(self):
+        new = _entry(1_780_000_000, 1800, eid="new")
+        action, reason = sched.compute_fire_action(new, ["ghost"], [])
+        self.assertEqual(action, "fire")
+        self.assertIsNone(reason)
+
+
 if __name__ == "__main__":
     unittest.main()

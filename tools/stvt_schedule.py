@@ -819,6 +819,39 @@ def compute_skip_reason(entry: dict, active_ids: list[str],
     return None
 
 
+def compute_fire_action(entry: dict, active_ids: list[str],
+                         queue: list[dict]) -> tuple[str, str | None]:
+    """Decide what the daemon should do with a fire-ready entry.
+    Returns (action, reason) where action is one of:
+        "fire"  -> safe to start now
+        "skip"  -> mark skipped (covered by another recording on same mux)
+        "defer" -> wait, try again next poll (cross-mux SDR contention
+                   that will resolve when the active recording finishes)
+
+    Defer-on-cross-mux is what lets back-to-back schedules work. Without
+    it the daemon would skip every cross-mux entry whose fire window
+    opens while a previous recording's tail is still running (typical
+    when slot N's +pad collides with slot N+1's -lead_sec). With it,
+    the new entry waits a few seconds and starts late — recorded, not
+    skipped. The cascade-clamp in compute_fire_duration_min then keeps
+    the late-fired entry inside its own original end window.
+    """
+    for eid in active_ids:
+        active_entry = next((q for q in queue if q["id"] == eid), None)
+        if not active_entry:
+            continue
+        if active_entry["rf"] == entry["rf"]:
+            return ("skip",
+                    f"same-mux RF{entry['rf']} record already active "
+                    f"(\"{active_entry['title']}\"); use rmux to cover "
+                    f"both")
+        return ("defer",
+                f"waiting for different-mux RF{active_entry['rf']} "
+                f"record (\"{active_entry['title']}\") to finish before "
+                f"firing RF{entry['rf']}")
+    return ("fire", None)
+
+
 def compute_fire_duration_min(entry: dict, now_unix: int) -> tuple[int, bool]:
     """Decide how many minutes to record for this entry, clamped to the
     time remaining until entry["end_unix"].
@@ -902,6 +935,7 @@ def cmd_run(args) -> int:
     print()
 
     active: dict[str, subprocess.Popen] = {}
+    deferred_logged: set[str] = set()  # entries we've already printed DEFER for
     while True:
         try:
             queue = load_queue()
@@ -938,20 +972,33 @@ def cmd_run(args) -> int:
                     continue
                 # Fire if start is within args.lead_sec
                 if entry["start_unix"] - args.lead_sec <= now:
-                    # SDR is single-tenant: only one multirec can hold it
-                    # at a time. compute_skip_reason() decides whether
-                    # this entry has to be skipped because something is
-                    # already active; same-RF and different-RF cases get
-                    # distinct messages.
-                    skip_reason = compute_skip_reason(
+                    # SDR is single-tenant. compute_fire_action decides
+                    # whether to fire, skip (same-mux already covered),
+                    # or defer (cross-mux contention that will resolve
+                    # when the active record finishes — enables proper
+                    # back-to-back scheduling).
+                    action, reason = compute_fire_action(
                         entry, list(active.keys()), queue
                     )
-                    if skip_reason:
+                    if action == "skip":
                         print(f"[scheduler] "
                               f"{datetime.now().strftime('%H:%M:%S')}  "
-                              f"SKIP {entry['id']}: {skip_reason}")
-                        entry["status"] = f"skipped: {skip_reason}"
+                              f"SKIP {entry['id']}: {reason}")
+                        entry["status"] = f"skipped: {reason}"
                         save_queue(queue)
+                        deferred_logged.discard(entry["id"])
+                        continue
+                    if action == "defer":
+                        # Don't fire, don't mark skipped — wait for the
+                        # active record to finish. The "missed" check at
+                        # the top of the loop catches the case where
+                        # active never finishes and this entry's window
+                        # actually expires.
+                        if entry["id"] not in deferred_logged:
+                            print(f"[scheduler] "
+                                  f"{datetime.now().strftime('%H:%M:%S')}  "
+                                  f"DEFER {entry['id']}: {reason}")
+                            deferred_logged.add(entry["id"])
                         continue
                     print(f"[scheduler] {datetime.now().strftime('%H:%M:%S')}  "
                           f"firing {entry['id']}  "
@@ -961,6 +1008,7 @@ def cmd_run(args) -> int:
                         active[entry["id"]] = proc
                         entry["status"] = "recording"
                         save_queue(queue)
+                        deferred_logged.discard(entry["id"])
 
             time.sleep(args.poll_sec)
         except KeyboardInterrupt:
