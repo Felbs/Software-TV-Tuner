@@ -195,7 +195,7 @@ def status_printer(out_files: list[Path], programs: list[dict],
                 label = (f"prog {p['program_number']:>3}  "
                          f"{p['virtual']:<6}  {p['callsign']:<10}")
             else:
-                label = f"[FULL MUX]                       "
+                label = "[FULL MUX]                       "
             print(f"  {label}  {fmt_mb(sz)}  ({rate_kbs:5.0f} KB/s)")
         if stop_evt.wait(timeout=5):
             return
@@ -239,7 +239,7 @@ def main() -> int:
         wanted = {int(x) for x in args.programs.split(",")}
         programs = [p for p in programs if p["program_number"] in wanted]
         if not programs:
-            print(f"[multirec] none of the requested programs are in this mux",
+            print("[multirec] none of the requested programs are in this mux",
                   file=sys.stderr)
             return 1
 
@@ -282,9 +282,9 @@ def main() -> int:
     keep_mux = False
     started_at = 0.0
     try:
-        print(f"[multirec] waiting for chain to lock (up to 30s)...")
+        print("[multirec] waiting for chain to lock (up to 30s)...")
         if not wait_for_live_ts(timeout_sec=30.0):
-            print(f"[multirec] chain never produced live.ts bytes — abort",
+            print("[multirec] chain never produced live.ts bytes — abort",
                   file=sys.stderr)
             return 2
 
@@ -292,7 +292,7 @@ def main() -> int:
         locked = False
         while time.time() < deadline:
             if tv_live.poll() is not None:
-                print(f"[multirec] tv_live died during convergence",
+                print("[multirec] tv_live died during convergence",
                       file=sys.stderr)
                 return 2
             pat = measure_convergence()
@@ -302,7 +302,7 @@ def main() -> int:
                 break
             time.sleep(1.0)
         if not locked:
-            print(f"[multirec] chain didn't converge in 10s — abort",
+            print("[multirec] chain didn't converge in 10s — abort",
                   file=sys.stderr)
             return 2
 
@@ -310,7 +310,7 @@ def main() -> int:
         # spawning. At ~1 MB/s mux rate, 20 MB takes ~20s — ffmpeg's
         # probesize+analyzeduration need this much to enumerate every
         # program's codec parameters reliably.
-        print(f"[multirec] buffering live.ts for ffmpeg analyze pass...")
+        print("[multirec] buffering live.ts for ffmpeg analyze pass...")
         buf_deadline = time.time() + 30.0
         while time.time() < buf_deadline:
             try:
@@ -321,7 +321,7 @@ def main() -> int:
                 print(f"[multirec] live.ts has {sz/1e6:.0f} MB — proceeding.")
                 break
             if tv_live.poll() is not None:
-                print(f"[multirec] tv_live died while buffering",
+                print("[multirec] tv_live died while buffering",
                       file=sys.stderr)
                 return 2
             time.sleep(1.0)
@@ -382,7 +382,7 @@ def main() -> int:
         deadline = started_at + duration_sec
         while time.time() < deadline:
             if tv_live.poll() is not None:
-                print(f"[multirec] tv_live died mid-record — stopping",
+                print("[multirec] tv_live died mid-record — stopping",
                       file=sys.stderr)
                 break
             if ffmpeg_proc.poll() is not None:
@@ -391,7 +391,7 @@ def main() -> int:
                 break
             time.sleep(1.0)
 
-        print(f"\n[multirec] duration reached, shutting down...")
+        print("\n[multirec] duration reached, shutting down...")
 
     finally:
         stop_evt.set()
@@ -420,7 +420,7 @@ def main() -> int:
             pass
 
     elapsed = time.time() - started_at if started_at else 0
-    print(f"\n[multirec] recap:")
+    print("\n[multirec] recap:")
     total = 0
     for i, f in enumerate(out_files):
         try:
@@ -434,7 +434,7 @@ def main() -> int:
             label = (f"prog {p['program_number']:>3}  "
                      f"{p['virtual']:<6} {p['callsign']:<10}")
         else:
-            label = f"[FULL MUX] (all programs, all PIDs)        "
+            label = "[FULL MUX] (all programs, all PIDs)        "
         print(f"  {verdict} {label}  {fmt_mb(sz)}  -> {f.name}")
     rate = (total / max(1, elapsed)) / 1024 if elapsed else 0
     print(f"\n[multirec] total: {fmt_mb(total)} across {len(programs)} programs "
