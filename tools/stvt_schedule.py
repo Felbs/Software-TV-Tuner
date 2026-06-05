@@ -788,6 +788,37 @@ def is_daemon_running() -> bool:
         return False
 
 
+def compute_skip_reason(entry: dict, active_ids: list[str],
+                         queue: list[dict]) -> str | None:
+    """Decide whether `entry` should be skipped because the SDR is
+    already busy. Returns the human-readable skip reason, or None if
+    it's safe to fire.
+
+    The SDR is single-tenant: only one multirec can hold the device.
+    If another entry is already in `active_ids`, the new fire must be
+    skipped (even on the SAME RF — a 2nd multirec on the same RF would
+    spawn its own tv_live which can't acquire the SDR and dies fast,
+    producing a stub ~30s file that LOOKS done but isn't).
+
+    Same-RF and different-RF skips get distinct messages so the user
+    knows whether to use rmux (same) or just accept the conflict
+    (different).
+
+    Mirrors the inline logic in cmd_run; extracted so unit tests can
+    pin the skip rules without spawning the daemon.
+    """
+    for eid in active_ids:
+        active_entry = next((q for q in queue if q["id"] == eid), None)
+        if not active_entry:
+            continue
+        if active_entry["rf"] == entry["rf"]:
+            return (f"same-mux RF{entry['rf']} record already active "
+                    f"(\"{active_entry['title']}\"); use rmux to cover both")
+        return (f"different-mux RF{active_entry['rf']} record already "
+                f"active (\"{active_entry['title']}\"); only one SDR")
+    return None
+
+
 def compute_fire_duration_min(entry: dict, now_unix: int) -> tuple[int, bool]:
     """Decide how many minutes to record for this entry, clamped to the
     time remaining until entry["end_unix"].
@@ -908,30 +939,13 @@ def cmd_run(args) -> int:
                 # Fire if start is within args.lead_sec
                 if entry["start_unix"] - args.lead_sec <= now:
                     # SDR is single-tenant: only one multirec can hold it
-                    # at a time. Refuse to fire a 2nd multirec while one
-                    # is already running, regardless of whether the RFs
-                    # match. Same-RF cases are doubly bad — second
-                    # multirec spawns its own tv_live which can't
-                    # acquire the SDR and dies fast, producing a stub
-                    # ~30s file that LOOKS done but isn't.
-                    skip_reason = None
-                    for eid, proc in active.items():
-                        active_entry = next((q for q in queue if q["id"] == eid),
-                                             None)
-                        if not active_entry:
-                            continue
-                        if active_entry["rf"] == entry["rf"]:
-                            skip_reason = (f"same-mux RF{entry['rf']} record "
-                                           f"already active "
-                                           f"(\"{active_entry['title']}\"); "
-                                           f"use rmux to cover both")
-                        else:
-                            skip_reason = (f"different-mux RF"
-                                           f"{active_entry['rf']} record "
-                                           f"already active "
-                                           f"(\"{active_entry['title']}\"); "
-                                           f"only one SDR")
-                        break
+                    # at a time. compute_skip_reason() decides whether
+                    # this entry has to be skipped because something is
+                    # already active; same-RF and different-RF cases get
+                    # distinct messages.
+                    skip_reason = compute_skip_reason(
+                        entry, list(active.keys()), queue
+                    )
                     if skip_reason:
                         print(f"[scheduler] "
                               f"{datetime.now().strftime('%H:%M:%S')}  "
