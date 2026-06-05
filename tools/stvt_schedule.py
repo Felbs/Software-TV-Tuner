@@ -38,7 +38,7 @@ import os
 import subprocess
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -229,8 +229,8 @@ def cmd_add_show(args) -> int:
         for c in conflicts:
             print(f"           RF{c['rf']} {c['virtual']} "
                   f"\"{c['title']}\" at {fmt_time(c['start_unix'])}")
-        print(f"           The earlier-starting entry will win; others "
-              f"get skipped.")
+        print("           The earlier-starting entry will win; others "
+              "get skipped.")
     return 0
 
 
@@ -238,8 +238,8 @@ def cmd_add(args) -> int:
     try:
         start_dt = datetime.strptime(args.start, "%Y-%m-%d %H:%M")
     except ValueError:
-        print(f"[schedule] --start must be 'YYYY-MM-DD HH:MM' "
-              f"(24-hour, local time)", file=sys.stderr)
+        print("[schedule] --start must be 'YYYY-MM-DD HH:MM' "
+              "(24-hour, local time)", file=sys.stderr)
         return 1
     start_unix = int(start_dt.timestamp())
     end_unix = start_unix + int(args.duration * 60)
@@ -623,10 +623,10 @@ def cmd_tv(args) -> int:
         rows = build_channel_snapshot(scan)
         queue = load_queue()
         os.system("cls" if sys.platform == "win32" else "clear")
-        print(f"=================================================================")
+        print("=================================================================")
         print(f"  STVT DVR    {datetime.now().strftime('%a %m/%d %I:%M %p').lstrip('0')}    "
               f"({len(rows)} channels)")
-        print(f"=================================================================")
+        print("=================================================================")
         print()
         print(render_tv_table(rows))
         print()
@@ -673,7 +673,7 @@ def cmd_tv(args) -> int:
             queue = [q for q in queue if not q["id"].startswith(arg)
                      and q["id"] != arg]
             save_queue(queue)
-            print(f"removed."); input("[enter]"); continue
+            print("removed."); input("[enter]"); continue
         if cmd == "unwatch":
             if stop_watch():
                 print("watcher stopped.")
@@ -828,7 +828,7 @@ def cmd_run(args) -> int:
     print(f"[scheduler] queue path: {QUEUE_PATH}")
     if out_dir:
         print(f"[scheduler] output: {out_dir}")
-    print(f"[scheduler] Ctrl+C to stop.")
+    print("[scheduler] Ctrl+C to stop.")
     print()
 
     active: dict[str, subprocess.Popen] = {}
