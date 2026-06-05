@@ -42,6 +42,21 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+# SDRplay API DLL: SoapySDR's sdrPlaySupport.dll lives in C:\Program
+# Files\SDRplay\API\x64 but radioconda's env doesn't inherit that PATH
+# entry, so the DLL fails to load when SoapySDR enumerates devices.
+# tv_live.py applies this same snippet for the same reason. Must run
+# BEFORE the sdr_sweep import (which triggers SoapySDR module load).
+if sys.platform == "win32":
+    _sdrplay_api_x64 = r"C:\Program Files\SDRplay\API\x64"
+    if os.path.isdir(_sdrplay_api_x64):
+        os.environ["PATH"] = (_sdrplay_api_x64 + os.pathsep +
+                               os.environ.get("PATH", ""))
+        try:
+            os.add_dll_directory(_sdrplay_api_x64)
+        except (AttributeError, OSError):
+            pass
+
 # Reuse sdr_sweep's sweep() + _analyze() so the metrics are identical
 # to what the scanner sees. Single source of truth for "what's on this
 # frequency right now". sdr_sweep imports SoapySDR at top level — that
