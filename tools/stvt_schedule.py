@@ -633,7 +633,9 @@ def cmd_tv(args) -> int:
         print("PENDING RECORDINGS:")
         print(render_pending(queue))
         print()
-        watching_str = f"  [now watching: {_WATCH_LABEL}]" if _WATCH_PROC and _WATCH_PROC.poll() is None else ""
+        watching_str = (f"  [now watching: {_WATCH_LABEL}]"
+                        if _proc_running(_WATCH_VLC) or _proc_running(_WATCH_FFMPEG)
+                        else "")
         print(f"Commands:{watching_str}")
         print("  r   <#>          record ON-NOW of channel #")
         print("  rn  <#>          record NEXT show on channel #")
