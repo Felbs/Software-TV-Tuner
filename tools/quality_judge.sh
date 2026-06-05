@@ -31,8 +31,11 @@
 #     "reason": "human" }
 
 set -u
-STATE=/tmp/quality_state.json
-LIVE_TS=/home/user/Software-TV-Tuner/tools/data/tv_live/live.ts
+STATE="${STVT_QUALITY_STATE:-/tmp/quality_state.json}"
+# Repo-relative by default (this script lives in tools/), override with
+# STVT_LIVE_TS. Was hardcoded to /home/user — broke on every other box.
+_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIVE_TS="${STVT_LIVE_TS:-$_HERE/data/tv_live/live.ts}"
 WINDOW=15
 LOOP=0
 PROGRAM="${STVT_PROGRAM:-3}"
@@ -48,21 +51,28 @@ done
 
 measure_once() {
     local tmp_log=$(mktemp /tmp/quality_judge_XXXXXX.log)
-    if [ ! -f "$LIVE_TS" ] || [ "$(stat -c%s "$LIVE_TS" 2>/dev/null || echo 0)" -lt 50000000 ]; then
-        emit 0 "broken" 0 0 0 0 "live.ts missing or <50MB"
+    # Bytes for ~WINDOW+6 s of a ~19.39 Mbps ATSC mux (~2.5 MB/s).
+    local chunk_bytes=$(( (WINDOW + 6) * 2500000 ))
+    if [ ! -f "$LIVE_TS" ] || [ "$(stat -c%s "$LIVE_TS" 2>/dev/null || echo 0)" -lt "$chunk_bytes" ]; then
+        emit 0 "broken" 0 0 0 0 "live.ts missing or too small for a ${WINDOW}s window"
         rm -f "$tmp_log"
         return
     fi
 
-    # Decode the LATEST $WINDOW seconds worth of TS. The chain writes
-    # ~1.5MB/s, so window*1.5MB is recent. Use ffmpeg's seek-to-end-relative
-    # trick: -sseof negates EOF-relative seek (negative = from end).
-    timeout $((WINDOW + 15)) ffmpeg -hide_banner -loglevel info \
-        -fflags +genpts+igndts -err_detect ignore_err \
-        -sseof -$((WINDOW * 2)) \
-        -f mpegts -i "$LIVE_TS" \
+    # Sample the LIVE EDGE reliably: copy the most-recent chunk to a
+    # COMPLETE static file, skip a 2s lead-in (start on a clean GOP, not a
+    # mid-write region), then decode WINDOW seconds. ffmpeg's -sseof on a
+    # GROWING ts lands on the same partial chunk every call and invents
+    # decode "errors" (identical readings, phantom v/a errors) — copying a
+    # settled chunk fixes that.
+    local recent=$(mktemp /tmp/qj_recent_XXXXXX.ts)
+    tail -c "$chunk_bytes" "$LIVE_TS" > "$recent"
+    timeout $((WINDOW + 20)) ffmpeg -hide_banner -loglevel info \
+        -err_detect ignore_err -ss 2 \
+        -i "$recent" \
         -map "0:p:$PROGRAM:v?" -map "0:p:$PROGRAM:a?" \
         -t $WINDOW -f null - 2>"$tmp_log"
+    rm -f "$recent"
 
     # Count metrics from ffmpeg's stderr
     local frames=$(grep -oP 'frame=\s*\K[0-9]+' "$tmp_log" | tail -1)
@@ -76,12 +86,13 @@ measure_once() {
 
     # Score formula:
     # - Start with fps × 3 (90 = perfect 30fps).
-    # - Subtract v_eps (video errors per sec) up to 30 points.
-    # - Subtract a_eps × 2 up to 20 points.
-    # - Cap at 100.
+    # - Subtract video errors/sec, capped at 30 points.
+    # - Subtract audio errors/sec × 2, capped at 20 points.
+    # - Clamp to 0-100.
     local score=$(awk "BEGIN{
         s = $fps * 3;
-        s -= (v_eps_var=$v_eps); if (v_eps_var > 30) s -= 30 - v_eps_var;
+        ve = $v_eps; if (ve > 30) ve = 30; s -= ve;
+        ae = $a_eps * 2; if (ae > 20) ae = 20; s -= ae;
         if (s > 100) s = 100;
         if (s < 0) s = 0;
         printf \"%d\", s
