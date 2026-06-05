@@ -44,7 +44,6 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
 
 REPO = Path(__file__).resolve().parents[1]
 TV_LIVE = REPO / "tools" / "tv_live.py"
