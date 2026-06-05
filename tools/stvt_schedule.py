@@ -780,6 +780,30 @@ def is_daemon_running() -> bool:
         return False
 
 
+def compute_fire_duration_min(entry: dict, now_unix: int) -> tuple[int, bool]:
+    """Decide how many minutes to record for this entry, clamped to the
+    time remaining until entry["end_unix"].
+
+    Returns (duration_min, clamped). `clamped` is True iff the clamp
+    actually shortened the recording below the original length.
+
+    Bug this prevents: if the daemon fires an entry LATE (e.g. it's
+    1:24 AM but the entry's start_unix was 12:00 AM with a 90-minute
+    length), naively passing length_sec//60 + 1 = 91 min to multirec
+    would record until ~2:55 AM and steal the next mux slot. Clamping
+    to (end_unix - now_unix) keeps the recording inside its original
+    window, with a 1-min pad and a 1-min floor.
+    """
+    original_sec = max(0, entry["length_sec"])
+    remaining_sec = entry["end_unix"] - now_unix
+    # Floor at 60s so an extremely-late fire still gets a usable file
+    # instead of `--duration 0` (which multirec would reject).
+    clamped_sec = max(60, min(original_sec, remaining_sec))
+    duration_min = max(1, clamped_sec // 60 + 1)  # 1-min pad
+    was_clamped = remaining_sec < original_sec
+    return duration_min, was_clamped
+
+
 def fire_recording(entry: dict, out_dir: Path | None,
                    pre_roll_sec: int) -> subprocess.Popen | None:
     """Spawn stvt_multirec.py for this entry. Returns Popen or None.
@@ -790,7 +814,14 @@ def fire_recording(entry: dict, out_dir: Path | None,
       whole-mux:       {"mux_record": True}        -> no --programs flag
                                                       (records every program)
     """
-    duration_min = max(1, entry["length_sec"] // 60 + 1)  # 1 min pad
+    now_unix = int(time.time())
+    duration_min, was_clamped = compute_fire_duration_min(entry, now_unix)
+    if was_clamped:
+        original_min = max(1, entry["length_sec"] // 60)
+        print(f"[scheduler] late-fire clamp: recording for "
+              f"{duration_min} min instead of original {original_min} min "
+              f"(entry {entry['id']} end window passes in "
+              f"{max(0, entry['end_unix'] - now_unix)}s)")
     cmd = [PYTHON_EXE, "-u", str(MULTIREC_PY),
            "--rf", str(entry["rf"]),
            "--duration", str(duration_min)]
