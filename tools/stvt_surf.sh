@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# stvt_surf.sh — channel surfer. Change channels up/down right in the mpv
+# window like a TV remote: PageUp / PageDown, or scroll the mouse wheel.
+# Smooth mpv playback + overlaid CC carry across channels. Switching to a
+# subchannel in the SAME mux is fast (no retune); changing mux retunes the
+# SDR (a few seconds, like any OTA tuner).
+#
+# Channel list comes from ~/.tv_tuner/scan.json (run a scan first), sorted
+# by virtual channel.
+#
+# Usage:  tools/stvt_surf.sh
+#   STVT_SURF_START=<index>  start on a given channel (default 0)
+#   STVT_CC_DELAY=<sec>      caption delay (default 5)
+# Stop: Ctrl-C in this terminal (tears everything down), or press q in mpv
+#       then Ctrl-C.
+set -u
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+F="$HERE/data/tv_live/live.ts"
+SOCK=/tmp/mpv-cc.sock
+CCFEED=/tmp/stvt_cc_feed.ts
+FIFO=/tmp/stvt_surf.fifo
+ICONF=/tmp/stvt_surf_input.conf
+CCDELAY="${STVT_CC_DELAY:-5}"
+
+export DISPLAY="${DISPLAY:-:0}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export PULSE_SERVER="${PULSE_SERVER:-unix:/mnt/wslg/PulseServer}"
+export LIBGL_ALWAYS_SOFTWARE=1
+export STVT_SOAPY_ARGS="${STVT_SOAPY_ARGS:-driver=remote,remote=127.0.0.1:55132,remote:driver=sdrplay}"
+export STVT_STREAM_ARGS="${STVT_STREAM_ARGS:-remote:prot=tcp}"
+export STVT_IFGR=59 STVT_RFGAIN_SEL=5 STVT_ANTENNA="Antenna A"
+export STVT_RS=stock STVT_VITERBI=hard STVT_EQ=long STVT_SPS=1.1 STVT_RRC_SYMS=4
+pactl unload-module module-suspend-on-idle 2>/dev/null || true   # keep audio alive
+
+# --- channel list (rf|program|virtual|callsign), sorted by virtual channel ---
+mapfile -t CHANS < <(cd "$HERE" && python3 - <<'PY'
+import json, pathlib, tv_tuner as t
+scan = json.loads((pathlib.Path.home()/'.tv_tuner/scan.json').read_text())
+rows = [r for r in t.expand_channels_from_scan(scan) if not r.get("not_detected")]
+def key(r):
+    try:
+        a, _, b = str(r.get("virtual", "")).partition(".")
+        return (int(a), int(b or 0))
+    except ValueError:
+        return (9999, 0)
+for r in sorted(rows, key=key):
+    print(f"{r['rf']}|{r['program']}|{r.get('virtual','?')}|{r.get('callsign','?')}")
+PY
+)
+N=${#CHANS[@]}
+[ "$N" -gt 0 ] || { echo "no channels in scan.json — run a scan first"; exit 1; }
+echo "loaded $N channels"
+
+# --- mpv keybindings -> write a direction into the control fifo ---
+cat > "$ICONF" <<EOF
+PGUP       run /bin/sh -c "echo up > $FIFO"
+PGDWN      run /bin/sh -c "echo down > $FIFO"
+WHEEL_UP   run /bin/sh -c "echo up > $FIFO"
+WHEEL_DOWN run /bin/sh -c "echo down > $FIFO"
+EOF
+rm -f "$FIFO"; mkfifo "$FIFO"
+
+CHAIN_PG=""; FEED_PG=""; MPV_PG=""; BR_PG=""; CUR_RF=""
+
+ensure_chain() {  # $1 = rf ; (re)tune only if the RF actually changed
+  if [ "$CUR_RF" = "$1" ] && [ -n "$CHAIN_PG" ] && kill -0 "$CHAIN_PG" 2>/dev/null; then
+    return
+  fi
+  [ -n "$CHAIN_PG" ] && kill -- -"$CHAIN_PG" 2>/dev/null
+  sleep 3; rm -f "$F"
+  setsid bash -c "exec python3 '$HERE/tv_live.py' --rf $1 > '$HERE/data/tv_live/tv_tuner.tv_live.log' 2>&1" </dev/null >/dev/null 2>&1 &
+  CHAIN_PG=$!; CUR_RF="$1"
+  for i in $(seq 1 25); do [ "$(stat -c%s "$F" 2>/dev/null || echo 0)" -gt 40000000 ] && break; sleep 1; done
+}
+
+stop_player() {
+  for pg in "$MPV_PG" "$FEED_PG" "$BR_PG"; do [ -n "$pg" ] && kill -- -"$pg" 2>/dev/null; done
+  MPV_PG=""; FEED_PG=""; BR_PG=""
+}
+
+start_player() {  # $1 = program
+  local p="$1"
+  setsid bash -c "tail -s 0.1 -c 20000000 -F '$F' | ffmpeg -hide_banner -loglevel error -i pipe:0 -map 0:p:$p -c copy -f mpegts '$CCFEED'" </dev/null >/dev/null 2>&1 &
+  FEED_PG=$!
+  rm -f "$SOCK"
+  setsid bash -c "tail -c 20000000 -F '$F' | ffmpeg -hide_banner -loglevel warning -err_detect ignore_err -i - -map 0:p:$p -c copy -flush_packets 1 -f mpegts - | mpv - --input-ipc-server='$SOCK' --input-conf='$ICONF' --vo=wlshm --hwdec=no --cache=yes --cache-secs=30 --demuxer-readahead-secs=20 --cache-pause=no --cache-pause-initial=no --force-seekable=no --osd-align-x=center --osd-align-y=bottom --osd-font-size=42 --osd-border-size=2 --title='STVT Surf'" </dev/null >/tmp/stvt_surf_mpv.log 2>&1 &
+  MPV_PG=$!
+  for i in $(seq 1 30); do [ -S "$SOCK" ] && break; sleep 0.3; done
+  setsid python3 "$HERE/stvt_cc_osd.py" --feed "$CCFEED" --channel 1 --sock "$SOCK" --delay "$CCDELAY" </dev/null >/dev/null 2>&1 &
+  BR_PG=$!
+}
+
+banner() {  # transient channel banner on the mpv OSD
+  python3 - "$SOCK" "$1" <<'PY' 2>/dev/null || true
+import socket, json, sys
+try:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.settimeout(2)
+    s.connect(sys.argv[1])
+    s.sendall((json.dumps({"command": ["show-text", sys.argv[2], 2500]}) + "\n").encode())
+    s.close()
+except OSError:
+    pass
+PY
+}
+
+tune() {  # $1 = index
+  IFS='|' read -r rf prog virt call <<< "${CHANS[$1]}"
+  echo "-> [$(( $1 + 1 ))/$N]  $virt  $call  (RF$rf prog$prog)"
+  ensure_chain "$rf"
+  stop_player
+  start_player "$prog"
+  sleep 1; banner "  $virt   $call  "
+}
+
+cleanup() { stop_player; [ -n "$CHAIN_PG" ] && kill -- -"$CHAIN_PG" 2>/dev/null; rm -f "$FIFO"; }
+trap cleanup EXIT INT TERM
+
+IDX="${STVT_SURF_START:-0}"
+tune "$IDX"
+echo "=== SURFING: PageUp/PageDown or mouse-wheel in the mpv window to change channel. Ctrl-C here to stop. ==="
+while read -r cmd <"$FIFO"; do
+  case "$cmd" in
+    up)   IDX=$(( (IDX + 1) % N )) ;;
+    down) IDX=$(( (IDX - 1 + N) % N )) ;;
+    *)    continue ;;
+  esac
+  tune "$IDX"
+done
