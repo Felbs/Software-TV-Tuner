@@ -110,6 +110,7 @@ PYTHON_EXE = _resolve_python_exe()
 FFMPEG = _resolve_binary("ffmpeg", r"C:\ffmpeg\bin\ffmpeg.exe")
 FFPLAY = _resolve_binary("ffplay", r"C:\ffmpeg\bin\ffplay.exe")
 FFPROBE = _resolve_binary("ffprobe", r"C:\ffmpeg\bin\ffprobe.exe")
+VLC = _resolve_binary("vlc", r"C:\Program Files\VideoLAN\VLC\vlc.exe")
 # ffmpeg analyzeduration / probesize for the live-TS pipeline.
 # ffmpeg sees the raw noisy TS straight from the GR flowgraph, so on
 # Linux/Mac it needs a larger probe budget to find programs through
@@ -270,11 +271,36 @@ def print_channel_list() -> list[dict]:
 
 
 # ── Pipeline plumbing ────────────────────────────────────────────
+# Chain settings that the play path (stvt_channel_step.py) has been
+# using for months. The scanner historically ran with raw defaults,
+# which meant the equalizer cold-start probability was lower AND the
+# RSPdx front-end ran at the wrong gain. That's why scans recover
+# fewer channels than the picker can actually tune. Keep this in sync
+# with CHAIN_DEFAULTS in stvt_channel_step.py.
+CHAIN_DEFAULTS = {
+    "STVT_EQ":         "long",
+    "STVT_RS":         "stock",
+    "STVT_VITERBI":    "soft",
+    "STVT_SPS":        "1.1",
+    "STVT_RRC_SYMS":   "8",
+    "STVT_TEISCRUB":   "1",
+    "STVT_EQ_LKG":     "1",
+    "STVT_EQ_LKG_RMS": "1.0",
+    "STVT_IFGR":       "45",
+    "STVT_RFGAIN_SEL": "3",
+    "STVT_ANTENNA":    "Antenna A",
+}
+
+
 def env_with_sdrplay() -> dict:
-    """Return os.environ + SDRplay API DLL dir on PATH (Windows only).
+    """Return os.environ + SDRplay API DLL dir on PATH (Windows only)
+    + chain quality defaults if not already set.
+
     On Linux the SDRplay API installs system-wide and the runtime
     linker finds it without a PATH tweak."""
     env = os.environ.copy()
+    for k, v in CHAIN_DEFAULTS.items():
+        env.setdefault(k, v)
     if not SDRPLAY_API_DIR:
         return env
     path = env.get("PATH", "")
@@ -606,16 +632,31 @@ def kill_proc(proc, label: str = "proc"):
             pass
 
 
-def ffprobe_programs(timeout_sec: float = 12.0) -> list[dict]:
+def ffprobe_programs(timeout_sec: float = 20.0,
+                     min_ts_size: int = 8_000_000) -> list[dict]:
     """ffprobe live.ts for all programs in the multiplex. Returns list of
     dicts with program_id, program_num, service_name, video_codec,
-    video_height, audio_codec. Empty list if probe fails."""
+    video_height, audio_codec. Empty list if probe fails.
+
+    Waits up to ~6s for live.ts to reach `min_ts_size` before probing —
+    on locked-but-slow multiplexes (RF 7 WJLA, RF 15 WFDC) the PSI
+    cycle can take 3-4 seconds, and ffprobe with too small an analyze
+    budget returns 0 programs even though PAT is healthy. Bumped
+    analyzeduration/probesize from 5M to 10M for the same reason."""
+    deadline = time.time() + 6.0
+    while time.time() < deadline:
+        try:
+            if LIVE_TS.stat().st_size >= min_ts_size:
+                break
+        except OSError:
+            pass
+        time.sleep(0.3)
     try:
         result = subprocess.run(
             [FFPROBE,
              "-v", "error", "-of", "json",
              "-show_programs", "-show_streams",
-             "-analyzeduration", "5000000", "-probesize", "5000000",
+             "-analyzeduration", "10000000", "-probesize", "10000000",
              "-f", "mpegts", "-i", str(LIVE_TS)],
             capture_output=True, timeout=timeout_sec, text=True,
         )
@@ -687,7 +728,11 @@ def scan_one_rf(rf: int, dwell_sec: float = 12.0,
         return {"rf": rf, "lock": False, "reason": f"spawn failed: {e}"}
 
     try:
-        if not wait_for_live_ts(timeout_sec=15.0):
+        # 25s window: the tv_live.py chain (long equalizer + soft viterbi)
+        # cold-starts 4-6s slower than the old softvit fork, especially
+        # on VHF and marginal UHF carriers. 15s was too tight and cut
+        # off legitimately-locking channels (RF 7 WJLA, RF 24, RF 27).
+        if not wait_for_live_ts(timeout_sec=25.0):
             return {"rf": rf, "lock": False, "reason": "no live.ts growth"}
         # Wait for the equalizer to converge.
         deadline = time.time() + dwell_sec
@@ -727,8 +772,11 @@ def scan_one_rf(rf: int, dwell_sec: float = 12.0,
         return result
     finally:
         kill_proc(proc, "scan_tv_live")
-        # SDRplay driver needs ~3 s to fully release the device.
-        time.sleep(3)
+        # SDRplay driver needs ~4 s to fully release between back-to-back
+        # tunes. 3s was sometimes too tight on this rig and the next
+        # channel's SDR open would fail silently (presents as
+        # "no live.ts growth" on the FOLLOWING channel, not this one).
+        time.sleep(4)
 
 
 def scan_one_rf_with_retry(rf: int, dwell_sec: float = 12.0,
@@ -942,8 +990,8 @@ def run_scan(region: dict | None = None,
                     weak_atsc1_carriers.append(rec)
                 elif atsc3_carrier:
                     rec["lock"] = False
-                    rec["reason"] = (f"ATSC 3.0 / NextGen TV detected — "
-                                     f"install a 3.0 decoder to watch")
+                    rec["reason"] = ("ATSC 3.0 / NextGen TV detected — "
+                                     "install a 3.0 decoder to watch")
                     rec["atsc3"] = True
                     atsc3_carriers.append(rec)
                 else:
@@ -968,8 +1016,14 @@ def run_scan(region: dict | None = None,
         # Phase 2: full lock test on hot ATSC channels only.
         decodable = region.get("decodable") in (True, "atsc_only")
         if decodable and hot_atsc:
+            # With retries=2, worst case per channel is 3 attempts.
+            # In practice strong locks finish in ~dwell_sec+8s and only
+            # marginal ones pay for retries — budget 1.6x for a realistic
+            # ceiling without scaring the user.
+            est = int(len(hot_atsc) * (dwell_sec + 8) * 1.6)
             print(f"[scan] phase 2 — full lock test on {len(hot_atsc)} "
-                  f"ATSC 1.0 carrier(s) (~{len(hot_atsc) * (dwell_sec + 5):.0f}s)...")
+                  f"ATSC 1.0 carrier(s) (~{est}s, marginal channels may "
+                  f"retry up to 3x)...")
             if atsc3_carriers:
                 print(f"[scan]   (also {len(atsc3_carriers)} ATSC 3.0 / "
                       f"NextGen TV carrier(s) detected — skipping phase 2; "
@@ -987,8 +1041,13 @@ def run_scan(region: dict | None = None,
                 # immediately. WTTG RF 36 was the canonical example —
                 # phase-1 metrics identical to channels that locked, but
                 # the equalizer just didn't converge on first try.
+                # NOTE: viterbi="stock" routes to tv_live.py, which reads
+                # STVT_VITERBI=soft from CHAIN_DEFAULTS. The "soft" branch
+                # routes to tv_live_softvit.py, an older fork that ignores
+                # env vars — do not use it here, it strips our chain config.
                 res = scan_one_rf_with_retry(rf, dwell_sec=dwell_sec,
-                                              log_fh=log_fh, retries=1)
+                                              viterbi="stock",
+                                              log_fh=log_fh, retries=2)
                 # Preserve phase-1 metrics into the post-lock record so
                 # the picker can show signal strength %.
                 res["rms_dbfs"] = rec["rms_dbfs"]
@@ -1073,22 +1132,70 @@ def build_ffmpeg_cmd(play: bool, record_path: Path | None,
                      stream_url: str | None,
                      program: int = 1,
                      captions: bool = False,
-                     passthrough: bool = False) -> list[str]:
+                     passthrough: bool = False,
+                     copy_mode: bool = False) -> list[str]:
     """Build the central ffmpeg command line.
 
-    Two modes:
-      * Default (transcoding): Always re-encodes — passthrough exposes
-        raw 1080i interlace combing and unconcealed mpeg2 macroblock
-        breakage from TEI scrubs. Local play uses h264_nvenc + yadif;
-        record/stream same encoder fanned through tee.
-      * passthrough=True (Linux fast-play): Minimal copy-mode pipeline.
-        Selects one program with -map and re-muxes to mpegts on stdout
-        with -c copy — no transcoding, no encoders involved. Used on
-        Linux to dodge the NVENC-encoder-init fragility that fails on
-        the corrupt USB-fed MPEG-TS, while still filtering down to a
-        single program so ffplay doesn't rotate through the multiplex.
-        Only valid when play=True with no record/stream sinks.
+    Three modes:
+      * Default (transcoding): h264_nvenc + AAC re-encode for ffplay.
+      * copy_mode=True: TRUE passthrough — `-c copy` for video and audio.
+        Preserves original mpeg2video frames with CEA-608 user_data + the
+        AC3 audio + original PTS. Players like VLC render captions in
+        perfect sync because they see the same frames the broadcaster sent.
+        Used when player='vlc' and we're only playing.
+      * passthrough=True (Linux fast-play): libx264 re-encode for ffplay
+        on Linux to dodge NVENC init issues.
     """
+    if copy_mode:
+        # Pure passthrough for VLC. -c copy keeps mpeg2video + AC3 + CEA-608
+        # user_data untouched so VLC's CEA-608 decoder reads captions from
+        # the SAME frames it decodes for video — guaranteed sync.
+        #
+        # Audio track selection: VLC's stdin mpegts demuxer is unreliable
+        # at switching between multiple audio tracks (the B-key cycle
+        # falls back to English regardless of --audio-track / --audio-language).
+        # Workaround: have ffmpeg deliver ONLY the language we want.
+        # STVT_AUDIO_LANGUAGE=eng (default) sends English; spa sends
+        # Spanish SAP; empty/"all" sends everything (VLC can choose).
+        lang = os.environ.get("STVT_AUDIO_LANGUAGE", "eng").lower()
+        cmd = [
+            FFMPEG,
+            "-hide_banner", "-loglevel", "warning",
+            "-fflags", "+genpts+igndts+discardcorrupt",
+            "-err_detect", "ignore_err",
+            "-analyzeduration", "5000000",
+            "-probesize", "5000000",
+            "-thread_queue_size", "4096",
+            "-f", "mpegts",
+            "-i", "pipe:0",
+        ]
+        if lang in ("", "all"):
+            cmd += ["-map", f"0:p:{program}"]
+        elif lang in ("eng", "english", "en"):
+            # English = first audio track on US ATSC. -map by index is
+            # cheapest and most reliable (no language-tag fallback path).
+            cmd += [
+                "-map", f"0:p:{program}:v",
+                "-map", f"0:p:{program}:a:0",
+            ]
+        else:
+            # Other language (typically "spa"): match by language tag.
+            # NO backstop — if the channel doesn't carry that language,
+            # we get video+silence so the user knows. Adding a fallback
+            # to first-audio would silently include English alongside,
+            # which is exactly what we were trying to avoid.
+            cmd += [
+                "-map", f"0:p:{program}:v",
+                "-map", f"0:p:{program}:m:language:{lang}",
+            ]
+        cmd += [
+            "-c", "copy",
+            "-copy_unknown",
+            "-f", "mpegts",
+            "pipe:1",
+        ]
+        return cmd
+
     if passthrough:
         # 2026-05-26 late evening: libx264 re-encode. `-c copy` is smoother
         # when mpv's probe succeeds, but probe failure is too common on this
@@ -1223,12 +1330,68 @@ def spawn_ffmpeg(cmd: list[str], log_fh, want_stdout_pipe: bool):
 
 
 def spawn_ffplay(window_title: str, log_fh):
-    # Optional alternative player — mpv has a more robust mpegts demuxer than
-    # ffplay's (better recovery from PES corruption, larger built-in buffer).
-    # On marginal/CPU-bound systems where ffplay drops the window with
-    # "could not find codec parameters", mpv often still renders. Activate
-    # via STVT_PLAYER=mpv. Default remains ffplay (Windows runtime).
-    if os.environ.get("STVT_PLAYER", "ffplay") == "mpv":
+    # Optional alternative players — mpv has a more robust mpegts demuxer than
+    # ffplay's; VLC has a built-in 3s buffer + native CEA-608 caption overlay +
+    # easy audio-track switching (B key cycles Spanish/English on multi-lingual
+    # programs, V key toggles captions). Activate via STVT_PLAYER=mpv or
+    # STVT_PLAYER=vlc. Default remains ffplay for back-compat on Linux.
+    player_choice = os.environ.get("STVT_PLAYER", "ffplay")
+
+    if player_choice == "vlc":
+        # VLC eats raw mpegts on stdin if we tell it the access method and the
+        # demux. Caches absorb the chain's drought windows. Native CC overlay
+        # is on by default (--sub-track 0 picks the first CEA-608 track when
+        # ATSC user_data exposes one).
+        #
+        # Caption styling matches traditional broadcast CC: monospaced white
+        # text on solid black box, bottom strip of the screen. All knobs
+        # overridable via STVT_SUB_* env vars.
+        sub_margin     = os.environ.get("STVT_SUB_MARGIN",      "40")    # px from bottom
+        sub_fontsize   = os.environ.get("STVT_SUB_FONTSIZE",    "20")    # relative
+        sub_font       = os.environ.get("STVT_SUB_FONT",        "Lucida Console")
+        sub_color      = os.environ.get("STVT_SUB_COLOR",       "16777215")  # white
+        sub_bg_color   = os.environ.get("STVT_SUB_BG_COLOR",    "0")     # black
+        sub_bg_opacity = os.environ.get("STVT_SUB_BG_OPACITY",  "255")   # solid
+        sub_outline    = os.environ.get("STVT_SUB_OUTLINE",     "0")     # no outline
+        sub_shadow_op  = os.environ.get("STVT_SUB_SHADOW",      "0")     # no shadow
+        cmd = [VLC,
+               "--no-video-title-show",
+               "--meta-title", window_title,
+               "--file-caching", "3000",
+               "--network-caching", "3000",
+               "--live-caching", "3000",
+               "--sout-mux-caching", "3000",
+               "--clock-jitter", "1000",
+               "--no-osd",
+               # Default: track 0 = first audio (usually English on US ATSC).
+               # Set STVT_AUDIO_TRACK=1 to start on Spanish SAP; B key cycles
+               # English → Spanish → Disabled → English → ... (three states).
+               # --audio-language is more reliable than --audio-track for
+               # stdin mpegts (VLC's track indexing is inconsistent across
+               # versions). Default "eng" if unset; set STVT_AUDIO_LANGUAGE=spa
+               # to start on the Spanish SAP track when present.
+               "--sub-track", "0",
+               "--audio-track", os.environ.get("STVT_AUDIO_TRACK", "0"),
+               "--audio-language", os.environ.get("STVT_AUDIO_LANGUAGE", "eng"),
+               # Traditional CC look — white monospaced on solid black box
+               "--sub-margin",                sub_margin,
+               "--freetype-rel-fontsize",     sub_fontsize,
+               "--freetype-font",             sub_font,
+               "--freetype-color",            sub_color,
+               "--freetype-background-color", sub_bg_color,
+               "--freetype-background-opacity", sub_bg_opacity,
+               "--freetype-outline-thickness", sub_outline,
+               "--freetype-shadow-opacity",   sub_shadow_op,
+               "-"]
+        return subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=log_fh,
+            stderr=log_fh,
+            creationflags=NEW_PROCESS_GROUP,
+        )
+
+    if player_choice == "mpv":
         # 2026-05-15: bumped cache-secs 4→20 and added demuxer-max-bytes
         # so the cache absorbs the ~25-30s drought windows we observed
         # in the chain log. Tradeoff: ~20s startup delay (cache must
@@ -1831,7 +1994,7 @@ def print_scan_table(scan: dict) -> list[dict]:
         if err:
             print()
             print(f"  ⚠  Phase-1 RF sweep failed: {err}")
-            print(f"  ⚠  Verify your SDR with: SoapySDRUtil --probe")
+            print("  ⚠  Verify your SDR with: SoapySDRUtil --probe")
         print()
         print("  No channels were detected on RF — listing the static")
         print(f"  default station table for {scan.get('region_label', 'your region')}.")
@@ -2544,7 +2707,12 @@ def run_pipeline(rf: int, callsign: str, play: bool,
         if player == "magic":
             print("[tv_tuner] --record/--stream require ffplay player path; "
                   "switching player from 'magic' to 'ffplay'.")
-        player = "ffplay"
+    # Propagate player choice to spawn_ffplay (it reads STVT_PLAYER from env).
+    # vlc / mpv take over here even though the function is named spawn_ffplay.
+    # DO NOT also rebind `player` itself — downstream code (vlc_copy_mode
+    # check) needs to see the actual choice.
+    if player in ("vlc", "mpv", "ffplay"):
+        os.environ["STVT_PLAYER"] = player
     if not (play or stream_url or record_path):
         # No outputs requested → still allow it if user is just locking
         # the tuner; emit warning.
@@ -2577,11 +2745,22 @@ def run_pipeline(rf: int, callsign: str, play: bool,
         and player == "ffplay"
         and os.environ.get("STVT_LINUX_FAST_PLAY", "1") != "0"
     )
+    # VLC handles raw mpeg2 + AC3 natively AND extracts CEA-608 from
+    # user_data in sync with video frames — only works if we pass the
+    # original stream through untouched (no h264_nvenc re-encode).
+    vlc_copy_mode = (
+        play
+        and record_path is None
+        and stream_url is None
+        and player == "vlc"
+        and os.environ.get("STVT_VLC_COPY_MODE", "1") != "0"
+    )
 
     cmd = build_ffmpeg_cmd(play=play, record_path=record_path,
                            stream_url=stream_url, program=program,
                            captions=captions,
-                           passthrough=linux_fast_play)
+                           passthrough=linux_fast_play,
+                           copy_mode=vlc_copy_mode)
 
     if dry_run:
         print("── DRY RUN ──")
@@ -2722,7 +2901,7 @@ def run_pipeline(rf: int, callsign: str, play: bool,
             if pat >= min_pat:
                 print(f"[tv_tuner] LOCK acquired on attempt {attempt}.")
                 return tv
-            print(f"[tv_tuner] bad convergence — killing and retrying...")
+            print("[tv_tuner] bad convergence — killing and retrying...")
             kill_proc(tv, "tv_live")
             time.sleep(2)
         return None
@@ -2801,8 +2980,8 @@ def run_pipeline(rf: int, callsign: str, play: bool,
         except ValueError:
             pass
         if fast_fail:
-            print(f"[tv_tuner] manual-tune attempt for an undetected "
-                  f"channel — single 8 s try, no retries.")
+            print("[tv_tuner] manual-tune attempt for an undetected "
+                  "channel — single 8 s try, no retries.")
         for attempt in range(1, MAX_RETRIES + 1):
             state.tv_proc = spawn_tv_live(rf, tv_log_fh, viterbi=viterbi)
             print(f"[tv_tuner] tv_live PID={state.tv_proc.pid} "
@@ -2836,7 +3015,7 @@ def run_pipeline(rf: int, callsign: str, play: bool,
             if pat_count >= MIN_GOOD_PAT:
                 print(f"[tv_tuner] LOCK acquired on attempt {attempt}.")
                 break
-            print(f"[tv_tuner] bad convergence — killing and retrying...")
+            print("[tv_tuner] bad convergence — killing and retrying...")
             kill_proc(state.tv_proc, "tv_live")
             state.tv_proc = None
             time.sleep(2)
@@ -2907,7 +3086,8 @@ def run_pipeline(rf: int, callsign: str, play: bool,
                         play=play, record_path=record_path,
                         stream_url=stream_url, program=actual_pid,
                         captions=captions,
-                        passthrough=linux_fast_play)
+                        passthrough=linux_fast_play,
+                        copy_mode=vlc_copy_mode)
                 elif actual_pid is None:
                     print(f"[tv_tuner] WARN: could not probe program list; "
                           f"using --program {program} as program_id "
@@ -2976,7 +3156,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "1-based-index translation — for the interactive "
                         "picker and other callers that already know the "
                         "real id.")
-    p.add_argument("--player", choices=["magic", "ffplay"], default="ffplay",
+    p.add_argument("--player", choices=["magic", "ffplay", "vlc", "mpv"], default="ffplay",
                    help="Playback engine. 'ffplay' (default) uses ffmpeg "
                         "re-encode + ffplay — single window, simpler UX. "
                         "'magic' uses our resilient tv_player.py with "
@@ -3093,9 +3273,9 @@ def _spawn_in_new_console(cmd: list[str]) -> subprocess.Popen:
             return subprocess.Popen(wrap, start_new_session=True)
     # Fallback: no terminal emulator on the system (headless / WSL).
     # Run inline; output goes to the picker's terminal.
-    print(f"[tv_tuner] no terminal emulator found — output will appear "
-          f"in this window (install gnome-terminal or xterm for a "
-          f"separate window).")
+    print("[tv_tuner] no terminal emulator found — output will appear "
+          "in this window (install gnome-terminal or xterm for a "
+          "separate window).")
     return subprocess.Popen(cmd, start_new_session=True)
 
 
@@ -3114,16 +3294,32 @@ def _launch_streaming(rf: int, program: int,
     window. The streaming output ([2s] tv=OK ff=OK ...) appears in
     that window; the picker console stays clean for the next pick.
 
+    Player choice: VLC on Windows when available (smooth playback +
+    native CC overlay + audio-track hotkey B for Spanish), else ffplay.
+    Override with $STVT_PLAYER=ffplay|vlc|mpv.
+
     `caption_channel` selects which CEA-608 channel the side window
     decodes: 1 = primary (English), 2 = SAP/secondary (Spanish), or
-    None = captions off entirely."""
+    None = captions off entirely. When VLC is the player, captions are
+    rendered ON the video instead of a separate console — VLC's V key
+    cycles tracks live and B cycles audio (English/Spanish)."""
+    player = os.environ.get("STVT_PLAYER")
+    if player not in ("ffplay", "vlc", "mpv"):
+        # Auto-pick: VLC on Windows if installed (smoothest), else ffplay.
+        if sys.platform == "win32" and os.path.exists(VLC):
+            player = "vlc"
+        else:
+            player = "ffplay"
     cmd = [
         PYTHON_EXE, "-u", str(Path(__file__).resolve()),
         "--rf", str(rf),
         "--program-id", str(program),
-        "--player", "ffplay",
+        "--player", player,
     ]
-    if caption_channel is not None:
+    # VLC overlays CC on the video itself, so we DON'T spawn the side
+    # console window when VLC is the player. The caller still tracks the
+    # CC channel choice so the picker UI label stays in sync.
+    if caption_channel is not None and player != "vlc":
         cmd.extend(["--cc", "--cc-channel", str(caption_channel)])
     return _spawn_in_new_console(cmd)
 
@@ -3374,8 +3570,16 @@ def interactive_loop(cfg: dict, args) -> int:
     # None = off; 1 = CC1 (primary, English); 2 = CC2 (SAP, Spanish).
     cc_channel: int | None = (getattr(args, "cc_channel", 1)
                               if getattr(args, "cc", False) else None)
+    # Audio language state cycles English → Spanish → All-tracks.
+    # When changed, the user types 'a' to immediately kill+respawn the
+    # current channel with the new STVT_AUDIO_LANGUAGE, so they hear the
+    # new language within ~3 seconds of pressing 'a'.
+    audio_lang: str = os.environ.get("STVT_AUDIO_LANGUAGE", "eng")
+    if audio_lang not in ("eng", "spa", "all"):
+        audio_lang = "eng"
     current: subprocess.Popen | None = None
     last_label = ""
+    last_pick: dict | None = None   # remember last channel for 'a' respawn
 
     def _shutdown(*_):
         _kill_streaming(current)
@@ -3388,18 +3592,40 @@ def interactive_loop(cfg: dict, args) -> int:
         pass
 
     cc_label = {None: "OFF", 1: "EN", 2: "ES"}
+    audio_label = {"eng": "EN", "spa": "ES", "all": "BOTH"}
     try:
         while True:
             try:
                 tag = f" — now: {last_label}" if last_label else ""
                 ans = input(
-                    f"\n📺  Channel?{tag}  [row #, virt 5.1, "
+                    f"\n📺  Channel?{tag}  [row #, virt 5.1, n=next, "
+                    f"p=prev, a=audio ({audio_label[audio_lang]}), "
                     f"c=CC ({cc_label[cc_channel]}), g=guide, q=quit]: "
                 ).strip().lower()
             except EOFError:
                 break
             if ans in ("q", "quit", "exit"):
                 break
+            if ans in ("a", "audio"):
+                # Cycle: eng → spa → all → eng
+                audio_lang = {"eng": "spa", "spa": "all", "all": "eng"}[audio_lang]
+                os.environ["STVT_AUDIO_LANGUAGE"] = audio_lang
+                friendly = {"eng": "English only", "spa": "Spanish only",
+                            "all": "All audio tracks (VLC picks)"}[audio_lang]
+                print(f"  audio: {friendly}")
+                if last_pick is not None:
+                    print(f"  respawning current channel ({last_label}) "
+                          f"with new audio...")
+                    _kill_streaming(current)
+                    current = None
+                    _nuke_streaming_orphans()
+                    time.sleep(2)
+                    try:
+                        current = _launch_streaming(
+                            last_pick["rf"], last_pick["program"], cc_channel)
+                    except Exception as e:
+                        print(f"  respawn failed: {e}")
+                continue
             if ans in ("c", "cc"):
                 # Cycle: OFF → EN (CC1) → ES (CC2) → OFF
                 cc_channel = {None: 1, 1: 2, 2: None}[cc_channel]
@@ -3412,13 +3638,29 @@ def interactive_loop(cfg: dict, args) -> int:
             if ans in ("g", "guide", "list", "?"):
                 rows = print_scan_table(scan)
                 continue
-            if not ans:
+            if ans in ("n", "next", "+"):
+                r = _resolve_neighbor_row(rows, last_pick, +1)
+                if r is None:
+                    print("  no detected channel available to move to")
+                    continue
+                print(f"  -> next channel: {r['virtual']} {r['callsign']}")
+                ans = ""  # fall through to spawn below using `r`
+            elif ans in ("p", "prev", "previous", "-"):
+                r = _resolve_neighbor_row(rows, last_pick, -1)
+                if r is None:
+                    print("  no detected channel available to move to")
+                    continue
+                print(f"  -> prev channel: {r['virtual']} {r['callsign']}")
+                ans = ""
+            elif not ans:
                 continue
-            r = _resolve_picker_row(ans, rows)
-            if r is None:
-                print("  invalid — type a row #, a virtual channel "
-                      "(e.g. 5.1), c to toggle CC, g for guide, q to quit")
-                continue
+            else:
+                r = _resolve_picker_row(ans, rows)
+                if r is None:
+                    print("  invalid — type a row #, a virtual channel "
+                          "(e.g. 5.1), n/p next/prev, a=audio, c=CC, "
+                          "g=guide, q=quit")
+                    continue
             if r.get("not_detected"):
                 print(f"  ! {r['virtual']} {r['callsign']} wasn't "
                       f"detected — tuning will likely fail (signal too "
@@ -3431,6 +3673,7 @@ def interactive_loop(cfg: dict, args) -> int:
             time.sleep(2)
             try:
                 current = _launch_streaming(r["rf"], r["program"], cc_channel)
+                last_pick = r
                 last_label = (f"{r['virtual']} {r['callsign']}"
                               + (f" {r.get('network', '')}"
                                  if r.get('network') and
@@ -3460,6 +3703,30 @@ def _resolve_picker_row(ans: str, rows: list[dict]) -> dict | None:
     except ValueError:
         pass
     return None
+
+
+def _resolve_neighbor_row(rows: list[dict], current: dict | None,
+                          direction: int) -> dict | None:
+    """Advance from `current` to the next/prev detected row in `rows`.
+    direction = +1 (next), -1 (prev). Skips rows flagged not_detected.
+    If `current` is None or not found, returns the first detected row
+    when direction>0, or the last detected row when direction<0."""
+    detected = [r for r in rows if not r.get("not_detected")]
+    if not detected:
+        return None
+    # Locate current in the detected-only list.
+    idx = None
+    if current is not None:
+        for i, r in enumerate(detected):
+            if (r.get("rf") == current.get("rf")
+                    and r.get("virtual") == current.get("virtual")
+                    and r.get("program") == current.get("program")):
+                idx = i
+                break
+    if idx is None:
+        return detected[0] if direction > 0 else detected[-1]
+    new = (idx + direction) % len(detected)
+    return detected[new]
 
 
 def main(argv: list[str] | None = None) -> int:
