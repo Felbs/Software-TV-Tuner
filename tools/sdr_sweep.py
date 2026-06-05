@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 
@@ -69,7 +70,10 @@ def open_sdr(driver: str, sample_rate: int, antenna: str,
                   file=sys.stderr)
             time.sleep(settle)
         try:
-            sdr = SoapySDR.Device(f"driver={driver}")
+            # Honor STVT_SOAPY_ARGS (e.g. SoapyRemote over TCP) like
+            # tv_live.py; fall back to a local driver= open.
+            sdr = SoapySDR.Device(
+                os.environ.get("STVT_SOAPY_ARGS", f"driver={driver}"))
         except Exception as e:
             last = e
             if "no available RSP" not in str(e):
@@ -231,7 +235,16 @@ def sweep(freqs_hz: list[int],
     """Tune to each freq, capture samples, return per-freq metrics dict."""
     sdr = open_sdr(driver, sample_rate, antenna, ifgr, rfgain_sel)
     try:
-        rx = sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32)
+        # Stream args from STVT_STREAM_ARGS (e.g. 'remote:prot=tcp' for the
+        # SoapyRemote TCP transport); empty for a local device.
+        _stream_kw = {}
+        for _p in os.environ.get("STVT_STREAM_ARGS", "").split(","):
+            if "=" in _p:
+                _k, _v = _p.split("=", 1)
+                _stream_kw[_k.strip()] = _v.strip()
+        rx = (sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32, [0], _stream_kw)
+              if _stream_kw
+              else sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32))
         sdr.activateStream(rx)
         try:
             n_samples = int(sample_rate * dwell_sec)
