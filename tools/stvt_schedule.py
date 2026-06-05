@@ -8,6 +8,7 @@ keeps pending recordings.
 
 Commands:
 
+    stvt_schedule.py tv                                # INTERACTIVE controller (recommended)
     stvt_schedule.py list                              # what's queued
     stvt_schedule.py add-show <virt> "<title>"         # find next match in EIT, schedule
     stvt_schedule.py add --rf N --program P \
@@ -213,22 +214,7 @@ def cmd_add_show(args) -> int:
                       f"{e['title']}", file=sys.stderr)
         return 1
     target = matches[0]  # next instance
-    entry = {
-        "id":         make_id(target["rf"], target["program"],
-                              target["start_unix"], target["title"]),
-        "rf":         target["rf"],
-        "program":    target["program"],
-        "virtual":    target["virtual"],
-        "callsign":   target["callsign"],
-        "title":      target["title"],
-        "start_unix": target["start_unix"],
-        "end_unix":   target["end_unix"],
-        "length_sec": target["length_sec"],
-        "status":     "pending",
-    }
-    queue = load_queue()
-    conflicts = detect_conflicts(queue, entry)
-    result = add_to_queue(entry)
+    result, entry, conflicts = schedule_event(target, mux=False)
     if result == "duplicate":
         print(f"[schedule] already scheduled: {entry['id']}")
         return 0
@@ -298,6 +284,33 @@ def cmd_add(args) -> int:
     return 0
 
 
+def schedule_event(event: dict, mux: bool = False) -> tuple[str, dict, list[dict]]:
+    """Queue an event dict (from find_events_for_program). Returns
+    (status, entry, conflicts). status is "added" or "duplicate"."""
+    title = event["title"]
+    if mux:
+        title = f"[MUX] {title}"
+    entry = {
+        "id":         make_id(event["rf"], event["program"],
+                              event["start_unix"], title),
+        "rf":         event["rf"],
+        "program":    event["program"],
+        "virtual":    event["virtual"],
+        "callsign":   event["callsign"],
+        "title":      title,
+        "start_unix": event["start_unix"],
+        "end_unix":   event["end_unix"],
+        "length_sec": event["length_sec"],
+        "status":     "pending",
+    }
+    if mux:
+        entry["mux_record"] = True
+    queue = load_queue()
+    conflicts = detect_conflicts(queue, entry)
+    status = add_to_queue(entry)
+    return status, entry, conflicts
+
+
 def cmd_remove(args) -> int:
     queue = load_queue()
     before = len(queue)
@@ -312,14 +325,480 @@ def cmd_remove(args) -> int:
     return 0
 
 
+def build_channel_snapshot(scan: dict) -> list[dict]:
+    """For each (virtual_channel, program) in the scan, return a row
+    with 'on_now' + 'next' EIT events. Sorted by virtual channel."""
+    now = int(time.time())
+    rows = []
+    for c in scan.get("channels", []):
+        if c.get("not_detected"):
+            continue
+        callsign = c.get("callsign")
+        if not callsign or callsign in ("?", "None"):
+            continue
+        psip = c.get("psip") or {}
+        psip_by_pnum = {p.get("program_number"): p
+                        for p in (psip.get("channels") or [])
+                        if p.get("program_number")}
+        for prog in c.get("programs") or []:
+            pnum = prog.get("program_num") or prog.get("program_id")
+            if not pnum:
+                continue
+            match = psip_by_pnum.get(pnum) or {}
+            major = match.get("major")
+            minor = match.get("minor", 1)
+            virtual = f"{major}.{minor}" if major else f"{c['rf']}.{pnum}"
+            short = match.get("short_name") or callsign
+            events_raw = (psip.get("events") or {}).get(str(pnum), [])
+            future = []
+            on_now = None
+            for e in events_raw:
+                start = gps_to_unix(e.get("start_gps", 0))
+                length = e.get("length_sec") or 0
+                if start + length < now:
+                    continue
+                ev = {
+                    "rf":         c["rf"],
+                    "program":    pnum,
+                    "virtual":    virtual,
+                    "callsign":   short,
+                    "title":      e.get("title") or "(untitled)",
+                    "start_unix": start,
+                    "end_unix":   start + length,
+                    "length_sec": length,
+                }
+                if start <= now < start + length and on_now is None:
+                    on_now = ev
+                else:
+                    future.append(ev)
+            future.sort(key=lambda x: x["start_unix"])
+            rows.append({
+                "rf":       c["rf"],
+                "program":  pnum,
+                "virtual":  virtual,
+                "callsign": short,
+                "on_now":   on_now,
+                "next":     future[0] if future else None,
+            })
+    rows.sort(key=lambda r: (int(r["virtual"].split(".")[0]),
+                              int(r["virtual"].split(".")[1])))
+    return rows
+
+
+def _mux_summary(rf: int, rows: list[dict]) -> tuple[str, str]:
+    """Build a human-friendly mux header. Returns (title, sublabel).
+    Title: 'RF 34 — NBC mux (4.x + 44.x + 4.3 + 4.4)'
+    Sublabel: '6 channels — record all at once: rrf 34'
+
+    Derives the "primary network" from the major-virtual frequency
+    so the user sees, e.g., that RF 34 carries NBC's 4.x sub-channels
+    plus Telemundo's 44.x — even though scan.json's per-RF callsign
+    field only names one."""
+    if not rows:
+        return f"RF {rf}", "(no channels)"
+    majors: dict[str, list[str]] = {}
+    for r in rows:
+        major = r["virtual"].split(".")[0]
+        majors.setdefault(major, []).append(r["callsign"])
+    # Pick the largest major group as the "primary"
+    primary_major = max(majors.keys(), key=lambda m: len(majors[m]))
+    primary_call = majors[primary_major][0]
+    major_groups = sorted(majors.keys(), key=lambda m: int(m) if m.isdigit() else 9999)
+    groups_str = " + ".join(f"{m}.x" for m in major_groups)
+    title = f"RF {rf} -- {primary_call} mux ({groups_str})"
+    sublabel = (f"{len(rows)} channel{'s' if len(rows) != 1 else ''} share "
+                f"this broadcast -- record them all at once with: rrf {rf}")
+    return title, sublabel
+
+
+def render_tv_table(rows: list[dict]) -> str:
+    """Render channels grouped by RF mux, with a header per section
+    explaining what's in that mux and how to record the whole thing.
+    Row numbers are global so `r <#>`, `rn <#>`, `rmux <#>` still work."""
+    # Group by RF, keeping sorted-by-virtual order within each group
+    by_rf: dict[int, list[tuple[int, dict]]] = {}
+    for i, r in enumerate(rows, 1):
+        by_rf.setdefault(r["rf"], []).append((i, r))
+
+    out = []
+    # Sort sections by their first virtual channel (so NBC's RF34
+    # comes before Fox's RF36, etc.)
+    section_order = sorted(by_rf.keys(),
+                            key=lambda rf: int(by_rf[rf][0][1]["virtual"]
+                                                .split(".")[0]))
+    for rf in section_order:
+        group = by_rf[rf]
+        title, sublabel = _mux_summary(rf, [r for _, r in group])
+        out.append("")
+        out.append(f"+-- {title} {'-' * max(1, 92 - len(title))}")
+        out.append(f"|   {sublabel}")
+        out.append("|")
+        for i, r in group:
+            on = r["on_now"]
+            nx = r["next"]
+            on_str = on["title"][:30] if on else "(no guide data)"
+            nx_str = ""
+            if nx:
+                nx_when = datetime.fromtimestamp(nx["start_unix"]).strftime("%I:%M%p").lstrip("0").lower()
+                nx_str = f"{nx_when} {nx['title'][:24]}"
+            out.append(f"|   {i:>3}  {r['virtual']:<5} {r['callsign']:<12} "
+                       f"{on_str:<32} {nx_str}")
+    return "\n".join(out)
+
+
+def render_pending(queue: list[dict]) -> str:
+    now = int(time.time())
+    pending = [q for q in queue
+               if q.get("status") in ("pending", "recording", "active")]
+    if not pending:
+        return "  (queue empty)"
+    out = []
+    for q in pending:
+        status = q.get("status", "pending")
+        if status == "pending" and q["start_unix"] <= now < q["end_unix"]:
+            status = "active*"
+        when = fmt_time(q["start_unix"])
+        mux = " [MUX]" if q.get("mux_record") else ""
+        out.append(f"  {q['virtual']:<5} {q['callsign']:<10} "
+                   f"\"{q['title']}\"{mux}  "
+                   f"{when}  ({q['length_sec']//60}min)  [{status}]")
+    return "\n".join(out)
+
+
+def find_vlc() -> str | None:
+    """Locate vlc.exe so we can spawn a 'spy' watcher on live.ts."""
+    if sys.platform == "win32":
+        for cand in (r"C:\Program Files\VideoLAN\VLC\vlc.exe",
+                     r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe"):
+            if Path(cand).exists():
+                return cand
+        return None
+    import shutil
+    return shutil.which("vlc")
+
+
+def find_live_ts() -> Path | None:
+    """Look for the live.ts that an active tv_live is writing to."""
+    here = Path(__file__).resolve().parent
+    cand = here / "data" / "tv_live" / "live.ts"
+    if cand.exists() and cand.stat().st_size > 1_000_000:
+        return cand
+    return None
+
+
+import threading
+
+_WATCH_VLC: subprocess.Popen | None = None
+_WATCH_FFMPEG: subprocess.Popen | None = None
+_WATCH_STOP_EVT: threading.Event | None = None
+_WATCH_TAIL: threading.Thread | None = None
+_WATCH_LABEL: str = ""
+
+# Use the same tail-pipe pattern multirec uses to feed ffmpeg's stdin.
+from stvt_multirec import tail_into_pipe  # type: ignore
+
+# Borrow ffmpeg path from tv_tuner so we don't re-resolve.
+_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE))
+from tv_tuner import FFMPEG  # noqa: E402
+
+
+def _proc_running(p: subprocess.Popen | None) -> bool:
+    return p is not None and p.poll() is None
+
+
+def stop_watch() -> bool:
+    global _WATCH_VLC, _WATCH_FFMPEG, _WATCH_STOP_EVT, _WATCH_TAIL, _WATCH_LABEL
+    if _WATCH_STOP_EVT is not None:
+        _WATCH_STOP_EVT.set()
+    for label, p in (("vlc", _WATCH_VLC), ("ffmpeg", _WATCH_FFMPEG)):
+        if not _proc_running(p):
+            continue
+        try:
+            p.terminate()
+            try:
+                p.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                p.kill()
+        except (OSError, ValueError):
+            pass
+    if _WATCH_TAIL is not None:
+        _WATCH_TAIL.join(timeout=1)
+    had = _WATCH_VLC is not None or _WATCH_FFMPEG is not None
+    _WATCH_VLC = None
+    _WATCH_FFMPEG = None
+    _WATCH_STOP_EVT = None
+    _WATCH_TAIL = None
+    _WATCH_LABEL = ""
+    return had
+
+
+def start_watch(channel_row: dict) -> str:
+    """Spawn ffmpeg + VLC chained via pipes:
+        tail(live.ts) -> ffmpeg(-map 0:p:N -c copy) -> VLC stdin
+
+    VLC's own --programs filter is unreliable on a growing TS (it opens
+    at byte 0 and plays the first program in the PAT regardless). The
+    ffmpeg demux step guarantees only program N's bytes reach VLC and
+    starts from the file's current END so playback is at the live edge,
+    not from whenever the recording started."""
+    global _WATCH_VLC, _WATCH_FFMPEG, _WATCH_STOP_EVT, _WATCH_TAIL, _WATCH_LABEL
+    vlc = find_vlc()
+    if not vlc:
+        return "VLC not found at C:\\Program Files\\VideoLAN\\VLC\\vlc.exe"
+    live = find_live_ts()
+    if not live:
+        return ("no active live.ts found - is a recording in progress? "
+                "(start a recording with rrf <RF> first)")
+    stop_watch()
+    pnum = channel_row["program"]
+    title = f"STVT spy: {channel_row['virtual']} {channel_row['callsign']}"
+    # Start from current end (with 500 KB lookback so ffmpeg has enough
+    # to find a PMT cycle and demux cleanly without burning seconds).
+    try:
+        live_size = live.stat().st_size
+    except OSError:
+        live_size = 0
+    start_offset = max(0, live_size - 500_000)
+
+    ff_creationflags = 0x08000000 if sys.platform == "win32" else 0
+    ffmpeg_proc = subprocess.Popen(
+        [FFMPEG, "-hide_banner", "-loglevel", "warning",
+         "-fflags", "+discardcorrupt", "-err_detect", "ignore_err",
+         "-f", "mpegts", "-i", "pipe:0",
+         "-map", f"0:p:{pnum}", "-c", "copy",
+         "-f", "mpegts", "pipe:1"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        creationflags=ff_creationflags,
+    )
+    vlc_creationflags = 0
+    if sys.platform == "win32":
+        vlc_creationflags = 0x00000008 | 0x00000200 | 0x08000000
+    vlc_proc = subprocess.Popen(
+        [vlc, "--no-video-title-show", "--meta-title", title,
+         "--file-caching", "1000", "-"],
+        stdin=ffmpeg_proc.stdout,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        creationflags=vlc_creationflags,
+    )
+    # Hand the read end fully to VLC so ffmpeg's stdout closes cleanly
+    # when VLC exits.
+    try:
+        ffmpeg_proc.stdout.close()
+    except (OSError, ValueError):
+        pass
+
+    stop_evt = threading.Event()
+    tail_thread = threading.Thread(
+        target=tail_into_pipe,
+        args=(live, ffmpeg_proc.stdin, stop_evt, start_offset),
+        daemon=True,
+    )
+    tail_thread.start()
+
+    _WATCH_VLC = vlc_proc
+    _WATCH_FFMPEG = ffmpeg_proc
+    _WATCH_STOP_EVT = stop_evt
+    _WATCH_TAIL = tail_thread
+    _WATCH_LABEL = f"{channel_row['virtual']} {channel_row['callsign']}"
+    return (f"watching {_WATCH_LABEL} (program {pnum}) at live edge - "
+            f"close VLC or type `unwatch` to stop")
+
+
+def cmd_tv(args) -> int:
+    """Interactive DVR controller: EPG view + record-from-grid."""
+    # Broadcasters send smart quotes / em-dashes; default cp1252 stdout
+    # chokes on those. Reconfigure once so the whole loop is safe.
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError):
+            pass
+    while True:
+        scan = load_scan()
+        if not scan:
+            print("no scan.json — run `tv_tuner.py --scan` first")
+            return 1
+        rows = build_channel_snapshot(scan)
+        queue = load_queue()
+        os.system("cls" if sys.platform == "win32" else "clear")
+        print(f"=================================================================")
+        print(f"  STVT DVR    {datetime.now().strftime('%a %m/%d %I:%M %p').lstrip('0')}    "
+              f"({len(rows)} channels)")
+        print(f"=================================================================")
+        print()
+        print(render_tv_table(rows))
+        print()
+        print("PENDING RECORDINGS:")
+        print(render_pending(queue))
+        print()
+        watching_str = f"  [now watching: {_WATCH_LABEL}]" if _WATCH_PROC and _WATCH_PROC.poll() is None else ""
+        print(f"Commands:{watching_str}")
+        print("  r   <#>          record ON-NOW of channel #")
+        print("  rn  <#>          record NEXT show on channel #")
+        print("  rmux <#>         record ENTIRE MUX (all programs) for")
+        print("                   ON-NOW's duration (uses channel #'s mux)")
+        print("  rrf  <RF>        record the WHOLE RF mux (e.g. rrf 36 to")
+        print("                   grab Fox + all its sub-channels at once)")
+        print("  watch <#>        open VLC on channel # using the ACTIVE")
+        print("                   recording's live.ts (flip subchannels")
+        print("                   live while rrf is recording)")
+        print("  unwatch          close the VLC watcher")
+        print("  show <#>         show next 6 events for channel #")
+        print("  rm  <id-prefix>  cancel a pending recording")
+        print("  refresh          reload scan + queue")
+        print("  q                quit")
+        try:
+            line = input("\n> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        cmd = parts[0].lower()
+        arg = parts[1].strip() if len(parts) > 1 else ""
+
+        if cmd == "q" or cmd == "quit":
+            stop_watch()
+            return 0
+        if cmd == "refresh":
+            continue
+        if cmd == "rm":
+            if not arg:
+                print("rm <id-prefix>"); input("[enter]"); continue
+            queue = [q for q in queue if not q["id"].startswith(arg)
+                     and q["id"] != arg]
+            save_queue(queue)
+            print(f"removed."); input("[enter]"); continue
+        if cmd == "unwatch":
+            if stop_watch():
+                print("watcher stopped.")
+            else:
+                print("(no watcher running)")
+            input("[enter]"); continue
+        if cmd == "watch":
+            try:
+                idx = int(arg) - 1
+                row = rows[idx]
+            except (ValueError, IndexError):
+                print(f"bad #: '{arg}'"); input("[enter]"); continue
+            msg = start_watch(row)
+            print(msg)
+            input("[enter]"); continue
+
+        if cmd == "rrf":
+            try:
+                rf = int(arg)
+            except ValueError:
+                print(f"bad RF: '{arg}'"); input("[enter]"); continue
+            mux_rows = [r for r in rows if r["rf"] == rf and r["on_now"]]
+            if not mux_rows:
+                print(f"no channels on RF {rf} with on-now data")
+                input("[enter]"); continue
+            # Use the longest on-now event as the recording window
+            best = max(mux_rows, key=lambda r: r["on_now"]["length_sec"])
+            ev = best["on_now"]
+            status, entry, conflicts = schedule_event(ev, mux=True)
+            if status == "duplicate":
+                print(f"already scheduled: {entry['id']}")
+            else:
+                print(f"queued: [MUX] RF{rf} -- {len(mux_rows)} channels for "
+                      f"{ev['length_sec']//60} min "
+                      f"(window picked from \"{ev['title']}\" on "
+                      f"{ev['virtual']})")
+                if conflicts:
+                    print(f"WARNING: conflicts with {len(conflicts)} other "
+                          f"queued recording(s) on different muxes.")
+                if not is_daemon_running():
+                    print("NOTE: scheduler daemon is NOT running. Start it "
+                          "with:  python tools/stvt_schedule.py run")
+            input("\n[enter]"); continue
+
+        if cmd in ("r", "rn", "rmux", "show"):
+            try:
+                idx = int(arg) - 1
+                row = rows[idx]
+            except (ValueError, IndexError):
+                print(f"bad #: '{arg}'"); input("[enter]"); continue
+            if cmd == "show":
+                events = find_events_for_program(scan, row["virtual"])
+                print(f"\nupcoming on {row['virtual']} {row['callsign']}:")
+                for e in events[:6]:
+                    print(f"  {fmt_time(e['start_unix'])}  "
+                          f"({e['length_sec']//60}min)  {e['title']}")
+                input("\n[enter]"); continue
+            ev = row["on_now"] if cmd in ("r", "rmux") else row["next"]
+            if not ev:
+                print(f"no event to record on {row['virtual']}")
+                input("[enter]"); continue
+            mux = cmd == "rmux"
+            status, entry, conflicts = schedule_event(ev, mux=mux)
+            if status == "duplicate":
+                print(f"already scheduled: {entry['id']}")
+            else:
+                tag = "[MUX] " if mux else ""
+                print(f"queued: {tag}{entry['virtual']} \"{entry['title']}\" "
+                      f"at {fmt_time(entry['start_unix'])} "
+                      f"({entry['length_sec']//60} min)")
+                if conflicts:
+                    print(f"WARNING: conflicts with {len(conflicts)} other "
+                          f"queued recording(s) on different muxes — "
+                          f"earliest wins.")
+                if not is_daemon_running():
+                    print("NOTE: scheduler daemon is NOT running. Start it "
+                          "with:  python tools/stvt_schedule.py run")
+            input("\n[enter]"); continue
+
+        print(f"unknown command: {cmd!r}"); input("[enter]")
+
+
+def is_daemon_running() -> bool:
+    """Best-effort detect of an active scheduler daemon."""
+    if sys.platform == "win32":
+        try:
+            out = subprocess.run(
+                ["wmic", "process", "where", "name='python.exe'",
+                 "get", "CommandLine", "/format:csv"],
+                capture_output=True, text=True,
+                creationflags=0x08000000,
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            return False
+        for line in out.splitlines():
+            if "stvt_schedule.py" in line and " run" in line:
+                return True
+        return False
+    try:
+        out = subprocess.run(["pgrep", "-af", "stvt_schedule.py.*run"],
+                              capture_output=True, text=True).stdout
+        return bool(out.strip())
+    except (OSError, FileNotFoundError):
+        return False
+
+
 def fire_recording(entry: dict, out_dir: Path | None,
                    pre_roll_sec: int) -> subprocess.Popen | None:
-    """Spawn stvt_multirec.py for this entry. Returns Popen or None."""
+    """Spawn stvt_multirec.py for this entry. Returns Popen or None.
+
+    Entry shapes supported:
+      single-program:  {"program": N}              -> --programs N
+      multi-program:   {"programs": [N1, N2, ...]} -> --programs N1,N2,...
+      whole-mux:       {"mux_record": True}        -> no --programs flag
+                                                      (records every program)
+    """
     duration_min = max(1, entry["length_sec"] // 60 + 1)  # 1 min pad
     cmd = [PYTHON_EXE, "-u", str(MULTIREC_PY),
            "--rf", str(entry["rf"]),
-           "--programs", str(entry["program"]),
            "--duration", str(duration_min)]
+    if entry.get("mux_record"):
+        pass  # no --programs = multirec records all
+    elif entry.get("programs"):
+        cmd += ["--programs",
+                ",".join(str(p) for p in entry["programs"])]
+    else:
+        cmd += ["--programs", str(entry["program"])]
     if out_dir:
         cmd += ["--output-dir", str(out_dir)]
     log_dir = QUEUE_PATH.parent / "scheduler_logs"
@@ -387,21 +866,37 @@ def cmd_run(args) -> int:
                     continue
                 # Fire if start is within args.lead_sec
                 if entry["start_unix"] - args.lead_sec <= now:
-                    # Mux conflict: refuse to start if active record is on
-                    # a different RF
+                    # SDR is single-tenant: only one multirec can hold it
+                    # at a time. Refuse to fire a 2nd multirec while one
+                    # is already running, regardless of whether the RFs
+                    # match. Same-RF cases are doubly bad — second
+                    # multirec spawns its own tv_live which can't
+                    # acquire the SDR and dies fast, producing a stub
+                    # ~30s file that LOOKS done but isn't.
+                    skip_reason = None
                     for eid, proc in active.items():
                         active_entry = next((q for q in queue if q["id"] == eid),
                                              None)
-                        if active_entry and active_entry["rf"] != entry["rf"]:
-                            print(f"[scheduler] "
-                                  f"{datetime.now().strftime('%H:%M:%S')}  "
-                                  f"SKIP {entry['id']}: RF{entry['rf']} "
-                                  f"conflicts with active RF"
-                                  f"{active_entry['rf']}")
-                            entry["status"] = "skipped"
-                            save_queue(queue)
-                            break
-                    if entry.get("status") != "pending":
+                        if not active_entry:
+                            continue
+                        if active_entry["rf"] == entry["rf"]:
+                            skip_reason = (f"same-mux RF{entry['rf']} record "
+                                           f"already active "
+                                           f"(\"{active_entry['title']}\"); "
+                                           f"use rmux to cover both")
+                        else:
+                            skip_reason = (f"different-mux RF"
+                                           f"{active_entry['rf']} record "
+                                           f"already active "
+                                           f"(\"{active_entry['title']}\"); "
+                                           f"only one SDR")
+                        break
+                    if skip_reason:
+                        print(f"[scheduler] "
+                              f"{datetime.now().strftime('%H:%M:%S')}  "
+                              f"SKIP {entry['id']}: {skip_reason}")
+                        entry["status"] = f"skipped: {skip_reason}"
+                        save_queue(queue)
                         continue
                     print(f"[scheduler] {datetime.now().strftime('%H:%M:%S')}  "
                           f"firing {entry['id']}  "
@@ -427,6 +922,9 @@ def main() -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("list", help="show queued recordings")
+
+    sub.add_parser("tv", help="interactive DVR controller (EPG + "
+                              "record-from-grid)")
 
     p_add = sub.add_parser("add-show",
                             help="schedule next instance of a show by title")
@@ -456,7 +954,7 @@ def main() -> int:
 
     args = ap.parse_args()
     cmds = {"list": cmd_list, "add-show": cmd_add_show, "add": cmd_add,
-            "remove": cmd_remove, "run": cmd_run}
+            "remove": cmd_remove, "run": cmd_run, "tv": cmd_tv}
     return cmds[args.cmd](args)
 
 
