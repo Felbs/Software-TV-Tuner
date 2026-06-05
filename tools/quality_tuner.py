@@ -30,7 +30,6 @@ import signal
 import subprocess
 import sys
 import time
-from collections import Counter
 from pathlib import Path
 
 STVT = Path(os.environ.get("STVT_HOME", "/home/user/Software-TV-Tuner"))
@@ -245,7 +244,6 @@ def parse_watchdog_events(stdout_path: Path) -> dict:
         # Walk strike sequence + corresponding wall-time. Status lines look
         # like "[  48s] tv=OK ..." — interleave them with strike lines.
         STATUS_RE = re.compile(r"^\[\s*(\d+)s\]", re.M)
-        cur_time = 0.0
         last_status_t = 0.0
         prev_strike = 0
         cur_event_start_t = 0.0
@@ -609,7 +607,7 @@ def main():
         if state["baseline"]["metrics"]["score"] > 0:
             ratio = state["best"]["metrics"]["score"] / state["baseline"]["metrics"]["score"]
             log(f"improvement: {ratio:.2f}x")
-        log(f"best config:")
+        log("best config:")
         for k, v in sorted(state["best"]["cfg"].items()):
             log(f"  {k}={v}")
 

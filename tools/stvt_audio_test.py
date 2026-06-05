@@ -31,11 +31,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import subprocess
 import sys
 import tempfile
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -93,7 +91,6 @@ def probe_live_ts() -> list[dict]:
     if r.returncode != 0:
         return []
     data = json.loads(r.stdout)
-    by_prog = {}
     for s in data.get("streams", []):
         codec = s.get("codec_name", "")
         is_audio = s.get("codec_type") == "audio"

@@ -38,7 +38,7 @@ import os
 import subprocess
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -229,8 +229,8 @@ def cmd_add_show(args) -> int:
         for c in conflicts:
             print(f"           RF{c['rf']} {c['virtual']} "
                   f"\"{c['title']}\" at {fmt_time(c['start_unix'])}")
-        print(f"           The earlier-starting entry will win; others "
-              f"get skipped.")
+        print("           The earlier-starting entry will win; others "
+              "get skipped.")
     return 0
 
 
@@ -238,8 +238,8 @@ def cmd_add(args) -> int:
     try:
         start_dt = datetime.strptime(args.start, "%Y-%m-%d %H:%M")
     except ValueError:
-        print(f"[schedule] --start must be 'YYYY-MM-DD HH:MM' "
-              f"(24-hour, local time)", file=sys.stderr)
+        print("[schedule] --start must be 'YYYY-MM-DD HH:MM' "
+              "(24-hour, local time)", file=sys.stderr)
         return 1
     start_unix = int(start_dt.timestamp())
     end_unix = start_unix + int(args.duration * 60)
@@ -623,10 +623,10 @@ def cmd_tv(args) -> int:
         rows = build_channel_snapshot(scan)
         queue = load_queue()
         os.system("cls" if sys.platform == "win32" else "clear")
-        print(f"=================================================================")
+        print("=================================================================")
         print(f"  STVT DVR    {datetime.now().strftime('%a %m/%d %I:%M %p').lstrip('0')}    "
               f"({len(rows)} channels)")
-        print(f"=================================================================")
+        print("=================================================================")
         print()
         print(render_tv_table(rows))
         print()
@@ -649,6 +649,7 @@ def cmd_tv(args) -> int:
         print("  unwatch          close the VLC watcher")
         print("  show <#>         show next 6 events for channel #")
         print("  rm  <id-prefix>  cancel a pending recording")
+        print("  recs             browse recordings folder (play/delete)")
         print("  refresh          reload scan + queue")
         print("  q                quit")
         try:
@@ -673,7 +674,14 @@ def cmd_tv(args) -> int:
             queue = [q for q in queue if not q["id"].startswith(arg)
                      and q["id"] != arg]
             save_queue(queue)
-            print(f"removed."); input("[enter]"); continue
+            print("removed."); input("[enter]"); continue
+        if cmd == "recs":
+            # Hand control to the recordings browser. Spawning a child
+            # python lets it own stdin without interfering with this
+            # loop's input() state.
+            recs_py = HERE / "stvt_recordings.py"
+            subprocess.call([PYTHON_EXE, str(recs_py)])
+            continue
         if cmd == "unwatch":
             if stop_watch():
                 print("watcher stopped.")
@@ -780,6 +788,94 @@ def is_daemon_running() -> bool:
         return False
 
 
+def compute_skip_reason(entry: dict, active_ids: list[str],
+                         queue: list[dict]) -> str | None:
+    """Decide whether `entry` should be skipped because the SDR is
+    already busy. Returns the human-readable skip reason, or None if
+    it's safe to fire.
+
+    The SDR is single-tenant: only one multirec can hold the device.
+    If another entry is already in `active_ids`, the new fire must be
+    skipped (even on the SAME RF — a 2nd multirec on the same RF would
+    spawn its own tv_live which can't acquire the SDR and dies fast,
+    producing a stub ~30s file that LOOKS done but isn't).
+
+    Same-RF and different-RF skips get distinct messages so the user
+    knows whether to use rmux (same) or just accept the conflict
+    (different).
+
+    Mirrors the inline logic in cmd_run; extracted so unit tests can
+    pin the skip rules without spawning the daemon.
+    """
+    for eid in active_ids:
+        active_entry = next((q for q in queue if q["id"] == eid), None)
+        if not active_entry:
+            continue
+        if active_entry["rf"] == entry["rf"]:
+            return (f"same-mux RF{entry['rf']} record already active "
+                    f"(\"{active_entry['title']}\"); use rmux to cover both")
+        return (f"different-mux RF{active_entry['rf']} record already "
+                f"active (\"{active_entry['title']}\"); only one SDR")
+    return None
+
+
+def compute_fire_action(entry: dict, active_ids: list[str],
+                         queue: list[dict]) -> tuple[str, str | None]:
+    """Decide what the daemon should do with a fire-ready entry.
+    Returns (action, reason) where action is one of:
+        "fire"  -> safe to start now
+        "skip"  -> mark skipped (covered by another recording on same mux)
+        "defer" -> wait, try again next poll (cross-mux SDR contention
+                   that will resolve when the active recording finishes)
+
+    Defer-on-cross-mux is what lets back-to-back schedules work. Without
+    it the daemon would skip every cross-mux entry whose fire window
+    opens while a previous recording's tail is still running (typical
+    when slot N's +pad collides with slot N+1's -lead_sec). With it,
+    the new entry waits a few seconds and starts late — recorded, not
+    skipped. The cascade-clamp in compute_fire_duration_min then keeps
+    the late-fired entry inside its own original end window.
+    """
+    for eid in active_ids:
+        active_entry = next((q for q in queue if q["id"] == eid), None)
+        if not active_entry:
+            continue
+        if active_entry["rf"] == entry["rf"]:
+            return ("skip",
+                    f"same-mux RF{entry['rf']} record already active "
+                    f"(\"{active_entry['title']}\"); use rmux to cover "
+                    f"both")
+        return ("defer",
+                f"waiting for different-mux RF{active_entry['rf']} "
+                f"record (\"{active_entry['title']}\") to finish before "
+                f"firing RF{entry['rf']}")
+    return ("fire", None)
+
+
+def compute_fire_duration_min(entry: dict, now_unix: int) -> tuple[int, bool]:
+    """Decide how many minutes to record for this entry, clamped to the
+    time remaining until entry["end_unix"].
+
+    Returns (duration_min, clamped). `clamped` is True iff the clamp
+    actually shortened the recording below the original length.
+
+    Bug this prevents: if the daemon fires an entry LATE (e.g. it's
+    1:24 AM but the entry's start_unix was 12:00 AM with a 90-minute
+    length), naively passing length_sec//60 + 1 = 91 min to multirec
+    would record until ~2:55 AM and steal the next mux slot. Clamping
+    to (end_unix - now_unix) keeps the recording inside its original
+    window, with a 1-min pad and a 1-min floor.
+    """
+    original_sec = max(0, entry["length_sec"])
+    remaining_sec = entry["end_unix"] - now_unix
+    # Floor at 60s so an extremely-late fire still gets a usable file
+    # instead of `--duration 0` (which multirec would reject).
+    clamped_sec = max(60, min(original_sec, remaining_sec))
+    duration_min = max(1, clamped_sec // 60 + 1)  # 1-min pad
+    was_clamped = remaining_sec < original_sec
+    return duration_min, was_clamped
+
+
 def fire_recording(entry: dict, out_dir: Path | None,
                    pre_roll_sec: int) -> subprocess.Popen | None:
     """Spawn stvt_multirec.py for this entry. Returns Popen or None.
@@ -790,7 +886,14 @@ def fire_recording(entry: dict, out_dir: Path | None,
       whole-mux:       {"mux_record": True}        -> no --programs flag
                                                       (records every program)
     """
-    duration_min = max(1, entry["length_sec"] // 60 + 1)  # 1 min pad
+    now_unix = int(time.time())
+    duration_min, was_clamped = compute_fire_duration_min(entry, now_unix)
+    if was_clamped:
+        original_min = max(1, entry["length_sec"] // 60)
+        print(f"[scheduler] late-fire clamp: recording for "
+              f"{duration_min} min instead of original {original_min} min "
+              f"(entry {entry['id']} end window passes in "
+              f"{max(0, entry['end_unix'] - now_unix)}s)")
     cmd = [PYTHON_EXE, "-u", str(MULTIREC_PY),
            "--rf", str(entry["rf"]),
            "--duration", str(duration_min)]
@@ -828,10 +931,11 @@ def cmd_run(args) -> int:
     print(f"[scheduler] queue path: {QUEUE_PATH}")
     if out_dir:
         print(f"[scheduler] output: {out_dir}")
-    print(f"[scheduler] Ctrl+C to stop.")
+    print("[scheduler] Ctrl+C to stop.")
     print()
 
     active: dict[str, subprocess.Popen] = {}
+    deferred_logged: set[str] = set()  # entries we've already printed DEFER for
     while True:
         try:
             queue = load_queue()
@@ -868,37 +972,33 @@ def cmd_run(args) -> int:
                     continue
                 # Fire if start is within args.lead_sec
                 if entry["start_unix"] - args.lead_sec <= now:
-                    # SDR is single-tenant: only one multirec can hold it
-                    # at a time. Refuse to fire a 2nd multirec while one
-                    # is already running, regardless of whether the RFs
-                    # match. Same-RF cases are doubly bad — second
-                    # multirec spawns its own tv_live which can't
-                    # acquire the SDR and dies fast, producing a stub
-                    # ~30s file that LOOKS done but isn't.
-                    skip_reason = None
-                    for eid, proc in active.items():
-                        active_entry = next((q for q in queue if q["id"] == eid),
-                                             None)
-                        if not active_entry:
-                            continue
-                        if active_entry["rf"] == entry["rf"]:
-                            skip_reason = (f"same-mux RF{entry['rf']} record "
-                                           f"already active "
-                                           f"(\"{active_entry['title']}\"); "
-                                           f"use rmux to cover both")
-                        else:
-                            skip_reason = (f"different-mux RF"
-                                           f"{active_entry['rf']} record "
-                                           f"already active "
-                                           f"(\"{active_entry['title']}\"); "
-                                           f"only one SDR")
-                        break
-                    if skip_reason:
+                    # SDR is single-tenant. compute_fire_action decides
+                    # whether to fire, skip (same-mux already covered),
+                    # or defer (cross-mux contention that will resolve
+                    # when the active record finishes — enables proper
+                    # back-to-back scheduling).
+                    action, reason = compute_fire_action(
+                        entry, list(active.keys()), queue
+                    )
+                    if action == "skip":
                         print(f"[scheduler] "
                               f"{datetime.now().strftime('%H:%M:%S')}  "
-                              f"SKIP {entry['id']}: {skip_reason}")
-                        entry["status"] = f"skipped: {skip_reason}"
+                              f"SKIP {entry['id']}: {reason}")
+                        entry["status"] = f"skipped: {reason}"
                         save_queue(queue)
+                        deferred_logged.discard(entry["id"])
+                        continue
+                    if action == "defer":
+                        # Don't fire, don't mark skipped — wait for the
+                        # active record to finish. The "missed" check at
+                        # the top of the loop catches the case where
+                        # active never finishes and this entry's window
+                        # actually expires.
+                        if entry["id"] not in deferred_logged:
+                            print(f"[scheduler] "
+                                  f"{datetime.now().strftime('%H:%M:%S')}  "
+                                  f"DEFER {entry['id']}: {reason}")
+                            deferred_logged.add(entry["id"])
                         continue
                     print(f"[scheduler] {datetime.now().strftime('%H:%M:%S')}  "
                           f"firing {entry['id']}  "
@@ -908,6 +1008,7 @@ def cmd_run(args) -> int:
                         active[entry["id"]] = proc
                         entry["status"] = "recording"
                         save_queue(queue)
+                        deferred_logged.discard(entry["id"])
 
             time.sleep(args.poll_sec)
         except KeyboardInterrupt:

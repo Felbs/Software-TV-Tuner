@@ -31,12 +31,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import struct
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
