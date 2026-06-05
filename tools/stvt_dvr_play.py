@@ -55,10 +55,16 @@ def main() -> int:
               file=sys.stderr)
         return 1
     if not Path(VLC).exists():
-        print(f"VLC not installed at {VLC}", file=sys.stderr)
+        print(f"[dvr] VLC not installed at {VLC}\n"
+              f"      Install from https://www.videolan.org/vlc/ "
+              f"into the default location, or edit VLC at the top of "
+              f"this script.", file=sys.stderr)
         return 1
     if not Path(FFMPEG).exists():
-        print(f"ffmpeg not installed at {FFMPEG}", file=sys.stderr)
+        print(f"[dvr] ffmpeg not installed at {FFMPEG}\n"
+              f"      Install from https://www.gyan.dev/ffmpeg/builds/ "
+              f"and put it at C:\\ffmpeg\\bin\\ffmpeg.exe, or edit "
+              f"FFMPEG at the top of this script.", file=sys.stderr)
         return 1
 
     # VLC reads live.ts directly with built-in program selection. Native
