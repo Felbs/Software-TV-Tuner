@@ -78,7 +78,7 @@ def analyze_depad(buf):
     print(f"  PUSI=1 packets       : {pusi}  ({100*pusi/n_pkts:.2f}%)")
     print(f"  NULL packets (PID=0x1FFF): {null_pkts}")
     print(f"  distinct PIDs        : {len(pids)}  (real ATSC: 5-15)")
-    print(f"  top 8 PIDs:")
+    print("  top 8 PIDs:")
     for pid, ct in pids.most_common(8):
         flag = ""
         if pid == 0: flag = "(PAT)"
@@ -128,8 +128,8 @@ def analyze_rs_correction(dei_buf, rs_buf):
     print(f"  blocks needing 1-10 corrections   : {sum(v for k, v in diff_hist.items() if 1 <= k <= 10)} ({100*sum(v for k, v in diff_hist.items() if 1 <= k <= 10)/n_blocks:.1f}%)")
     print(f"  blocks needing 11-50 corrections  : {sum(v for k, v in diff_hist.items() if 11 <= k <= 50)} ({100*sum(v for k, v in diff_hist.items() if 11 <= k <= 50)/n_blocks:.1f}%)")
     print(f"  blocks with >50 byte diffs        : {sum(v for k, v in diff_hist.items() if k > 50)} ← RS giveup, output = uncorrected")
-    print(f"  ATSC RS limit                     : 10 byte errors/block")
-    print(f"  → if avg > 5, equalizer/viterbi is producing too many errors")
+    print("  ATSC RS limit                     : 10 byte errors/block")
+    print("  → if avg > 5, equalizer/viterbi is producing too many errors")
 
 
 def analyze_rs_meta(meta_buf):
@@ -143,7 +143,7 @@ def analyze_rs_meta(meta_buf):
     n_pkts = len(meta_buf) // 4
     print(f"  packets covered      : {n_pkts}")
     # Show first 16 raw entries to understand format
-    print(f"  first 16 entries (hex bytes):")
+    print("  first 16 entries (hex bytes):")
     for k in range(min(16, n_pkts)):
         b = meta_buf[k*4:(k+1)*4]
         print(f"    [{k:3d}]  {b.hex(' ')}")
