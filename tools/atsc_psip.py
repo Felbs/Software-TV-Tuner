@@ -474,7 +474,7 @@ if __name__ == "__main__":
               f"prog#={c['program_number']:<5}  "
               f"name={c['short_name']!r}")
     print()
-    print(f"Events by source_id:")
+    print("Events by source_id:")
     for sid, evs in info["events"].items():
         print(f"  source={sid}:")
         for e in evs[:3]:

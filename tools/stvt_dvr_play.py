@@ -37,12 +37,10 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 LIVE_TS = REPO / "tools" / "data" / "tv_live" / "live.ts"
-DVR_TS  = REPO / "tools" / "data" / "tv_live" / "live_dvr.ts"
 FFMPEG  = r"C:\ffmpeg\bin\ffmpeg.exe"
 VLC     = r"C:\Program Files\VideoLAN\VLC\vlc.exe"
 
@@ -57,10 +55,16 @@ def main() -> int:
               file=sys.stderr)
         return 1
     if not Path(VLC).exists():
-        print(f"VLC not installed at {VLC}", file=sys.stderr)
+        print(f"[dvr] VLC not installed at {VLC}\n"
+              f"      Install from https://www.videolan.org/vlc/ "
+              f"into the default location, or edit VLC at the top of "
+              f"this script.", file=sys.stderr)
         return 1
     if not Path(FFMPEG).exists():
-        print(f"ffmpeg not installed at {FFMPEG}", file=sys.stderr)
+        print(f"[dvr] ffmpeg not installed at {FFMPEG}\n"
+              f"      Install from https://www.gyan.dev/ffmpeg/builds/ "
+              f"and put it at C:\\ffmpeg\\bin\\ffmpeg.exe, or edit "
+              f"FFMPEG at the top of this script.", file=sys.stderr)
         return 1
 
     # VLC reads live.ts directly with built-in program selection. Native
@@ -89,12 +93,12 @@ def main() -> int:
     try:
         vlc_proc = subprocess.Popen(vlc_cmd)
         print(f"[dvr] VLC started (PID {vlc_proc.pid}) on {LIVE_TS}")
-        print(f"[dvr] DVR hotkeys (VLC must be focused):")
-        print(f"        Space        pause / play")
-        print(f"        Left / Right seek back / forward 10 sec")
-        print(f"        Shift+Arrow  30 sec")
-        print(f"        Ctrl+Arrow   1 min")
-        print(f"        End          jump to live edge")
+        print("[dvr] DVR hotkeys (VLC must be focused):")
+        print("        Space        pause / play")
+        print("        Left / Right seek back / forward 10 sec")
+        print("        Shift+Arrow  30 sec")
+        print("        Ctrl+Arrow   1 min")
+        print("        End          jump to live edge")
         vlc_proc.wait()
     except KeyboardInterrupt:
         pass

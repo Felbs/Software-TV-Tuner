@@ -440,6 +440,15 @@ tools/
   default_stations.py         Sample channel table (edit for your DMA)
   config.py                   Default tuner/antenna/gain config
   tv_player.py                Resilient video player (decoupled A/V clocks)
+  stvt_schedule.py            DVR scheduler + interactive controller (`tv`)
+  stvt_capacity.py            "What can this rig record simultaneously?" report
+  stvt_epg.py                 EPG grid printer (uses scan.json PSIP/EIT)
+  stvt_multirec.py            Multi-program recorder (one tuning, N outputs)
+  stvt_livewatch.py           One-command tv_live + VLC wrapper
+  stvt_inventory.py           List recordings with size / duration / metadata
+  stvt_dedup.py               Find duplicate .ts files (size + sample-hash)
+  tests/                      Unit tests for the pure-Python helpers
+                              (run: python -m unittest discover tools/tests)
 docs/                         Science explainer, capture recipe, session log
 bootstrap.sh                  Linux setup + build + install
 ```

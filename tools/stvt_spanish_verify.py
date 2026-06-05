@@ -44,7 +44,6 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
 
 REPO = Path(__file__).resolve().parents[1]
 TV_LIVE = REPO / "tools" / "tv_live.py"
@@ -325,7 +324,7 @@ def verify_rf(rf: int, info: dict, dwell: int, fh, env: dict) -> RFResult:
     log(f"\n=== RF {rf}  {info['callsign']}  ({info['network']}) ===", fh)
     log(f"  expected: {info['note']}", fh)
     if not tune_rf(rf, dwell, env):
-        log(f"  [FAIL] chain did not lock", fh)
+        log("  [FAIL] chain did not lock", fh)
         res.notes.append("chain did not lock")
         kill_chain()
         return res
@@ -393,7 +392,7 @@ def verify_rf(rf: int, info: dict, dwell: int, fh, env: dict) -> RFResult:
 
     if not res.programs_with_spa:
         res.notes.append("no Spanish-tagged streams found")
-        log(f"  [WARN] no spa tracks found", fh)
+        log("  [WARN] no spa tracks found", fh)
     kill_chain()
     return res
 

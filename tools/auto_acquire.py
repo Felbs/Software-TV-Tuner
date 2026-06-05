@@ -184,7 +184,7 @@ def save_winner(rf: int, ifgr: int, rfgain: int, ant: str, eq: str,
         f.write(f'export STVT_ANTENNA="{ant}"\n')
         f.write(f"export STVT_EQ={eq}\n")
         f.write(f"# Channel: RF{rf}\n")
-        f.write(f"#\n")
+        f.write("#\n")
         f.write(f"# Run:    source {WINNER} && ~/run_stvt_winner.sh {eq} {rf}\n")
 
 
@@ -285,7 +285,7 @@ def main() -> int:
                         # Stop on first passing candidate (original behavior).
                         rf, ifgr, rfgain, ant, eq = key
                         log("=" * 60)
-                        log(f"*** SUCCESS! ***")
+                        log("*** SUCCESS! ***")
                         log(f"*** Config: RF={rf} IFGR={ifgr} RFGAIN_SEL={rfgain}")
                         log(f"*** Antenna={ant!r} EQ={eq}")
                         log(f"*** PAT count in 60s verify: {verify['pat_count']}")
@@ -293,7 +293,7 @@ def main() -> int:
                         save_winner(rf, ifgr, rfgain, ant, eq,
                                     verify["pat_count"])
                         log(f"Winner saved to {WINNER}")
-                        log(f"To use:")
+                        log("To use:")
                         log(f"  source {WINNER} && ~/run_stvt_winner.sh {eq} {rf}")
                         return 0
                     elif len(passing) >= args.best_of:
@@ -313,7 +313,7 @@ def main() -> int:
             log(f"*** Config: RF={rf} IFGR={ifgr} RFGAIN_SEL={rfgain}")
             log(f"*** Antenna={ant!r} EQ={eq}")
             log(f"*** PAT count in 60s verify: {best_pat}")
-            log(f"*** other candidates: " +
+            log("*** other candidates: " +
                 ", ".join(f"RF{k[0]}/{k[4]}={p}" for p, k, _ in passing[1:]))
             log("=" * 60)
             save_winner(rf, ifgr, rfgain, ant, eq, best_pat)

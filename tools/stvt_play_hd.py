@@ -30,9 +30,30 @@ FFPLAY = r"C:\ffmpeg\bin\ffplay.exe"
 VLC = r"C:\Program Files\VideoLAN\VLC\vlc.exe"
 
 
+USAGE = (
+    "usage: stvt_play_hd.py [program] [tailMB]\n"
+    "  program  ATSC program number to play (default: 3 = the HD feed)\n"
+    "  tailMB   how many MB at the end of live.ts to read "
+    "(default: 25 ~= 20s)\n"
+    "\n"
+    "Reads the LAST N MB of live.ts so the player never sees the\n"
+    "equalizer-convergence packet burst at the start of the chain.\n"
+)
+
+
 def parse_args():
-    prog = int(sys.argv[1]) if len(sys.argv) > 1 else 3
-    tail_mb = int(sys.argv[2]) if len(sys.argv) > 2 else 25
+    # We support `-h`/`--help` even though we don't use argparse so the
+    # user gets a usable hint instead of a stack trace from int('-h').
+    if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
+        print(USAGE)
+        sys.exit(0)
+    try:
+        prog = int(sys.argv[1]) if len(sys.argv) > 1 else 3
+        tail_mb = int(sys.argv[2]) if len(sys.argv) > 2 else 25
+    except ValueError as exc:
+        print(f"[hd] bad numeric argument: {exc}\n\n{USAGE}",
+              file=sys.stderr)
+        sys.exit(2)
     return prog, tail_mb
 
 
