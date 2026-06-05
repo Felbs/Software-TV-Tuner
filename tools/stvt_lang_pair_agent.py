@@ -42,13 +42,11 @@ from __future__ import annotations
 import argparse
 import ctypes
 import ctypes.wintypes as wt
-import json
 import os
 import subprocess
 import sys
-import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
