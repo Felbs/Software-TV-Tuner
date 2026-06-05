@@ -11,7 +11,7 @@ Usage:
                                           ^^^^
                                           KB/s rate cap
 """
-import sys, os, time
+import sys, time
 
 KB_PER_SEC = int(sys.argv[1]) if len(sys.argv) > 1 else 1500
 CHUNK_BYTES = 8 * 1024  # 8KB chunks

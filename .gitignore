@@ -22,7 +22,10 @@ tools/scan_lab/fixtures/
 # Build artifacts (not tracked)
 gr-atscplus/build/
 gr-atscplus/build_*/
-gr-atscplus/build.znver1.test/
+gr-atscplus/build.*/
+
+# Screenshots
+mpv-shot*.jpg
 
 # Editor / archive backups
 tools/*.pre_*
@@ -36,3 +39,27 @@ tools/tv_live_test*.py
 
 # Claude Code session state
 .claude/
+
+# Runtime stdout/stderr logs written to repo root by stvt_run.sh and
+# the hotkey/dvr/chain launchers (any dot-prefixed .log / .err pair).
+.chain.log
+.chain.err
+.dvr.log
+.dvr.err
+.hotkey.log
+.hotkey.err
+*.tmp.log
+*.tmp.err
+
+# Live transport stream and related staging files produced by tv_live.
+live.ts
+live.ts.*
+live_dvr.ts
+
+# Scan-temp / scratch files written by tv_tuner during a sweep.
+# (Note: tools/data/** already covered by the `data/` rule above.)
+scan_temp/
+tools/scan_temp/
+
+# Overnight report from the cleanup branch (review artifact, not source)
+OVERNIGHT_REPORT.md

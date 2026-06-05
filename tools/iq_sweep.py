@@ -24,7 +24,6 @@ from __future__ import annotations
 import argparse
 import itertools
 import os
-import shutil
 import signal
 import subprocess
 import sys
