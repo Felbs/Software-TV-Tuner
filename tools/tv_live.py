@@ -15,6 +15,7 @@ import argparse
 import logging
 import os
 import signal
+import socket
 import sys
 import time
 from pathlib import Path
@@ -43,6 +44,7 @@ if sys.platform == "win32":
 from gnuradio import gr, blocks, analog, dtv
 from gnuradio import filter as gr_filter
 from gnuradio import soapy
+from gnuradio import network
 # gr-atscplus fork — atsc_fpll_tight is the unlock for clean
 # decode quality on marginal signals. Stock gr-dtv FPLL uses alpha=0.01
 # which is too wide; the shipped combo is alpha=0.001 + AFC tau=50us.

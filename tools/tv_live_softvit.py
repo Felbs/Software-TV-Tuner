@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
+import socket
 import sys
 import time
 from pathlib import Path
@@ -21,6 +23,7 @@ except Exception:
 from gnuradio import gr, blocks, analog, dtv
 from gnuradio import filter as gr_filter
 from gnuradio import soapy
+from gnuradio import network
 from gnuradio import atscplus
 from gnuradio.dtv.atsc_rx_filter import atsc_rx_filter, ATSC_SYMBOL_RATE
 
@@ -52,7 +55,7 @@ class TEIScrub(gr.sync_block):
         return len(out)
 
 from config import (DATA_DIR, ATSC_ANTENNA, ATSC_IF_GAIN_REDUCTION,
-                     ATSC_RFGAIN_SEL,
+                     ATSC_RFGAIN_SEL, ATSC_LIVE_TCP_PORT,
                      ATSC_DEFAULT_RF_CHANNEL)
 
 LOG = logging.getLogger("sdr_agent.tv_live_softvit")
