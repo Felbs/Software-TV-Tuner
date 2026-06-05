@@ -3,7 +3,6 @@ text helpers, and the grid renderer. No SDR or GNU Radio required.
 """
 from __future__ import annotations
 
-import json
 import sys
 import unittest
 from pathlib import Path

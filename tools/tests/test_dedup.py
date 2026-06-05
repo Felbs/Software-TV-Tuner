@@ -17,7 +17,6 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
-import time
 import unittest
 from pathlib import Path
 
@@ -60,7 +59,6 @@ class TestSampleHash(unittest.TestCase):
     def test_large_file_sample_picks_up_middle_diff(self):
         # Build two 1 MB files where only the middle 64 KB differs.
         # 3-slice sampling should catch the difference.
-        size = 1_000_000
         head = b"H" * 200_000
         tail = b"T" * 200_000
         mid_a = b"A" * 600_000
