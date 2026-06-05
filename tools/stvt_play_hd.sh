@@ -44,7 +44,7 @@ launch(){
     ffmpeg -hide_banner -loglevel warning -fflags nobuffer+flush_packets \
       -flags low_delay -probesize 3M -analyzeduration 3M -err_detect ignore_err \
       -i - -map 0:p:$PROG -c copy -flush_packets 1 -f mpegts - | \
-    mpv - --hwdec=no --cache=yes --cache-secs=30 --demuxer-max-bytes=200MiB \
+    mpv - --vo=${STVT_MPV_VO:-wlshm} --hwdec=no --cache=yes --cache-secs=30 --demuxer-max-bytes=200MiB \
       --demuxer-readahead-secs=20 --cache-pause=no --cache-pause-initial=no \
       --title='STVT Live (prog $PROG)' --force-seekable=no \
       --msg-level=all=status" >> "$MPVLOG" 2>&1 < /dev/null &
