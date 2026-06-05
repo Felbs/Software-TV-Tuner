@@ -271,11 +271,36 @@ def print_channel_list() -> list[dict]:
 
 
 # ── Pipeline plumbing ────────────────────────────────────────────
+# Chain settings that the play path (stvt_channel_step.py) has been
+# using for months. The scanner historically ran with raw defaults,
+# which meant the equalizer cold-start probability was lower AND the
+# RSPdx front-end ran at the wrong gain. That's why scans recover
+# fewer channels than the picker can actually tune. Keep this in sync
+# with CHAIN_DEFAULTS in stvt_channel_step.py.
+CHAIN_DEFAULTS = {
+    "STVT_EQ":         "long",
+    "STVT_RS":         "stock",
+    "STVT_VITERBI":    "soft",
+    "STVT_SPS":        "1.1",
+    "STVT_RRC_SYMS":   "8",
+    "STVT_TEISCRUB":   "1",
+    "STVT_EQ_LKG":     "1",
+    "STVT_EQ_LKG_RMS": "1.0",
+    "STVT_IFGR":       "45",
+    "STVT_RFGAIN_SEL": "3",
+    "STVT_ANTENNA":    "Antenna A",
+}
+
+
 def env_with_sdrplay() -> dict:
-    """Return os.environ + SDRplay API DLL dir on PATH (Windows only).
+    """Return os.environ + SDRplay API DLL dir on PATH (Windows only)
+    + chain quality defaults if not already set.
+
     On Linux the SDRplay API installs system-wide and the runtime
     linker finds it without a PATH tweak."""
     env = os.environ.copy()
+    for k, v in CHAIN_DEFAULTS.items():
+        env.setdefault(k, v)
     if not SDRPLAY_API_DIR:
         return env
     path = env.get("PATH", "")
@@ -607,16 +632,31 @@ def kill_proc(proc, label: str = "proc"):
             pass
 
 
-def ffprobe_programs(timeout_sec: float = 12.0) -> list[dict]:
+def ffprobe_programs(timeout_sec: float = 20.0,
+                     min_ts_size: int = 8_000_000) -> list[dict]:
     """ffprobe live.ts for all programs in the multiplex. Returns list of
     dicts with program_id, program_num, service_name, video_codec,
-    video_height, audio_codec. Empty list if probe fails."""
+    video_height, audio_codec. Empty list if probe fails.
+
+    Waits up to ~6s for live.ts to reach `min_ts_size` before probing —
+    on locked-but-slow multiplexes (RF 7 WJLA, RF 15 WFDC) the PSI
+    cycle can take 3-4 seconds, and ffprobe with too small an analyze
+    budget returns 0 programs even though PAT is healthy. Bumped
+    analyzeduration/probesize from 5M to 10M for the same reason."""
+    deadline = time.time() + 6.0
+    while time.time() < deadline:
+        try:
+            if LIVE_TS.stat().st_size >= min_ts_size:
+                break
+        except OSError:
+            pass
+        time.sleep(0.3)
     try:
         result = subprocess.run(
             [FFPROBE,
              "-v", "error", "-of", "json",
              "-show_programs", "-show_streams",
-             "-analyzeduration", "5000000", "-probesize", "5000000",
+             "-analyzeduration", "10000000", "-probesize", "10000000",
              "-f", "mpegts", "-i", str(LIVE_TS)],
             capture_output=True, timeout=timeout_sec, text=True,
         )
@@ -688,7 +728,11 @@ def scan_one_rf(rf: int, dwell_sec: float = 12.0,
         return {"rf": rf, "lock": False, "reason": f"spawn failed: {e}"}
 
     try:
-        if not wait_for_live_ts(timeout_sec=15.0):
+        # 25s window: the tv_live.py chain (long equalizer + soft viterbi)
+        # cold-starts 4-6s slower than the old softvit fork, especially
+        # on VHF and marginal UHF carriers. 15s was too tight and cut
+        # off legitimately-locking channels (RF 7 WJLA, RF 24, RF 27).
+        if not wait_for_live_ts(timeout_sec=25.0):
             return {"rf": rf, "lock": False, "reason": "no live.ts growth"}
         # Wait for the equalizer to converge.
         deadline = time.time() + dwell_sec
@@ -728,8 +772,11 @@ def scan_one_rf(rf: int, dwell_sec: float = 12.0,
         return result
     finally:
         kill_proc(proc, "scan_tv_live")
-        # SDRplay driver needs ~3 s to fully release the device.
-        time.sleep(3)
+        # SDRplay driver needs ~4 s to fully release between back-to-back
+        # tunes. 3s was sometimes too tight on this rig and the next
+        # channel's SDR open would fail silently (presents as
+        # "no live.ts growth" on the FOLLOWING channel, not this one).
+        time.sleep(4)
 
 
 def scan_one_rf_with_retry(rf: int, dwell_sec: float = 12.0,
@@ -969,8 +1016,14 @@ def run_scan(region: dict | None = None,
         # Phase 2: full lock test on hot ATSC channels only.
         decodable = region.get("decodable") in (True, "atsc_only")
         if decodable and hot_atsc:
+            # With retries=2, worst case per channel is 3 attempts.
+            # In practice strong locks finish in ~dwell_sec+8s and only
+            # marginal ones pay for retries — budget 1.6x for a realistic
+            # ceiling without scaring the user.
+            est = int(len(hot_atsc) * (dwell_sec + 8) * 1.6)
             print(f"[scan] phase 2 — full lock test on {len(hot_atsc)} "
-                  f"ATSC 1.0 carrier(s) (~{len(hot_atsc) * (dwell_sec + 5):.0f}s)...")
+                  f"ATSC 1.0 carrier(s) (~{est}s, marginal channels may "
+                  f"retry up to 3x)...")
             if atsc3_carriers:
                 print(f"[scan]   (also {len(atsc3_carriers)} ATSC 3.0 / "
                       f"NextGen TV carrier(s) detected — skipping phase 2; "
@@ -988,8 +1041,13 @@ def run_scan(region: dict | None = None,
                 # immediately. WTTG RF 36 was the canonical example —
                 # phase-1 metrics identical to channels that locked, but
                 # the equalizer just didn't converge on first try.
+                # NOTE: viterbi="stock" routes to tv_live.py, which reads
+                # STVT_VITERBI=soft from CHAIN_DEFAULTS. The "soft" branch
+                # routes to tv_live_softvit.py, an older fork that ignores
+                # env vars — do not use it here, it strips our chain config.
                 res = scan_one_rf_with_retry(rf, dwell_sec=dwell_sec,
-                                              log_fh=log_fh, retries=1)
+                                              viterbi="stock",
+                                              log_fh=log_fh, retries=2)
                 # Preserve phase-1 metrics into the post-lock record so
                 # the picker can show signal strength %.
                 res["rms_dbfs"] = rec["rms_dbfs"]
@@ -3540,8 +3598,8 @@ def interactive_loop(cfg: dict, args) -> int:
             try:
                 tag = f" — now: {last_label}" if last_label else ""
                 ans = input(
-                    f"\n📺  Channel?{tag}  [row #, virt 5.1, "
-                    f"a=audio ({audio_label[audio_lang]}), "
+                    f"\n📺  Channel?{tag}  [row #, virt 5.1, n=next, "
+                    f"p=prev, a=audio ({audio_label[audio_lang]}), "
                     f"c=CC ({cc_label[cc_channel]}), g=guide, q=quit]: "
                 ).strip().lower()
             except EOFError:
@@ -3580,13 +3638,29 @@ def interactive_loop(cfg: dict, args) -> int:
             if ans in ("g", "guide", "list", "?"):
                 rows = print_scan_table(scan)
                 continue
-            if not ans:
+            if ans in ("n", "next", "+"):
+                r = _resolve_neighbor_row(rows, last_pick, +1)
+                if r is None:
+                    print("  no detected channel available to move to")
+                    continue
+                print(f"  -> next channel: {r['virtual']} {r['callsign']}")
+                ans = ""  # fall through to spawn below using `r`
+            elif ans in ("p", "prev", "previous", "-"):
+                r = _resolve_neighbor_row(rows, last_pick, -1)
+                if r is None:
+                    print("  no detected channel available to move to")
+                    continue
+                print(f"  -> prev channel: {r['virtual']} {r['callsign']}")
+                ans = ""
+            elif not ans:
                 continue
-            r = _resolve_picker_row(ans, rows)
-            if r is None:
-                print("  invalid — type a row #, a virtual channel "
-                      "(e.g. 5.1), c to toggle CC, g for guide, q to quit")
-                continue
+            else:
+                r = _resolve_picker_row(ans, rows)
+                if r is None:
+                    print("  invalid — type a row #, a virtual channel "
+                          "(e.g. 5.1), n/p next/prev, a=audio, c=CC, "
+                          "g=guide, q=quit")
+                    continue
             if r.get("not_detected"):
                 print(f"  ! {r['virtual']} {r['callsign']} wasn't "
                       f"detected — tuning will likely fail (signal too "
@@ -3629,6 +3703,30 @@ def _resolve_picker_row(ans: str, rows: list[dict]) -> dict | None:
     except ValueError:
         pass
     return None
+
+
+def _resolve_neighbor_row(rows: list[dict], current: dict | None,
+                          direction: int) -> dict | None:
+    """Advance from `current` to the next/prev detected row in `rows`.
+    direction = +1 (next), -1 (prev). Skips rows flagged not_detected.
+    If `current` is None or not found, returns the first detected row
+    when direction>0, or the last detected row when direction<0."""
+    detected = [r for r in rows if not r.get("not_detected")]
+    if not detected:
+        return None
+    # Locate current in the detected-only list.
+    idx = None
+    if current is not None:
+        for i, r in enumerate(detected):
+            if (r.get("rf") == current.get("rf")
+                    and r.get("virtual") == current.get("virtual")
+                    and r.get("program") == current.get("program")):
+                idx = i
+                break
+    if idx is None:
+        return detected[0] if direction > 0 else detected[-1]
+    new = (idx + direction) % len(detected)
+    return detected[new]
 
 
 def main(argv: list[str] | None = None) -> int:

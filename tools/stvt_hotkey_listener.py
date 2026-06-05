@@ -41,17 +41,23 @@ VK_A = 0x41
 VK_E = 0x45
 VK_S = 0x53
 VK_Q = 0x51
+VK_UP = 0x26
+VK_DOWN = 0x28
 
 REPO = Path(__file__).resolve().parents[1]
-AUDIO_LANG_SCRIPT = REPO / "tools" / "stvt_audio_lang.py"
+AUDIO_LANG_SCRIPT  = REPO / "tools" / "stvt_audio_lang.py"
+CHAN_STEP_SCRIPT   = REPO / "tools" / "stvt_channel_step.py"
 PYEXE = sys.executable
 
-# Hotkey ID -> (label, audio_lang_arg)
+# Hotkey ID -> (label, action). audio_lang verbs go to stvt_audio_lang.py;
+# channel-change verbs go to stvt_channel_step.py.
 HOTKEYS = {
-    1: ("Ctrl+Shift+E -> English", "eng"),
-    2: ("Ctrl+Shift+S -> Spanish", "spa"),
-    3: ("Ctrl+Shift+A -> toggle",  "toggle"),
-    4: ("Ctrl+Shift+Q -> quit",    None),
+    1: ("Ctrl+Shift+E -> English",        "audio:eng"),
+    2: ("Ctrl+Shift+S -> Spanish",        "audio:spa"),
+    3: ("Ctrl+Shift+A -> toggle",         "audio:toggle"),
+    4: ("Ctrl+Shift+Up -> next channel",  "chan:next"),
+    5: ("Ctrl+Shift+Down -> prev channel","chan:prev"),
+    6: ("Ctrl+Shift+Q -> quit",           None),
 }
 
 
@@ -60,13 +66,24 @@ def fire(action: str):
     if action is None:
         return
     print(f"  [hotkey] firing: {action}", flush=True)
+    # Action grammar: "audio:<verb>" -> stvt_audio_lang.py <verb>
+    #                 "chan:<verb>"  -> stvt_channel_step.py <verb>
     try:
+        if ":" in action:
+            kind, verb = action.split(":", 1)
+            if kind == "audio":
+                script, args = AUDIO_LANG_SCRIPT, [verb]
+            elif kind == "chan":
+                script, args = CHAN_STEP_SCRIPT, [verb]
+            else:
+                return
+        else:
+            # back-compat: bare verb defaults to audio
+            script, args = AUDIO_LANG_SCRIPT, [action]
         # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
-        # The NO_WINDOW flag stops the console windows from popping up
-        # for each spawn of stvt_audio_lang.py + its tv_tuner respawn.
         DETACHED = 0x00000008 | 0x00000200 | 0x08000000
         subprocess.Popen(
-            [PYEXE, "-u", str(AUDIO_LANG_SCRIPT), action],
+            [PYEXE, "-u", str(script), *args],
             creationflags=DETACHED,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
@@ -81,19 +98,20 @@ def main() -> int:
 
     user32 = ctypes.windll.user32
 
-    # Register all hotkeys
+    bindings = {
+        "Ctrl+Shift+E":    (MOD_CONTROL | MOD_SHIFT, VK_E),
+        "Ctrl+Shift+S":    (MOD_CONTROL | MOD_SHIFT, VK_S),
+        "Ctrl+Shift+A":    (MOD_CONTROL | MOD_SHIFT, VK_A),
+        "Ctrl+Shift+Q":    (MOD_CONTROL | MOD_SHIFT, VK_Q),
+        "Ctrl+Shift+Up":   (MOD_CONTROL | MOD_SHIFT, VK_UP),
+        "Ctrl+Shift+Down": (MOD_CONTROL | MOD_SHIFT, VK_DOWN),
+    }
     registered = []
     for hk_id, (label, _) in HOTKEYS.items():
-        if "Ctrl+Shift+E" in label:
-            mod, vk = MOD_CONTROL | MOD_SHIFT, VK_E
-        elif "Ctrl+Shift+S" in label:
-            mod, vk = MOD_CONTROL | MOD_SHIFT, VK_S
-        elif "Ctrl+Shift+A" in label:
-            mod, vk = MOD_CONTROL | MOD_SHIFT, VK_A
-        elif "Ctrl+Shift+Q" in label:
-            mod, vk = MOD_CONTROL | MOD_SHIFT, VK_Q
-        else:
+        chord = label.split(" ->")[0].strip()
+        if chord not in bindings:
             continue
+        mod, vk = bindings[chord]
         if user32.RegisterHotKey(None, hk_id, mod, vk):
             registered.append(hk_id)
             print(f"  registered  {label}")
