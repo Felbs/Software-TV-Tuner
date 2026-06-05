@@ -16,7 +16,6 @@ blocks. With an in-memory deque holding 1+ GB, the consumer can
 drain at memory-copy speed for the duration of its probe.
 """
 import sys
-import os
 import threading
 import time
 import argparse
