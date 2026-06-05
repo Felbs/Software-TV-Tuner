@@ -123,6 +123,25 @@ regression test. Full test suite: **161 passing** (was ~76 before;
   doesn't conflict with anything I added. Worth eyeballing in the
   morning to confirm it's a friendly contribution.
 
+## Tonight's cascade actually fired
+
+Confirming the bug is real and active: at the time of writing, the
+queue shows
+
+```
+20260605_0000_rf31_p4__mux__america_reframed   status=recording
+20260605_0200_rf31_p1__mux__overnight_weta_mux  status=skipped:
+    same-mux RF31 record already active ("[MUX] America ReFramed");
+    use rmux to cover both
+```
+
+The 12:00 AM America-ReFramed entry fired late, ran (without the
+clamp) until ~2:55 AM, and starved the 2:00 AM WETA slot exactly as
+the task description predicted. The fix in Task 1 will prevent this
+in future runs, but it's already too late for THIS night's WETA
+mux — the running daemon (PID 29160) predates the patch. The fix
+takes effect on the next daemon restart.
+
 ## Issues / concerns
 
 - **Live SDR test for `stvt_signal.py` is the open item.** Cannot
