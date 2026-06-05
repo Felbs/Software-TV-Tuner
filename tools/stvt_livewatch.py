@@ -145,7 +145,7 @@ def spawn_vlc(vlc_path: str, program: int | None) -> subprocess.Popen:
     flipping through the PAT."""
     cmd = [vlc_path,
            "--no-video-title-show",
-           "--meta-title", f"STVT livewatch (RF chain)",
+           "--meta-title", "STVT livewatch (RF chain)",
            "--file-caching", "3000",
            "--input-fast-seek",
            "--ts-seek-percent",
