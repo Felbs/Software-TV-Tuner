@@ -54,7 +54,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -609,7 +608,7 @@ def main():
         print(f"[tuner] starting fresh on RF{args.rf} ({args.seconds}s per run)")
 
     print(f"[tuner] state dir: {STATE_DIR}")
-    print(f"[tuner] press Ctrl-C to stop. Leaderboard updates after every run.")
+    print("[tuner] press Ctrl-C to stop. Leaderboard updates after every run.")
     print()
 
     # Hook for clean Ctrl-C
