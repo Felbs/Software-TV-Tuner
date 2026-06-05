@@ -173,7 +173,7 @@ def render_text(report: dict, mux_filter: int | None) -> str:
                    f"{p['video_codec']} {p['video_height']}p   "
                    f"audio: {langs}{sap_tag}")
     out.append("")
-    out.append(f"  To record this entire mux at once:")
+    out.append("  To record this entire mux at once:")
     out.append(f"    python tools/stvt_multirec.py --rf {best['rf']} "
                f"--duration 60")
     out.append("")

@@ -116,7 +116,7 @@ def main() -> int:
     out(f"[verify] CEA-608 channel {args.channel} "
         f"({'EN/primary' if args.channel == 1 else 'ES/SAP'})")
     out(f"[verify] stale threshold: {args.stale_warn}s")
-    out(f"[verify] wall-clock timestamps — compare to the VLC window directly")
+    out("[verify] wall-clock timestamps — compare to the VLC window directly")
     out("")
 
     # atsc_cc.py already seeks to the live edge (last ~256 KB) on its
