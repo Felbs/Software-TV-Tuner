@@ -61,7 +61,6 @@ def load_scan_now_showing() -> list[dict]:
             minor = match.get("minor", 1)
             virtual = f"{major}.{minor}" if major else f"{c['rf']}.{pnum}"
             short = match.get("short_name") or callsign
-            events = []
             for e in psip_events.get(str(pnum), []):
                 start = gps_to_unix(e.get("start_gps", 0))
                 length = e.get("length_sec") or 0
@@ -171,7 +170,7 @@ def main() -> int:
 
     print(f"[verify] now      : {time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"[verify] market   : {args.market_url}")
-    print(f"[verify] reading scan EIT...")
+    print("[verify] reading scan EIT...")
     scan_now = load_scan_now_showing()
     if not scan_now:
         print("[verify] no scan data — run a fresh scan via "
@@ -180,13 +179,13 @@ def main() -> int:
     print(f"[verify] scan says {len(scan_now)} channels are airing something now")
     print()
 
-    print(f"[verify] fetching online listings... (may take a few seconds)")
+    print("[verify] fetching online listings... (may take a few seconds)")
     try:
         net_rows = fetch_listings(args.market_url)
     except Exception as e:
         print(f"[verify] fetch failed: {e}")
-        print(f"[verify] partial verification only — try a fresh scan if "
-              f"shows look stale")
+        print("[verify] partial verification only — try a fresh scan if "
+              "shows look stale")
         net_rows = []
     print(f"[verify] fetched {len(net_rows)} rows from online listings")
     print()
@@ -225,8 +224,8 @@ def main() -> int:
     print()
     print(f"[verify] {match} match, {mismatch} mismatch, {unknown} not in online fetch")
     if mismatch + unknown > match:
-        print(f"[verify] scan data looks stale — run a fresh scan:")
-        print(f"          python tools/tv_tuner.py --scan")
+        print("[verify] scan data looks stale — run a fresh scan:")
+        print("          python tools/tv_tuner.py --scan")
     return 0
 
 
