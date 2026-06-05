@@ -649,6 +649,7 @@ def cmd_tv(args) -> int:
         print("  unwatch          close the VLC watcher")
         print("  show <#>         show next 6 events for channel #")
         print("  rm  <id-prefix>  cancel a pending recording")
+        print("  recs             browse recordings folder (play/delete)")
         print("  refresh          reload scan + queue")
         print("  q                quit")
         try:
@@ -674,6 +675,13 @@ def cmd_tv(args) -> int:
                      and q["id"] != arg]
             save_queue(queue)
             print("removed."); input("[enter]"); continue
+        if cmd == "recs":
+            # Hand control to the recordings browser. Spawning a child
+            # python lets it own stdin without interfering with this
+            # loop's input() state.
+            recs_py = HERE / "stvt_recordings.py"
+            subprocess.call([PYTHON_EXE, str(recs_py)])
+            continue
         if cmd == "unwatch":
             if stop_watch():
                 print("watcher stopped.")
