@@ -990,8 +990,8 @@ def run_scan(region: dict | None = None,
                     weak_atsc1_carriers.append(rec)
                 elif atsc3_carrier:
                     rec["lock"] = False
-                    rec["reason"] = (f"ATSC 3.0 / NextGen TV detected — "
-                                     f"install a 3.0 decoder to watch")
+                    rec["reason"] = ("ATSC 3.0 / NextGen TV detected — "
+                                     "install a 3.0 decoder to watch")
                     rec["atsc3"] = True
                     atsc3_carriers.append(rec)
                 else:
@@ -1994,7 +1994,7 @@ def print_scan_table(scan: dict) -> list[dict]:
         if err:
             print()
             print(f"  ⚠  Phase-1 RF sweep failed: {err}")
-            print(f"  ⚠  Verify your SDR with: SoapySDRUtil --probe")
+            print("  ⚠  Verify your SDR with: SoapySDRUtil --probe")
         print()
         print("  No channels were detected on RF — listing the static")
         print(f"  default station table for {scan.get('region_label', 'your region')}.")
@@ -2901,7 +2901,7 @@ def run_pipeline(rf: int, callsign: str, play: bool,
             if pat >= min_pat:
                 print(f"[tv_tuner] LOCK acquired on attempt {attempt}.")
                 return tv
-            print(f"[tv_tuner] bad convergence — killing and retrying...")
+            print("[tv_tuner] bad convergence — killing and retrying...")
             kill_proc(tv, "tv_live")
             time.sleep(2)
         return None
@@ -2980,8 +2980,8 @@ def run_pipeline(rf: int, callsign: str, play: bool,
         except ValueError:
             pass
         if fast_fail:
-            print(f"[tv_tuner] manual-tune attempt for an undetected "
-                  f"channel — single 8 s try, no retries.")
+            print("[tv_tuner] manual-tune attempt for an undetected "
+                  "channel — single 8 s try, no retries.")
         for attempt in range(1, MAX_RETRIES + 1):
             state.tv_proc = spawn_tv_live(rf, tv_log_fh, viterbi=viterbi)
             print(f"[tv_tuner] tv_live PID={state.tv_proc.pid} "
@@ -3015,7 +3015,7 @@ def run_pipeline(rf: int, callsign: str, play: bool,
             if pat_count >= MIN_GOOD_PAT:
                 print(f"[tv_tuner] LOCK acquired on attempt {attempt}.")
                 break
-            print(f"[tv_tuner] bad convergence — killing and retrying...")
+            print("[tv_tuner] bad convergence — killing and retrying...")
             kill_proc(state.tv_proc, "tv_live")
             state.tv_proc = None
             time.sleep(2)
@@ -3273,9 +3273,9 @@ def _spawn_in_new_console(cmd: list[str]) -> subprocess.Popen:
             return subprocess.Popen(wrap, start_new_session=True)
     # Fallback: no terminal emulator on the system (headless / WSL).
     # Run inline; output goes to the picker's terminal.
-    print(f"[tv_tuner] no terminal emulator found — output will appear "
-          f"in this window (install gnome-terminal or xterm for a "
-          f"separate window).")
+    print("[tv_tuner] no terminal emulator found — output will appear "
+          "in this window (install gnome-terminal or xterm for a "
+          "separate window).")
     return subprocess.Popen(cmd, start_new_session=True)
 
 
