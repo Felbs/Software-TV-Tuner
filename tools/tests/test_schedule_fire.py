@@ -121,5 +121,61 @@ class TestComputeFireDurationEdgeCases(unittest.TestCase):
         self.assertEqual(duration_min, 2)
 
 
+class TestComputeSkipReason(unittest.TestCase):
+    """The daemon's 'something else is on the SDR' decision. Single-
+    tenant SDR: even a same-RF concurrent fire is illegal because the
+    2nd multirec would spawn its own tv_live which can't acquire the
+    device, leaving a stub ~30s file that looks done but isn't."""
+
+    def test_no_active_means_safe_to_fire(self):
+        new = _entry(1_780_000_000, 1800, eid="new")
+        self.assertIsNone(sched.compute_skip_reason(new, [], []))
+
+    def test_same_rf_active_is_same_mux_skip(self):
+        active_entry = _entry(1_780_000_000, 1800, eid="active")
+        new = dict(_entry(1_780_000_300, 1800, eid="new"))
+        new["rf"] = active_entry["rf"]
+        reason = sched.compute_skip_reason(new, ["active"], [active_entry])
+        self.assertIsNotNone(reason)
+        self.assertIn("same-mux", reason)
+        self.assertIn(f"RF{new['rf']}", reason)
+
+    def test_different_rf_active_is_different_mux_skip(self):
+        active_entry = _entry(1_780_000_000, 1800, eid="active")
+        active_entry["rf"] = 34
+        new = _entry(1_780_000_300, 1800, eid="new")
+        new["rf"] = 36
+        reason = sched.compute_skip_reason(new, ["active"], [active_entry])
+        self.assertIsNotNone(reason)
+        self.assertIn("different-mux", reason)
+        self.assertIn("RF34", reason)
+        self.assertIn("only one SDR", reason)
+
+    def test_active_id_missing_from_queue_is_skipped(self):
+        # Defensive: if active maps to an id that's been pruned from
+        # the queue, compute_skip_reason should not raise — just keep
+        # scanning the rest of active_ids. (Returns None if no other
+        # blocker is found.)
+        new = _entry(1_780_000_000, 1800, eid="new")
+        self.assertIsNone(
+            sched.compute_skip_reason(new, ["ghost_id"], [])
+        )
+
+    def test_skip_reason_uses_first_active_match(self):
+        # Two actives — the first one wins for the skip-reason message.
+        a = _entry(1_780_000_000, 1800, eid="a")
+        a["rf"] = 34
+        a["title"] = "alpha"
+        b = _entry(1_780_000_000, 1800, eid="b")
+        b["rf"] = 36
+        b["title"] = "beta"
+        new = _entry(1_780_000_300, 1800, eid="new")
+        new["rf"] = 30
+        reason = sched.compute_skip_reason(new, ["a", "b"], [a, b])
+        self.assertIsNotNone(reason)
+        self.assertIn("RF34", reason)
+        self.assertIn("alpha", reason)
+
+
 if __name__ == "__main__":
     unittest.main()
