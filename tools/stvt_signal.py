@@ -57,6 +57,20 @@ if sys.platform == "win32":
         except (AttributeError, OSError):
             pass
 
+# SoapySDR log-level suppression. By default Soapy spams stderr with
+# "[ERROR] SoapySDR::loadModule(airspySupport.dll): LoadLibrary failed"
+# for every optional driver that isn't installed (airspy, bladeRF,
+# HackRF, RTL-SDR, etc.) PLUS "[INFO] devIdx: 0 SerNo: ..." every time
+# a device is opened. None of it is actionable when SDRplay is what
+# we're targeting; it just buries the actual readout. Setting log
+# level to FATAL keeps only genuine failures visible.
+SOAPY_LOG_SUPPRESS_ERR: str | None = None
+try:
+    import SoapySDR   # noqa: E402
+    SoapySDR.SoapySDR_setLogLevel(SoapySDR.SOAPY_SDR_FATAL)
+except Exception as exc:   # ImportError, AttributeError if Soapy too old
+    SOAPY_LOG_SUPPRESS_ERR = str(exc)
+
 # Reuse sdr_sweep's sweep() + _analyze() so the metrics are identical
 # to what the scanner sees. Single source of truth for "what's on this
 # frequency right now". sdr_sweep imports SoapySDR at top level — that
