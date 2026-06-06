@@ -28,12 +28,15 @@ CCFEED="/tmp/stvt_cc_feed.ts"
 [ -f "$F" ] || { echo "live.ts not found at $F — start the chain first."; exit 1; }
 
 export DISPLAY="${DISPLAY:-:0}"
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-export PULSE_SERVER="${PULSE_SERVER:-unix:/mnt/wslg/PulseServer}"
+# Native Linux uses the session's own PulseAudio/PipeWire — do NOT force a
+# socket path. (WSLg users: export PULSE_SERVER=unix:/mnt/wslg/PulseServer
+# and STVT_MPV_VO=wlshm before running.)
 
-# WSLg's PulseAudio suspends the sink whenever it goes briefly idle (a pause
-# in the show), and mpv's audio output never recovers -> sound dies after a
-# while. Unload that module so the sink stays alive for the whole session.
+# Some PulseAudio/PipeWire setups suspend a sink when it goes briefly idle (a
+# pause in the show) and mpv's output never recovers. Unloading the module
+# keeps the sink alive for the whole session. Harmless if absent.
 pactl unload-module module-suspend-on-idle 2>/dev/null || true
 
 rm -f "$SOCK" "$CCFEED"
@@ -44,11 +47,11 @@ setsid bash -c "tail -s 0.1 -c $((BACKMB * 1000000)) -F '$F' \
       -f mpegts '$CCFEED'" >/dev/null 2>&1 < /dev/null &
 FEED=$!
 
-# 2) mpv: smooth program playback (wlshm for WSLg) + IPC socket for captions
+# 2) mpv: smooth program playback (gpu VO; STVT_MPV_VO to override) + IPC socket for captions
 setsid bash -c "tail -c $((BACKMB * 1000000)) -F '$F' \
   | ffmpeg -hide_banner -loglevel warning -err_detect ignore_err -i - \
       -map 0:p:$PROG -c copy -flush_packets 1 -f mpegts - \
-  | mpv - --input-ipc-server='$SOCK' --vo=wlshm --hwdec=no \
+  | mpv - --input-ipc-server='$SOCK' --vo=${STVT_MPV_VO:-gpu} --hwdec=no \
       --cache=yes --cache-secs=30 --demuxer-readahead-secs=20 \
       --cache-pause=no --cache-pause-initial=no --force-seekable=no \
       --osd-align-x=center --osd-align-y=bottom --osd-font-size=42 \
