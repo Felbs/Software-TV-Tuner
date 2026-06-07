@@ -27,7 +27,12 @@ RUNLOG="/tmp/stvt_run.log"
 MAX_CHAIN_RESTARTS=30
 COOLDOWN=5
 DROUGHT_PIDS=150            # unique-PID count above this = candidate drought
-DROUGHT_STRIKES="${DROUGHT_STRIKES:-3}"  # consecutive high samples (~2s apart) before restart — filters transient relock spikes
+DROUGHT_STRIKES="${DROUGHT_STRIKES:-3}"  # consecutive high samples (~2s apart) to confirm a drought (filters transient relock spikes)
+# The chain now self-heals most droughts internally (atsc_fs_checker re-acquire,
+# commit 7d79758) in ~12-24s. So don't restart on the FIRST confirmed drought —
+# wait DROUGHT_GRACE_LOOPS consecutive ~20s checks (give the in-chain recovery
+# time), then restart only if it truly hasn't recovered. 1 = old behavior.
+DROUGHT_GRACE_LOOPS="${DROUGHT_GRACE_LOOPS:-2}"
 
 # Lean real-time config (good for modest CPUs; harmless on fast ones).
 export STVT_RS=stock STVT_VITERBI=hard STVT_EQ=long
@@ -79,6 +84,7 @@ if ! flock -n 9; then
 fi
 
 restarts=0
+drought_loops=0          # consecutive checks the output has been a confirmed drought
 log "=== stvt_run starting (RF$RF, prog $PROG) ==="
 # Adopt an already-running healthy chain/player instead of restarting them.
 if chain_up; then log "adopting running chain"; else start_chain; sleep 8; fi
@@ -106,13 +112,21 @@ while true; do
         sleep 2; v=$(unique_pids); [ "${v:-0}" -gt "$DROUGHT_PIDS" ] && hits=$((hits+1))
       done
       if [ "$hits" -ge "$DROUGHT_STRIKES" ]; then
-        restarts=$((restarts+1))
-        [ "$restarts" -gt "$MAX_CHAIN_RESTARTS" ] && { log "MAX_CHAIN_RESTARTS hit — giving up"; exit 1; }
-        log "NOISE DROUGHT (sustained ${hits}/${DROUGHT_STRIKES}, ${u}+ PIDs) — restart chain #$restarts"
-        pkill -f '[t]v_live.py'; sleep "$COOLDOWN"; start_chain; sleep 10; continue
+        drought_loops=$((drought_loops+1))
+        if [ "$drought_loops" -ge "$DROUGHT_GRACE_LOOPS" ]; then
+          restarts=$((restarts+1))
+          [ "$restarts" -gt "$MAX_CHAIN_RESTARTS" ] && { log "MAX_CHAIN_RESTARTS hit — giving up"; exit 1; }
+          log "NOISE DROUGHT persisted ${drought_loops} checks (~$((drought_loops*20))s, ${u}+ PIDs) — in-chain re-acquire didn't recover; restart #$restarts"
+          pkill -f '[t]v_live.py'; sleep "$COOLDOWN"; start_chain; sleep 10; drought_loops=0; continue
+        else
+          log "drought (check ${drought_loops}/${DROUGHT_GRACE_LOOPS}, ${u} PIDs) — letting the chain's re-acquire self-heal first"
+        fi
       else
+        drought_loops=0
         log "transient PID spike (${u} PIDs, ${hits}/${DROUGHT_STRIKES}) — chain healthy, NOT restarting"
       fi
+    else
+      drought_loops=0   # output clean — reset the persistence counter
     fi
   fi
 
