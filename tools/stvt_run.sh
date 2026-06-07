@@ -61,6 +61,18 @@ while i>=0 and i+188<=len(d):
 print(len(s))' 2>/dev/null || echo 0
 }
 
+# Single-instance guard. Two supervisors fight: when one restarts the chain on
+# a drought, the other sees the gap as a fresh drought and restarts too, and
+# they cascade into a restart storm (observed contaminating a stress run). Take
+# an exclusive lock; a second invocation refuses rather than dueling.
+LOCK="/tmp/stvt_run.lock"
+exec 9>"$LOCK" || { echo "cannot open lock $LOCK" >&2; exit 3; }
+if ! flock -n 9; then
+  echo "stvt_run.sh is already running (lock $LOCK held). Refusing a 2nd instance." >&2
+  echo "Stop the existing one first: pkill -f stvt_run.sh" >&2
+  exit 3
+fi
+
 restarts=0
 log "=== stvt_run starting (RF$RF, prog $PROG) ==="
 # Adopt an already-running healthy chain/player instead of restarting them.
