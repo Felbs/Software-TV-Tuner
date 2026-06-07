@@ -41,6 +41,22 @@ export STVT_IFGR="${STVT_IFGR:-59}" STVT_RFGAIN_SEL="${STVT_RFGAIN_SEL:-5}" STVT
 
 log(){ echo "$(printf '%(%H:%M:%S)T' -1) $*" | tee -a "$RUNLOG" ; }
 
+# Optional CPU isolation (STVT_CPU_ISOLATE=1): born-pin the chain to dedicated
+# cores and the player off them, so the chain's single-thread bottleneck is
+# never preempted (preemption -> pipeline stall -> SDR overflow -> drought).
+# Persists across restarts because each spawn is taskset'd. Ryzen 1600X layout;
+# override via STVT_CHAIN_CPUS/STVT_OTHER_CPUS/STVT_SDR_CPUS. See
+# tools/stvt_cpu_isolate.sh for a live/one-shot version + the core map.
+CPU_ISOLATE="${STVT_CPU_ISOLATE:-0}"
+ISO_CHAIN_CPUS="${STVT_CHAIN_CPUS:-0-3,6-9}"
+ISO_OTHER_CPUS="${STVT_OTHER_CPUS:-5,11}"
+ISO_SDR_CPUS="${STVT_SDR_CPUS:-4,10}"
+TSET_CHAIN=""; TSET_OTHER=""
+if [ "$CPU_ISOLATE" = 1 ]; then
+  TSET_CHAIN="taskset -c $ISO_CHAIN_CPUS"
+  TSET_OTHER="taskset -c $ISO_OTHER_CPUS"
+fi
+
 chain_up(){ pgrep -f '[t]v_live.py' >/dev/null; }
 player_up(){ pgrep -f '[s]tvt_play_hd.sh' >/dev/null; }
 
@@ -49,14 +65,14 @@ start_chain(){
   [ -f "$CLOG" ] && mv "$CLOG" "$CLOG.$(printf '%(%H%M%S)T' -1)" 2>/dev/null
   # exec 9>&- closes the inherited single-instance lock fd so the detached
   # chain (and its descendants) don't hold the lock after THIS supervisor exits.
-  ( exec 9>&- 2>/dev/null; cd "$HERE" && setsid python3 tv_live.py --rf "$RF" > "$CLOG" 2>&1 < /dev/null & )
-  log "started chain (RF$RF, lean config)"
+  ( exec 9>&- 2>/dev/null; cd "$HERE" && setsid $TSET_CHAIN python3 tv_live.py --rf "$RF" > "$CLOG" 2>&1 < /dev/null & )
+  log "started chain (RF$RF, lean config${TSET_CHAIN:+, cpus $ISO_CHAIN_CPUS})"
 }
 
 start_player(){
   # close the inherited lock fd (see start_chain) so the detached player tree
   # (stvt_play_hd.sh -> tail|ffmpeg|mpv) doesn't keep the lock held.
-  ( exec 9>&- 2>/dev/null; setsid "$HERE/stvt_play_hd.sh" "$PROG" 25 >/dev/null 2>&1 < /dev/null & )
+  ( exec 9>&- 2>/dev/null; setsid $TSET_OTHER "$HERE/stvt_play_hd.sh" "$PROG" 25 >/dev/null 2>&1 < /dev/null & )
   log "started player supervisor (prog $PROG)"
 }
 
