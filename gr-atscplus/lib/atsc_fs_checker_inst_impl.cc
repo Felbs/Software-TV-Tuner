@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
 
 #define ATSC_SEGMENTS_PER_DATA_FIELD 313
 
@@ -99,10 +100,58 @@ int atsc_fs_checker_inst_impl::general_work(int noutput_items,
     auto out = static_cast<float*>(output_items[0]);
     auto out_pl = static_cast<plinfo*>(output_items[1]);
 
+    // Drought-forensics telemetry (gated; zero overhead unless ATSCPLUS_FS_TELEM=1).
+    // Logs field-sync GAP anomalies (gap != 313 = a segment-count slip) and
+    // rejections, with a steady-clock timestamp, so a drought (noise in the TS)
+    // can be correlated against fs_check losing segment alignment. If gaps stay
+    // 313 and there are no rejects through a drought, the corruption is
+    // downstream of fs_check (deinterleaver/RS), not here.
+    static const bool FS_TELEM = []() {
+        const char* p = std::getenv("ATSCPLUS_FS_TELEM"); return p && std::atoi(p) != 0;
+    }();
+    static const auto fs_t0 = std::chrono::steady_clock::now();
+    auto fs_now = [&]() {
+        return std::chrono::duration<double>(
+                   std::chrono::steady_clock::now() - fs_t0).count();
+    };
+
+    // ── DROUGHT-RECOVERY FIX (2026-06-07) ───────────────────────────────────
+    // Root cause (proven by fs_telem): an OsO sample-drop disrupts field-sync
+    // spacing; real field syncs then arrive at gap != 313 and the 313-spacing
+    // validation REJECTS them. d_fs_locked is never cleared during operation,
+    // so the rejection is permanent — gap climbs into the thousands (one run hit
+    // 12503 ≈ 40 fields) and the TS output is noise the whole time = the drought.
+    // Fix: if we go FS_RELOCK_SEGS segments without accepting a field sync, the
+    // lock is clearly stale — drop it so the next real PN511 field sync re-
+    // acquires regardless of spacing (the same path used at cold start). The
+    // equalizer stays healthy through droughts, so the re-acquire locks onto a
+    // CLEAN field sync. In normal operation the gap never exceeds ~626, so this
+    // never fires → zero effect when there's no drought. 0 disables (A/B).
+    static const int FS_RELOCK_SEGS = []() -> int {
+        if (const char* p = std::getenv("ATSCPLUS_FS_RELOCK_SEGS")) {
+            int v = std::atoi(p);
+            if (v >= 0) return v;
+        }
+        return 939;   // 3 fields; a single missed FS self-corrects by ~626
+    }();
+
     int output_produced = 0;
 
     for (int i = 0; i < noutput_items; i++) {
         d_segs_since_accepted_fs++;
+
+        // Re-acquire after a prolonged lock-loss (drought): drop the lock so the
+        // spacing validation is bypassed and the next real field sync re-locks.
+        if (FS_RELOCK_SEGS > 0 && d_fs_locked &&
+            (int)d_segs_since_accepted_fs > FS_RELOCK_SEGS) {
+            d_fs_locked = false;
+            if (FS_TELEM)
+                std::fprintf(stderr,
+                    "[fs_telem t=%8.2fs] RE-ACQUIRE (no FS for %llu segs > %d) — "
+                    "dropping lock to recover\n",
+                    fs_now(), (unsigned long long)d_segs_since_accepted_fs,
+                    FS_RELOCK_SEGS);
+        }
 
         int errors_511 = 0;
         for (int j = 0; j < LENGTH_511; j++) {
@@ -130,13 +179,30 @@ int atsc_fs_checker_inst_impl::general_work(int noutput_items,
                     if ((int)gap < d_fs_tol_low) {
                         accept = false;
                         d_fs_rejected_early++;
+                        if (FS_TELEM)
+                            std::fprintf(stderr,
+                                "[fs_telem t=%8.2fs] REJECT-EARLY field=%d gap=%llu (tol_low=%d)\n",
+                                fs_now(), candidate_field,
+                                (unsigned long long)gap, d_fs_tol_low);
                     } else if ((int)gap > d_fs_tol_high) {
                         accept = false;
                         d_fs_rejected_late++;
+                        if (FS_TELEM)
+                            std::fprintf(stderr,
+                                "[fs_telem t=%8.2fs] REJECT-LATE field=%d gap=%llu (tol_high=%d)\n",
+                                fs_now(), candidate_field,
+                                (unsigned long long)gap, d_fs_tol_high);
                     }
                 }
 
                 if (accept) {
+                    // Log gap anomalies: a clean field is exactly 313 segments.
+                    // Any other gap = a segment-count slip (the OsO fingerprint).
+                    if (FS_TELEM && d_fs_locked && gap != ATSC_SEGMENTS_PER_DATA_FIELD)
+                        std::fprintf(stderr,
+                            "[fs_telem t=%8.2fs] GAP-ANOMALY field=%d gap=%llu (expected %d)\n",
+                            fs_now(), candidate_field,
+                            (unsigned long long)gap, ATSC_SEGMENTS_PER_DATA_FIELD);
                     d_field_num = candidate_field;
                     d_segment_num = -1;
                     d_fs_accepted++;
@@ -160,6 +226,13 @@ int atsc_fs_checker_inst_impl::general_work(int noutput_items,
 
             d_segment_num++;
             if (d_segment_num > (ATSC_SEGMENTS_PER_DATA_FIELD - 1)) {
+                // Ran a full 313-segment field without accepting a new field
+                // sync → alignment lost; output halts until the next accepted
+                // FS. Frequent here during a drought = framing never re-locks.
+                if (FS_TELEM)
+                    std::fprintf(stderr,
+                        "[fs_telem t=%8.2fs] FIELD-LOSS (313 segs, no new FS accepted)\n",
+                        fs_now());
                 d_field_num = 0;
                 d_segment_num = 0;
             } else {
