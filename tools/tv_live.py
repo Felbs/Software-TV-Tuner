@@ -465,6 +465,13 @@ class LiveTVTopBlock(gr.top_block):
         # buffer holds 64KB+ of TS that hasn't reached disk yet).
         ts_file = blocks.file_sink(gr.sizeof_char, str(ts_path))
         ts_file.set_unbuffered(True)
+        # Exposed so the rotation watchdog can reopen it cleanly (file_sink.open
+        # resets the write offset to 0). A bare os truncate(0) does NOT — the
+        # sink keeps its fd at the old offset and writes a HUGE sparse file whose
+        # tail is mostly zero-holes, which starves the live player and eventually
+        # wedges the chain. See main()'s rotation loop.
+        self._ts_sink = ts_file
+        self._ts_path = ts_path
 
         # Wire the proven run_combo.py topology end-to-end (with soapy.source
         # + scaler in place of file_source + s2c for live capture):
@@ -596,10 +603,12 @@ def main():
     ap.add_argument("--rf", type=int, default=ATSC_DEFAULT_RF_CHANNEL,
                      help="RF channel number (default 34)")
     ap.add_argument("--out", default=str(DATA_DIR / "tv_live" / "live.ts"))
-    # 50 GB ≈ 5-6 hours at ATSC bitrate. Won't rotate during a TV session;
-    # avoids VLC seeing a truncation that would force it to seek back to
-    # byte 0 mid-watch (looking like the show "restarted").
-    ap.add_argument("--rotate-gb", type=float, default=50.0)
+    # Rotation now reopens the sink cleanly (offset reset, non-sparse), so the
+    # file stays truly bounded at this size. The live player only ever reads the
+    # last ~25 MB, so a smaller cap costs nothing and keeps disk modest; 20 GB ≈
+    # 2.3 h between the brief tail re-follow blips. Override with STVT_ROTATE_GB.
+    ap.add_argument("--rotate-gb", type=float,
+                    default=float(os.environ.get("STVT_ROTATE_GB", "20.0")))
     ap.add_argument("--soapy-args",
                     default=os.environ.get("STVT_SOAPY_ARGS", "driver=sdrplay"),
                     help="SoapySDR device specifier. Default 'driver=sdrplay'. "
@@ -661,12 +670,14 @@ def main():
             sz = out.stat().st_size
             if sz > rotate_bytes:
                 LOG.info(f"Rotating live.ts ({sz/1e9:.1f} GB)")
-                # GR's file_sink lacks a clean rotation API; safest is
-                # truncate-on-disk while leaving the file handle open.
-                # Better long-term: stop+start, but this is a pragmatic
-                # bound for live viewing.
-                with open(out, "rb+") as f:
-                    f.truncate(0)
+                # Reopen the sink's own file descriptor at offset 0. file_sink.open()
+                # is thread-safe (applied at the next work() via do_update) and
+                # actually resets the write position — unlike a bare truncate(0),
+                # which left the sink writing at the old offset and ballooned a
+                # sparse file (zero-hole tail) that starved the player and wedged
+                # the chain after ~9 h. set_unbuffered persists, but reassert it.
+                tb._ts_sink.open(str(out))
+                tb._ts_sink.set_unbuffered(True)
         except FileNotFoundError:
             continue
 
