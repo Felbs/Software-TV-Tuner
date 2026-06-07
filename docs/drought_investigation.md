@@ -43,11 +43,28 @@ path). The equalizer stays healthy through droughts, so re-acquire locks onto a 
 field sync. **Never fires in normal operation** (gap never exceeds ~626) → never-worse.
 Tunable: `ATSCPLUS_FS_RELOCK_SEGS` (0 disables). Committed: `7d79758`.
 
-## Validation
+## Validation (overnight 2026-06-07, tough late-night RF/CPU)
 - Mechanism: **max gap 12503 → 626** (bounded); RE-ACQUIRE fires at the threshold and
-  recovers; brief droughts self-heal in <12 s.
-- Uptime: **~90% unguarded** in a representative window (vs near-0% unguarded baseline
-  where droughts were permanent). Production number (fix + watchdog) measured separately.
+  recovers; **all droughts now brief (≤24 s) — zero permanent** (the key win).
+- Uptime: **~90% unguarded** (vs near-0% unguarded baseline — droughts were permanent).
+- Production (fix + watchdog): **90–92%** with all droughts brief.
+- Patient watchdog (commit 18a2c67, `DROUGHT_GRACE_LOOPS=2`): restarts **8 → 5** over
+  25 min; 3 droughts self-healed with NO restart; the 3 that restarted had each
+  persisted ~40 s (the sustained-OsO case below — the in-chain re-acquire can't beat
+  ongoing sample loss).
+
+Caveat: uptime numbers are from ~midnight–2 a.m. with unusually frequent sustained OsO;
+an earlier-evening baseline was ~97%. Sequential A/Bs share no common RF window, so
+treat absolute uptime as indicative — the **mechanism** wins (no permanent droughts,
+self-heal, bounded gap) are unambiguous.
+
+## Production config (recommended, all default/committed)
+- Re-acquire fix: ON (compiled in, `ATSCPLUS_FS_RELOCK_SEGS=939` default).
+- `tol_low=280` (default; `=150` was tried and lost).
+- Watchdog: `DROUGHT_GRACE_LOOPS=2` (default; lets the chain self-heal first).
+- **Operational note:** never `rm` `/tmp/stvt_run.lock` — `flock` releases on process
+  exit; deleting it while held lets a 2nd supervisor lock a fresh inode (dual-supervisor
+  fight). Just `pkill -f stvt_run.sh` to stop.
 
 ## Tried and rejected
 - **`ATSCPLUS_FS_TOL_LOW=150`** (accept the early-but-real field syncs directly):
