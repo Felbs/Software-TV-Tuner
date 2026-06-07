@@ -97,12 +97,17 @@ def make_fused_rx_filter(native_rate, sps):
     symbol_rate = ATSC_SYMBOL_RATE / 2.0          # mirror make_rx_filter
     excess_bw   = 0.1152
     ntaps       = int((2 * rrc_syms + 1) * (proto_rate / symbol_rate))
-    gain        = interp * symbol_rate / proto_rate
+    # The fused filter must hand the FPLL roughly the SAME amplitude the proven
+    # two-stage chain did (in_rms ~33), or the FPLL's loop is under-driven and
+    # decode goes marginal -> drought. The bare RRC gain undershoots ~2x, so
+    # apply a matching multiplier (tune via STVT_RXF_FUSED_GAIN if in_rms is off).
+    gmul        = float(os.environ.get("STVT_RXF_FUSED_GAIN", "1.9"))
+    gain        = gmul * interp * symbol_rate / proto_rate
     rrc_taps    = firdes.root_raised_cosine(gain, proto_rate, symbol_rate,
                                             excess_bw, ntaps)
     LOG.info(f"fused_rx_filter: {interp}/{decim} native={native_rate:.0f} "
              f"out={out_rate:.0f} sps_eff={out_rate/ATSC_SYMBOL_RATE:.4f} "
-             f"rrc_syms={rrc_syms} ntaps={ntaps}")
+             f"rrc_syms={rrc_syms} ntaps={ntaps} gain_mul={gmul}")
     return (gr_filter.rational_resampler_ccc(interpolation=interp,
                                              decimation=decim, taps=rrc_taps),
             out_rate)
