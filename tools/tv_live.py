@@ -73,6 +73,40 @@ def make_rx_filter(input_rate, sps):
     LOG.info(f"rx_filter: rrc_syms={rrc_syms} nfilts={nfilts} ntaps={ntaps}")
     return gr_filter.pfb_arb_resampler_ccf(interp, rrc_taps, nfilts)
 
+
+def make_fused_rx_filter(native_rate, sps):
+    """FUSED resampler + matched filter (STVT_RXF_FUSED=1).
+
+    Replaces TWO blocks — the rational_resampler (native 8M -> 6.25M) AND the
+    arbitrary pfb_arb_resampler matched filter (6.25M -> sps*symbol) — with ONE
+    fixed-ratio rational_resampler that goes native_rate -> output_rate directly
+    while carrying the RRC matched-filter taps. The arbitrary resampler was the
+    chain's hottest thread (~90% of a core, profiled); a fixed P/Q polyphase has
+    no per-sample phase computation and drops the redundant 6.25M round-trip.
+
+    Returns (block, actual_output_rate). The output rate is native*P/Q, which is
+    ~sps*symbol for the chosen P/Q (37/25 at 8 MS/s -> 11.84 MS/s, sps~1.10).
+    """
+    from fractions import Fraction
+    rrc_syms = int(os.environ.get("STVT_RRC_SYMS", "8"))
+    target_out  = ATSC_SYMBOL_RATE * sps
+    frac        = Fraction(target_out / native_rate).limit_denominator(64)
+    interp, decim = frac.numerator, frac.denominator
+    out_rate    = native_rate * interp / decim
+    proto_rate  = native_rate * interp            # polyphase prototype rate
+    symbol_rate = ATSC_SYMBOL_RATE / 2.0          # mirror make_rx_filter
+    excess_bw   = 0.1152
+    ntaps       = int((2 * rrc_syms + 1) * (proto_rate / symbol_rate))
+    gain        = interp * symbol_rate / proto_rate
+    rrc_taps    = firdes.root_raised_cosine(gain, proto_rate, symbol_rate,
+                                            excess_bw, ntaps)
+    LOG.info(f"fused_rx_filter: {interp}/{decim} native={native_rate:.0f} "
+             f"out={out_rate:.0f} sps_eff={out_rate/ATSC_SYMBOL_RATE:.4f} "
+             f"rrc_syms={rrc_syms} ntaps={ntaps}")
+    return (gr_filter.rational_resampler_ccc(interpolation=interp,
+                                             decimation=decim, taps=rrc_taps),
+            out_rate)
+
 import numpy as np
 
 
@@ -335,9 +369,25 @@ class LiveTVTopBlock(gr.top_block):
         else:
             LOG.info("adaptive_notch: disabled (STVT_NOTCH=0)")
         # Front-end matched filter; outputs samples at output_rate (16.14 MS/s).
-        rxf  = (make_rx_filter(ATSC_RX_SAMPLE_RATE, SPS)
-                if os.environ.get("STVT_RRC_SYMS")
-                else atsc_rx_filter(ATSC_RX_SAMPLE_RATE, SPS))
+        if int(os.environ.get("STVT_RXF_FUSED", "0")):
+            # Fuse resampler + matched filter into ONE fixed-ratio block running
+            # straight from the native SDR rate — removes the 6.25M round-trip and
+            # the arbitrary-resampler hot thread (profiled ~90% of a core). Skip
+            # the standalone resampler; adopt the fused block's actual output rate
+            # (used below by fpll/sync). Incompatible with notch/smoother (they
+            # assume the 6.25M intermediate) — disable them in fused mode.
+            rxf, output_rate = make_fused_rx_filter(ATSC_NATIVE_SAMPLE_RATE, SPS)
+            resamp = None
+            if notch is not None or smoother is not None:
+                LOG.warning("STVT_RXF_FUSED: disabling notch/smoother "
+                            "(they expect the 6.25M intermediate)")
+                notch = None
+                smoother = None
+            LOG.info(f"FUSED rx filter active — output_rate={output_rate:.0f}")
+        else:
+            rxf  = (make_rx_filter(ATSC_RX_SAMPLE_RATE, SPS)
+                    if os.environ.get("STVT_RRC_SYMS")
+                    else atsc_rx_filter(ATSC_RX_SAMPLE_RATE, SPS))
         # FPLL knobs via STVT_FPLL_ALPHA / STVT_FPLL_AFC_TAU env vars.
         _fpll_alpha   = float(os.environ.get("STVT_FPLL_ALPHA",   "0.001"))
         _fpll_afc_tau = float(os.environ.get("STVT_FPLL_AFC_TAU", "25"))
