@@ -40,10 +40,15 @@ launch(){
   # stalls seeking into a multi-GB growing file.
   local bytes=$(( BACKMB*1000000 ))
   : > "$MPVLOG"
+  # -f mpegts on the INPUT is essential: tail -c starts mid-packet, so ffmpeg's
+  # format auto-probe reads a partial packet and dies ("Invalid data found"),
+  # which looks like a rough-patch hang and triggers an endless relaunch storm
+  # (observed: 2300+ relaunches, mpv mostly down, while the chain was perfect).
+  # Forcing mpegts skips the probe and lets the demuxer resync to the 188 grid.
   setsid bash -c "tail -c $bytes -F '$F' | \
     ffmpeg -hide_banner -loglevel warning -fflags nobuffer+flush_packets \
       -flags low_delay -probesize 3M -analyzeduration 3M -err_detect ignore_err \
-      -i - -map 0:p:$PROG -c copy -flush_packets 1 -f mpegts - | \
+      -f mpegts -i - -map 0:p:$PROG -c copy -flush_packets 1 -f mpegts - | \
     mpv - --vo=${STVT_MPV_VO:-gpu} --hwdec=no --cache=yes --cache-secs=30 --demuxer-max-bytes=200MiB \
       --demuxer-readahead-secs=20 --cache-pause=no --cache-pause-initial=no \
       --title='STVT Live (prog $PROG)' --force-seekable=no \
