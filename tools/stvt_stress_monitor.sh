@@ -31,7 +31,9 @@ now(){ date +%s; }
 # current mpv playback position (whole seconds) or "" if none
 av_pos(){ grep -oE 'AV: [0-9:]+' "$MPVLOG" 2>/dev/null | tail -1 | grep -oE '[0-9:]+$' \
           | awk -F: '{n=NF; print (n==3?$1*3600+$2*60+$3:$1*60+$2)}'; }
-cnt(){ grep -c "$1" "$2" 2>/dev/null || echo 0; }
+# grep -c prints "0" AND exits 1 on zero matches, so `|| echo 0` would append a
+# SECOND "0" → "0\n0" breaks every later [ -gt ] / arithmetic. Capture instead.
+cnt(){ local n; n=$(grep -c "$1" "$2" 2>/dev/null); echo "${n:-0}"; }
 
 start=$(now); end=$(( start + DUR_MIN*60 ))
 b_drought=$(cnt "NOISE DROUGHT" "$RUNLOG")
