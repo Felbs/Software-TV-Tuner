@@ -42,12 +42,16 @@ player_up(){ pgrep -f '[s]tvt_play_hd.sh' >/dev/null; }
 start_chain(){
   rm -f "$TS"
   [ -f "$CLOG" ] && mv "$CLOG" "$CLOG.$(printf '%(%H%M%S)T' -1)" 2>/dev/null
-  ( cd "$HERE" && setsid python3 tv_live.py --rf "$RF" > "$CLOG" 2>&1 < /dev/null & )
+  # exec 9>&- closes the inherited single-instance lock fd so the detached
+  # chain (and its descendants) don't hold the lock after THIS supervisor exits.
+  ( exec 9>&- 2>/dev/null; cd "$HERE" && setsid python3 tv_live.py --rf "$RF" > "$CLOG" 2>&1 < /dev/null & )
   log "started chain (RF$RF, lean config)"
 }
 
 start_player(){
-  ( setsid "$HERE/stvt_play_hd.sh" "$PROG" 25 >/dev/null 2>&1 < /dev/null & )
+  # close the inherited lock fd (see start_chain) so the detached player tree
+  # (stvt_play_hd.sh -> tail|ffmpeg|mpv) doesn't keep the lock held.
+  ( exec 9>&- 2>/dev/null; setsid "$HERE/stvt_play_hd.sh" "$PROG" 25 >/dev/null 2>&1 < /dev/null & )
   log "started player supervisor (prog $PROG)"
 }
 
