@@ -120,8 +120,30 @@ while true; do
     [ "$restarts" -gt "$MAX_CHAIN_RESTARTS" ] && { log "MAX_CHAIN_RESTARTS hit — giving up (check the SDR)"; exit 1; }
     log "chain DOWN — restart #$restarts"
     clean_streak=0
-    sleep "$COOLDOWN"; start_chain; sleep 10; continue
+    sleep "$COOLDOWN"; start_chain; sleep 10; last_size=0; stall_loops=0; continue
   fi
+
+  # 1b. chain WEDGED? Alive but live.ts not growing. A healthy chain writes
+  #     ~2.4 MB/s continuously, so zero growth across STALL_LOOPS checks (~60s,
+  #     far longer than the <1s rotation reset) means the flowgraph is stuck
+  #     (e.g. file_sink blocked -> backpressure -> all threads at 0% CPU). The
+  #     drought detector can't catch this — it's skipped while the file is tiny.
+  #     Conservative threshold so a rotation can't false-trip it.
+  STALL_LOOPS="${STALL_LOOPS:-3}"
+  cur_size=$(stat -c%s "$TS" 2>/dev/null || echo 0)
+  if [ "$cur_size" -le "${last_size:-0}" ]; then
+    stall_loops=$((${stall_loops:-0}+1))
+    if [ "$stall_loops" -ge "$STALL_LOOPS" ]; then
+      restarts=$((restarts+1))
+      [ "$restarts" -gt "$MAX_CHAIN_RESTARTS" ] && { log "MAX_CHAIN_RESTARTS hit — giving up (check the SDR)"; exit 1; }
+      log "chain WEDGED — live.ts hasn't grown in ~$((stall_loops*20))s (size $cur_size) — restart #$restarts"
+      pkill -f '[t]v_live.py'; sleep "$COOLDOWN"; start_chain; sleep 10
+      last_size=0; stall_loops=0; clean_streak=0; continue
+    fi
+  else
+    stall_loops=0
+  fi
+  last_size=$cur_size
 
   # 2. noise drought? CONFIRM before acting. A single high PID sample is almost
   #    always a transient relock spike on an otherwise-healthy chain — measured:
@@ -141,7 +163,7 @@ while true; do
           restarts=$((restarts+1))
           [ "$restarts" -gt "$MAX_CHAIN_RESTARTS" ] && { log "MAX_CHAIN_RESTARTS hit — giving up"; exit 1; }
           log "NOISE DROUGHT persisted ${drought_loops} checks (~$((drought_loops*20))s, ${u}+ PIDs) — in-chain re-acquire didn't recover; restart #$restarts"
-          pkill -f '[t]v_live.py'; sleep "$COOLDOWN"; start_chain; sleep 10; drought_loops=0; clean_streak=0; continue
+          pkill -f '[t]v_live.py'; sleep "$COOLDOWN"; start_chain; sleep 10; drought_loops=0; clean_streak=0; last_size=0; stall_loops=0; continue
         else
           log "drought (check ${drought_loops}/${DROUGHT_GRACE_LOOPS}, ${u} PIDs) — letting the chain's re-acquire self-heal first"
         fi
