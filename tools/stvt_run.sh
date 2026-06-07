@@ -26,7 +26,8 @@ CLOG="$HERE/data/tv_live/tv_tuner.tv_live.log"
 RUNLOG="/tmp/stvt_run.log"
 MAX_CHAIN_RESTARTS=30
 COOLDOWN=5
-DROUGHT_PIDS=150            # unique-PID count above this = noise drought
+DROUGHT_PIDS=150            # unique-PID count above this = candidate drought
+DROUGHT_STRIKES="${DROUGHT_STRIKES:-3}"  # consecutive high samples (~2s apart) before restart — filters transient relock spikes
 
 # Lean real-time config (good for modest CPUs; harmless on fast ones).
 export STVT_RS=stock STVT_VITERBI=hard STVT_EQ=long
@@ -88,14 +89,26 @@ while true; do
     sleep "$COOLDOWN"; start_chain; sleep 10; continue
   fi
 
-  # 2. noise drought? (only meaningful once the file has grown a bit)
+  # 2. noise drought? CONFIRM before acting. A single high PID sample is almost
+  #    always a transient relock spike on an otherwise-healthy chain — measured:
+  #    11/12 chains killed by the old single-sample check were at 99.8-99.99%
+  #    segs_aligned (perfect decode). A REAL drought stays high across repeated
+  #    samples; a transient clears within seconds. Require DROUGHT_STRIKES hits.
   if [ -f "$TS" ] && [ "$(stat -c%s "$TS" 2>/dev/null || echo 0)" -gt 3000000 ]; then
     u=$(unique_pids)
     if [ "$u" -gt "$DROUGHT_PIDS" ]; then
-      restarts=$((restarts+1))
-      [ "$restarts" -gt "$MAX_CHAIN_RESTARTS" ] && { log "MAX_CHAIN_RESTARTS hit — giving up"; exit 1; }
-      log "NOISE DROUGHT ($u PIDs) — restart chain #$restarts"
-      pkill -f '[t]v_live.py'; sleep "$COOLDOWN"; start_chain; sleep 10; continue
+      hits=1
+      for _ in $(seq 2 "$DROUGHT_STRIKES"); do
+        sleep 2; v=$(unique_pids); [ "${v:-0}" -gt "$DROUGHT_PIDS" ] && hits=$((hits+1))
+      done
+      if [ "$hits" -ge "$DROUGHT_STRIKES" ]; then
+        restarts=$((restarts+1))
+        [ "$restarts" -gt "$MAX_CHAIN_RESTARTS" ] && { log "MAX_CHAIN_RESTARTS hit — giving up"; exit 1; }
+        log "NOISE DROUGHT (sustained ${hits}/${DROUGHT_STRIKES}, ${u}+ PIDs) — restart chain #$restarts"
+        pkill -f '[t]v_live.py'; sleep "$COOLDOWN"; start_chain; sleep 10; continue
+      else
+        log "transient PID spike (${u} PIDs, ${hits}/${DROUGHT_STRIKES}) — chain healthy, NOT restarting"
+      fi
     fi
   fi
 
