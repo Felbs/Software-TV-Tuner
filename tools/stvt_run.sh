@@ -85,6 +85,13 @@ fi
 
 restarts=0
 drought_loops=0          # consecutive checks the output has been a confirmed drought
+clean_streak=0           # consecutive checks the output has been clean
+# MAX_CHAIN_RESTARTS is a RATE guard (catch a dead-SDR respawn storm), NOT a
+# lifetime budget — otherwise a long night of occasional droughts exhausts it and
+# the watchdog gives up for good (observed: hit the cap at ~3h, dead until morning).
+# So reset the budget once the chain has run clean for RESTART_BUDGET_RESET checks
+# (~3 min): a genuinely-recovered chain shouldn't be charged for past droughts.
+RESTART_BUDGET_RESET="${RESTART_BUDGET_RESET:-9}"
 log "=== stvt_run starting (RF$RF, prog $PROG) ==="
 # Adopt an already-running healthy chain/player instead of restarting them.
 if chain_up; then log "adopting running chain"; else start_chain; sleep 8; fi
@@ -96,6 +103,7 @@ while true; do
     restarts=$((restarts+1))
     [ "$restarts" -gt "$MAX_CHAIN_RESTARTS" ] && { log "MAX_CHAIN_RESTARTS hit — giving up (check the SDR)"; exit 1; }
     log "chain DOWN — restart #$restarts"
+    clean_streak=0
     sleep "$COOLDOWN"; start_chain; sleep 10; continue
   fi
 
@@ -117,7 +125,7 @@ while true; do
           restarts=$((restarts+1))
           [ "$restarts" -gt "$MAX_CHAIN_RESTARTS" ] && { log "MAX_CHAIN_RESTARTS hit — giving up"; exit 1; }
           log "NOISE DROUGHT persisted ${drought_loops} checks (~$((drought_loops*20))s, ${u}+ PIDs) — in-chain re-acquire didn't recover; restart #$restarts"
-          pkill -f '[t]v_live.py'; sleep "$COOLDOWN"; start_chain; sleep 10; drought_loops=0; continue
+          pkill -f '[t]v_live.py'; sleep "$COOLDOWN"; start_chain; sleep 10; drought_loops=0; clean_streak=0; continue
         else
           log "drought (check ${drought_loops}/${DROUGHT_GRACE_LOOPS}, ${u} PIDs) — letting the chain's re-acquire self-heal first"
         fi
@@ -127,6 +135,11 @@ while true; do
       fi
     else
       drought_loops=0   # output clean — reset the persistence counter
+      clean_streak=$((clean_streak+1))
+      if [ "$restarts" -gt 0 ] && [ "$clean_streak" -ge "$RESTART_BUDGET_RESET" ]; then
+        log "chain stable ${clean_streak} checks (~$((clean_streak*20))s clean) — resetting restart budget (was $restarts/$MAX_CHAIN_RESTARTS)"
+        restarts=0; clean_streak=0
+      fi
     fi
   fi
 
