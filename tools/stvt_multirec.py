@@ -18,8 +18,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -202,6 +204,17 @@ def status_printer(out_files: list[Path], programs: list[dict],
 
 
 def main() -> int:
+    # A bare SIGTERM (from `timeout`, `kill`, or a supervisor) terminates
+    # Python WITHOUT running `finally`, which would leave the spawned tv_live
+    # chain holding the SDR forever. Turn SIGTERM into a KeyboardInterrupt so
+    # the cleanup path below runs exactly like Ctrl-C. (SIGINT already does.)
+    def _term(signum, frame):
+        raise KeyboardInterrupt
+    try:
+        signal.signal(signal.SIGTERM, _term)
+    except (ValueError, OSError):
+        pass
+
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--rf", type=int, required=True,
@@ -273,6 +286,10 @@ def main() -> int:
         print(f"[multirec] tv_live spawn failed: {e}", file=sys.stderr)
         log_fh.close()
         return 1
+    # Safety net: guarantee the SDR-holding chain dies on ANY exit path
+    # (covers the window before the try/finally below, and clean shutdown).
+    # kill_proc is idempotent — a second call after finally is a no-op.
+    atexit.register(kill_proc, tv_live, "tv_live")
 
     ffmpeg_proc = None
     stop_evt = threading.Event()

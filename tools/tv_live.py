@@ -73,6 +73,45 @@ def make_rx_filter(input_rate, sps):
     LOG.info(f"rx_filter: rrc_syms={rrc_syms} nfilts={nfilts} ntaps={ntaps}")
     return gr_filter.pfb_arb_resampler_ccf(interp, rrc_taps, nfilts)
 
+
+def make_fused_rx_filter(native_rate, sps):
+    """FUSED resampler + matched filter (STVT_RXF_FUSED=1).
+
+    Replaces TWO blocks — the rational_resampler (native 8M -> 6.25M) AND the
+    arbitrary pfb_arb_resampler matched filter (6.25M -> sps*symbol) — with ONE
+    fixed-ratio rational_resampler that goes native_rate -> output_rate directly
+    while carrying the RRC matched-filter taps. The arbitrary resampler was the
+    chain's hottest thread (~90% of a core, profiled); a fixed P/Q polyphase has
+    no per-sample phase computation and drops the redundant 6.25M round-trip.
+
+    Returns (block, actual_output_rate). The output rate is native*P/Q, which is
+    ~sps*symbol for the chosen P/Q (37/25 at 8 MS/s -> 11.84 MS/s, sps~1.10).
+    """
+    from fractions import Fraction
+    rrc_syms = int(os.environ.get("STVT_RRC_SYMS", "8"))
+    target_out  = ATSC_SYMBOL_RATE * sps
+    frac        = Fraction(target_out / native_rate).limit_denominator(64)
+    interp, decim = frac.numerator, frac.denominator
+    out_rate    = native_rate * interp / decim
+    proto_rate  = native_rate * interp            # polyphase prototype rate
+    symbol_rate = ATSC_SYMBOL_RATE / 2.0          # mirror make_rx_filter
+    excess_bw   = 0.1152
+    ntaps       = int((2 * rrc_syms + 1) * (proto_rate / symbol_rate))
+    # The fused filter must hand the FPLL roughly the SAME amplitude the proven
+    # two-stage chain did (in_rms ~33), or the FPLL's loop is under-driven and
+    # decode goes marginal -> drought. The bare RRC gain undershoots ~2x, so
+    # apply a matching multiplier (tune via STVT_RXF_FUSED_GAIN if in_rms is off).
+    gmul        = float(os.environ.get("STVT_RXF_FUSED_GAIN", "1.9"))
+    gain        = gmul * interp * symbol_rate / proto_rate
+    rrc_taps    = firdes.root_raised_cosine(gain, proto_rate, symbol_rate,
+                                            excess_bw, ntaps)
+    LOG.info(f"fused_rx_filter: {interp}/{decim} native={native_rate:.0f} "
+             f"out={out_rate:.0f} sps_eff={out_rate/ATSC_SYMBOL_RATE:.4f} "
+             f"rrc_syms={rrc_syms} ntaps={ntaps} gain_mul={gmul}")
+    return (gr_filter.rational_resampler_ccc(interpolation=interp,
+                                             decimation=decim, taps=rrc_taps),
+            out_rate)
+
 import numpy as np
 
 
@@ -335,9 +374,25 @@ class LiveTVTopBlock(gr.top_block):
         else:
             LOG.info("adaptive_notch: disabled (STVT_NOTCH=0)")
         # Front-end matched filter; outputs samples at output_rate (16.14 MS/s).
-        rxf  = (make_rx_filter(ATSC_RX_SAMPLE_RATE, SPS)
-                if os.environ.get("STVT_RRC_SYMS")
-                else atsc_rx_filter(ATSC_RX_SAMPLE_RATE, SPS))
+        if int(os.environ.get("STVT_RXF_FUSED", "0")):
+            # Fuse resampler + matched filter into ONE fixed-ratio block running
+            # straight from the native SDR rate — removes the 6.25M round-trip and
+            # the arbitrary-resampler hot thread (profiled ~90% of a core). Skip
+            # the standalone resampler; adopt the fused block's actual output rate
+            # (used below by fpll/sync). Incompatible with notch/smoother (they
+            # assume the 6.25M intermediate) — disable them in fused mode.
+            rxf, output_rate = make_fused_rx_filter(ATSC_NATIVE_SAMPLE_RATE, SPS)
+            resamp = None
+            if notch is not None or smoother is not None:
+                LOG.warning("STVT_RXF_FUSED: disabling notch/smoother "
+                            "(they expect the 6.25M intermediate)")
+                notch = None
+                smoother = None
+            LOG.info(f"FUSED rx filter active — output_rate={output_rate:.0f}")
+        else:
+            rxf  = (make_rx_filter(ATSC_RX_SAMPLE_RATE, SPS)
+                    if os.environ.get("STVT_RRC_SYMS")
+                    else atsc_rx_filter(ATSC_RX_SAMPLE_RATE, SPS))
         # FPLL knobs via STVT_FPLL_ALPHA / STVT_FPLL_AFC_TAU env vars.
         _fpll_alpha   = float(os.environ.get("STVT_FPLL_ALPHA",   "0.001"))
         _fpll_afc_tau = float(os.environ.get("STVT_FPLL_AFC_TAU", "25"))
@@ -410,6 +465,13 @@ class LiveTVTopBlock(gr.top_block):
         # buffer holds 64KB+ of TS that hasn't reached disk yet).
         ts_file = blocks.file_sink(gr.sizeof_char, str(ts_path))
         ts_file.set_unbuffered(True)
+        # Exposed so the rotation watchdog can reopen it cleanly (file_sink.open
+        # resets the write offset to 0). A bare os truncate(0) does NOT — the
+        # sink keeps its fd at the old offset and writes a HUGE sparse file whose
+        # tail is mostly zero-holes, which starves the live player and eventually
+        # wedges the chain. See main()'s rotation loop.
+        self._ts_sink = ts_file
+        self._ts_path = ts_path
 
         # Wire the proven run_combo.py topology end-to-end (with soapy.source
         # + scaler in place of file_source + s2c for live capture):
@@ -541,10 +603,12 @@ def main():
     ap.add_argument("--rf", type=int, default=ATSC_DEFAULT_RF_CHANNEL,
                      help="RF channel number (default 34)")
     ap.add_argument("--out", default=str(DATA_DIR / "tv_live" / "live.ts"))
-    # 50 GB ≈ 5-6 hours at ATSC bitrate. Won't rotate during a TV session;
-    # avoids VLC seeing a truncation that would force it to seek back to
-    # byte 0 mid-watch (looking like the show "restarted").
-    ap.add_argument("--rotate-gb", type=float, default=50.0)
+    # Rotation now reopens the sink cleanly (offset reset, non-sparse), so the
+    # file stays truly bounded at this size. The live player only ever reads the
+    # last ~25 MB, so a smaller cap costs nothing and keeps disk modest; 20 GB ≈
+    # 2.3 h between the brief tail re-follow blips. Override with STVT_ROTATE_GB.
+    ap.add_argument("--rotate-gb", type=float,
+                    default=float(os.environ.get("STVT_ROTATE_GB", "20.0")))
     ap.add_argument("--soapy-args",
                     default=os.environ.get("STVT_SOAPY_ARGS", "driver=sdrplay"),
                     help="SoapySDR device specifier. Default 'driver=sdrplay'. "
@@ -606,12 +670,14 @@ def main():
             sz = out.stat().st_size
             if sz > rotate_bytes:
                 LOG.info(f"Rotating live.ts ({sz/1e9:.1f} GB)")
-                # GR's file_sink lacks a clean rotation API; safest is
-                # truncate-on-disk while leaving the file handle open.
-                # Better long-term: stop+start, but this is a pragmatic
-                # bound for live viewing.
-                with open(out, "rb+") as f:
-                    f.truncate(0)
+                # Reopen the sink's own file descriptor at offset 0. file_sink.open()
+                # is thread-safe (applied at the next work() via do_update) and
+                # actually resets the write position — unlike a bare truncate(0),
+                # which left the sink writing at the old offset and ballooned a
+                # sparse file (zero-hole tail) that starved the player and wedged
+                # the chain after ~9 h. set_unbuffered persists, but reassert it.
+                tb._ts_sink.open(str(out))
+                tb._ts_sink.set_unbuffered(True)
         except FileNotFoundError:
             continue
 

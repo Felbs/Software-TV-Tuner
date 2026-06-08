@@ -40,12 +40,28 @@ launch(){
   # stalls seeking into a multi-GB growing file.
   local bytes=$(( BACKMB*1000000 ))
   : > "$MPVLOG"
+  # -f mpegts on the INPUT is essential: tail -c starts mid-packet, so ffmpeg's
+  # format auto-probe reads a partial packet and dies ("Invalid data found"),
+  # which looks like a rough-patch hang and triggers an endless relaunch storm
+  # (observed: 2300+ relaunches, mpv mostly down, while the chain was perfect).
+  # Forcing mpegts skips the probe and lets the demuxer resync to the 188 grid.
+  #
+  # Audio: many ATSC programs carry a Spanish SAP track alongside English. A bare
+  # -map 0:p:N lets ffmpeg emit the audio in absolute-index order, which can put
+  # Spanish first and varies between relaunches. Mapping by PROGRAM-RELATIVE
+  # position (0,1,2,3...) instead forces the broadcaster's PMT order — English is
+  # listed first, Spanish second — so mpv reliably shows 1/2=English, 2/2=Spanish.
+  # The trailing ? makes the higher slots optional (programs with fewer tracks
+  # don't error). --alang is the belt-and-suspenders default; press # to switch
+  # live; STVT_ALANG=spa to start on Spanish.
   setsid bash -c "tail -c $bytes -F '$F' | \
     ffmpeg -hide_banner -loglevel warning -fflags nobuffer+flush_packets \
       -flags low_delay -probesize 3M -analyzeduration 3M -err_detect ignore_err \
-      -i - -map 0:p:$PROG -c copy -flush_packets 1 -f mpegts - | \
+      -f mpegts -i - -map 0:p:$PROG:0 -map 0:p:$PROG:1? -map 0:p:$PROG:2? -map 0:p:$PROG:3? \
+      -c copy -flush_packets 1 -f mpegts - | \
     mpv - --vo=${STVT_MPV_VO:-wlshm} --hwdec=no --cache=yes --cache-secs=30 --demuxer-max-bytes=200MiB \
       --demuxer-readahead-secs=20 --cache-pause=no --cache-pause-initial=no \
+      --alang=${STVT_ALANG:-eng,en} \
       --title='STVT Live (prog $PROG)' --force-seekable=no \
       --msg-level=all=status" >> "$MPVLOG" 2>&1 < /dev/null &
   log "launched player prog=$PROG tail=${BACKMB}MB"
