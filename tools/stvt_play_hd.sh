@@ -45,12 +45,19 @@ launch(){
   # which looks like a rough-patch hang and triggers an endless relaunch storm
   # (observed: 2300+ relaunches, mpv mostly down, while the chain was perfect).
   # Forcing mpegts skips the probe and lets the demuxer resync to the 188 grid.
+  #
+  # --alang: many ATSC programs carry a Spanish SAP track alongside English, and
+  # the track ORDER varies between relaunches, so with no preference mpv randomly
+  # lands on Spanish. The AC-3 tracks are language-tagged (eng/spa), so select by
+  # TAG (order-independent). STVT_ALANG=spa to default to Spanish; press # in mpv
+  # to switch tracks live.
   setsid bash -c "tail -c $bytes -F '$F' | \
     ffmpeg -hide_banner -loglevel warning -fflags nobuffer+flush_packets \
       -flags low_delay -probesize 3M -analyzeduration 3M -err_detect ignore_err \
       -f mpegts -i - -map 0:p:$PROG -c copy -flush_packets 1 -f mpegts - | \
     mpv - --vo=${STVT_MPV_VO:-gpu} --hwdec=no --cache=yes --cache-secs=30 --demuxer-max-bytes=200MiB \
       --demuxer-readahead-secs=20 --cache-pause=no --cache-pause-initial=no \
+      --alang=${STVT_ALANG:-eng,en} \
       --title='STVT Live (prog $PROG)' --force-seekable=no \
       --msg-level=all=status" >> "$MPVLOG" 2>&1 < /dev/null &
   log "launched player prog=$PROG tail=${BACKMB}MB"
