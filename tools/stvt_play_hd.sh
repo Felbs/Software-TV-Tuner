@@ -46,15 +46,19 @@ launch(){
   # (observed: 2300+ relaunches, mpv mostly down, while the chain was perfect).
   # Forcing mpegts skips the probe and lets the demuxer resync to the 188 grid.
   #
-  # --alang: many ATSC programs carry a Spanish SAP track alongside English, and
-  # the track ORDER varies between relaunches, so with no preference mpv randomly
-  # lands on Spanish. The AC-3 tracks are language-tagged (eng/spa), so select by
-  # TAG (order-independent). STVT_ALANG=spa to default to Spanish; press # in mpv
-  # to switch tracks live.
+  # Audio: many ATSC programs carry a Spanish SAP track alongside English. A bare
+  # -map 0:p:N lets ffmpeg emit the audio in absolute-index order, which can put
+  # Spanish first and varies between relaunches. Mapping by PROGRAM-RELATIVE
+  # position (0,1,2,3...) instead forces the broadcaster's PMT order — English is
+  # listed first, Spanish second — so mpv reliably shows 1/2=English, 2/2=Spanish.
+  # The trailing ? makes the higher slots optional (programs with fewer tracks
+  # don't error). --alang is the belt-and-suspenders default; press # to switch
+  # live; STVT_ALANG=spa to start on Spanish.
   setsid bash -c "tail -c $bytes -F '$F' | \
     ffmpeg -hide_banner -loglevel warning -fflags nobuffer+flush_packets \
       -flags low_delay -probesize 3M -analyzeduration 3M -err_detect ignore_err \
-      -f mpegts -i - -map 0:p:$PROG -c copy -flush_packets 1 -f mpegts - | \
+      -f mpegts -i - -map 0:p:$PROG:0 -map 0:p:$PROG:1? -map 0:p:$PROG:2? -map 0:p:$PROG:3? \
+      -c copy -flush_packets 1 -f mpegts - | \
     mpv - --vo=${STVT_MPV_VO:-gpu} --hwdec=no --cache=yes --cache-secs=30 --demuxer-max-bytes=200MiB \
       --demuxer-readahead-secs=20 --cache-pause=no --cache-pause-initial=no \
       --alang=${STVT_ALANG:-eng,en} \
