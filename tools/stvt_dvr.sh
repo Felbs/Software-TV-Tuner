@@ -11,6 +11,7 @@
 #   stvt_dvr.sh watch  <name>                  play the decoded .ts
 #   stvt_dvr.sh auto   <rf> <minutes> [name]   record, then decode (then watch)
 #   stvt_dvr.sh verify [rf] [secs]             health check: is the channel giving stable video?
+#   stvt_dvr.sh scan   [rf...]                 rank candidate channels by decode quality, pick the best
 #   stvt_dvr.sh list                           show recordings + disk
 #
 # DISK (the binding constraint): raw IQ is CF32 = ~3.84 GB/min (~230 GB/hr). The
@@ -126,6 +127,34 @@ cmd_verify(){
   bash "$HERE/stvt_dvr_accept.sh" "$RF" "$SECS" "${STVT_DVR_EQ:-long}"
 }
 
+cmd_scan(){
+  # Auto best-channel: test-decode a SHORT clip (to RAM) from each candidate RF,
+  # rank by segs_aligned, so you don't need to know which channel decodes clean.
+  # Usage: stvt_dvr.sh scan [rf...]   (default: a set of common strong locals)
+  local chans="${*:-34 36 31 35 15 7}"
+  local secs="${STVT_DVR_SCAN_SECS:-6}"
+  local D=/dev/shm/dvr_scan; mkdir -p "$D"
+  ensure_sdr_free
+  echo "[dvr] scanning [$chans] @ ${secs}s each to RAM — want segs_aligned >= 98%"
+  printf "  %-5s %-9s %s\n" "RF" "aligned" ""
+  local best="" bestal=0
+  for rf in $chans; do
+    timeout $((secs+30)) python3 "$HERE/record_iq.py" --rf "$rf" --seconds "$secs" \
+      --out "$D/s.cs16" --format cs16 --ifgr "${STVT_IFGR:-50}" --rfgain-sel "${STVT_RFGAIN_SEL:-5}" >/dev/null 2>&1
+    STVT_RS=stock STVT_VITERBI=hard STVT_EQ=long STVT_SPS=1.1 STVT_RRC_SYMS=4 STVT_TEISCRUB=1 \
+      STVT_RXF_FUSED=1 STVT_IQ_FORMAT=cs16 \
+      timeout $((secs*5+60)) python3 "$HERE/tv_replay.py" --iq "$D/s.cs16" --out "$D/s.ts" --log "$D/s.log" >/dev/null 2>&1
+    local al; al=$(grep -oE "segs_aligned=[0-9]+ \([0-9.]+%\)" "$D/s.log" 2>/dev/null | tail -1 | grep -oE "\([0-9.]+%\)" | tr -dc '0-9.')
+    al=${al:-0}
+    local mark="  weak"; awk "BEGIN{exit !($al>=98)}" && mark="  GOOD"
+    printf "  %-5s %-9s %s\n" "$rf" "${al}%" "$mark"
+    awk "BEGIN{exit !($al>$bestal)}" && { best=$rf; bestal=$al; }
+    rm -f "$D/s.cs16" "$D/s.ts" "$D/s.log"
+  done
+  rm -rf "$D"
+  [ -n "$best" ] && echo "[dvr] best: RF$best (${bestal}% aligned) -> record it:  $0 auto $best <minutes>"
+}
+
 cmd_list(){
   echo "[dvr] $DIR  ($(free_gb)GB free)"
   ls -lh "$DIR"/*.ts "$DIR"/*.cf32 "$DIR"/*.cs16 2>/dev/null | awk '{print "  "$5"  "$9}' || echo "  (no recordings yet)"
@@ -137,6 +166,7 @@ case "${1:-help}" in
   watch)  shift; cmd_watch "$@";;
   auto)   shift; cmd_auto "$@";;
   verify) shift; cmd_verify "$@";;
+  scan)   shift; cmd_scan "$@";;
   list)   cmd_list;;
   *) grep '^#' "$0" | sed 's/^# \{0,1\}//' | head -28;;
 esac
