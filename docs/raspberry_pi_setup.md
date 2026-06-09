@@ -10,6 +10,29 @@ past a failed check.
 
 ---
 
+## MEASURED RESULT — Pi 4 (2026-06-08)
+
+Ran end-to-end on a **Pi 4 Model B Rev 1.4 (8 GB), Debian 13 trixie, GR 3.10.12**,
+RSPdx on USB, RF34, lean config (`STVT_RXF_FUSED=1`):
+
+- **Real-time factor: ~30%** (live.ts wrote **0.727 MB/s** vs the 2.42 MB/s ATSC rate)
+- **281 unique PIDs** at the live edge (healthy mux ≈ 25-35) = the chain locks but
+  loses most data to constant SDR overflow
+- **OsO: 76 in ~90 s** (Ryzen baseline ≈ 1 in 9 HOURS)
+- `vcgencmd get_throttled` = `0x0` (no undervolt — the number is valid)
+- Total chain CPU **296% of 400%** (≈3 of 4 cores); hottest thread `dtv_atsc_*`
+  (equalizer/viterbi) at **70%**, an `atscplus` block (fpll/sync) at 50%, the fused
+  matched filter (`rational_resampler`) at 30%.
+
+**Verdict: a Pi 4 cannot decode ATSC in real time — 30% is unwatchable.** The wall
+is the single hottest *sequential* thread (equalizer/viterbi at 70%), which can't be
+parallelised, so the spare 4th core doesn't help. Extrapolating per-core clock, a
+**Pi 5 ≈ 30% × ~1.8 ≈ 54%** — still short of 1.0. This confirms the earlier
+hardware analysis: the real small-box answer is an **x86 N100/N305 mini-PC**, not a
+Pi. Everything below is the build recipe that produced this number (kept for repro).
+
+---
+
 ## Expectations (read first — so the result isn't a surprise)
 
 The chain uses **~3.76 cores of a Ryzen 5 1600X** (measured: 376% CPU, hottest
@@ -71,9 +94,13 @@ sudo apt install -y \
   gnuradio gnuradio-dev gr-osmosdr \
   cmake build-essential git pkg-config \
   libsoapysdr-dev soapysdr-tools \
-  libvolk2-dev pybind11-dev python3-numpy python3-packaging \
+  libvolk-dev pybind11-dev python3-numpy python3-packaging \
   ffmpeg mpv
 ```
+> NOTE (Debian 13 trixie / current Pi OS): the volk dev package is **`libvolk-dev`**
+> (the old `libvolk2-dev` no longer exists). trixie ships GNU Radio **3.10.12** —
+> 3.10.x, so the ABI matches. Install everything in ONE `apt install`; if any single
+> package name is wrong, apt aborts the whole batch and installs nothing.
 Verify GNU Radio:
 ```bash
 gnuradio-config-info --version    # expect 3.10.x  (major.minor MUST be 3.10)
@@ -100,12 +127,28 @@ cd Software-TV-Tuner
 Download the **official Linux ARM64** API installer from
 <https://www.sdrplay.com/api/> (a `SDRplay_RSP_API-Linux-3.x.xx.run` — pick the
 ARM64/aarch64 build). Then:
+The current direct URL is
+`https://www.sdrplay.com/software/SDRplay_RSP_API-Linux-3.15.2.run` (one unified
+installer covers x64 + ARM32/ARM64; it auto-picks `arm64` via `dpkg --print-architecture`).
 ```bash
 chmod +x SDRplay_RSP_API-Linux-*.run
 sudo ./SDRplay_RSP_API-Linux-*.run      # accept the licence; installs /opt/sdrplay_api + a systemd service
 sudo systemctl enable --now sdrplay
 systemctl status sdrplay                # verify the apiService is active
 ```
+> NON-INTERACTIVE install (driving over SSH with no TTY): the `.run` is a Makeself
+> archive whose inner `install_lib.sh` pages the licence with `more`, which will
+> EAT your piped answers and hang. Extract first, neutralise the pager, then feed
+> the two `y` prompts:
+> ```bash
+> ./SDRplay_RSP_API-Linux-*.run --noexec --keep --target ~/sdrplay_extract
+> cd ~/sdrplay_extract
+> sed -i -e '/read -p "Press RETURN to view the license agreement"/d' \
+>        -e 's/^more -d sdrplay_license.txt/cat sdrplay_license.txt >\/dev\/null/' install_lib.sh
+> printf 'y\ny\n' | bash ./install_lib.sh      # self-sudos; needs passwordless sudo
+> ```
+> Installs `libsdrplay_api.so.3.15` → `/usr/local/lib`, the service to
+> `/opt/sdrplay_api`, and enables+starts the `sdrplay` systemd unit.
 Verify the device is seen:
 ```bash
 SoapySDRUtil --probe="driver=sdrplay" 2>&1 | head -40   # should list the RSPdx
@@ -151,12 +194,16 @@ make -j$(nproc)              # if RAM-starved, drop to -j2; the linker is the ho
 sudo make install
 sudo ldconfig
 ```
-Verify the module imports:
+Verify the module imports (it installs as `gnuradio.atscplus`, the same way
+`tools/tv_live.py` imports it — NOT a top-level `atscplus`):
 ```bash
-python3 -c "from atscplus import atsc_fpll_tight; print('atscplus OK')"
+python3 -c "from gnuradio import atscplus; print('atscplus OK')"
 ```
-If it fails to import after install, check `ldconfig -p | grep atscplus` and that
-the install prefix is on the loader path (usually `/usr/local/lib`).
+On trixie it installs to `/usr/local/lib/python3.13/dist-packages/gnuradio/atscplus`
+and `/usr/local/lib/aarch64-linux-gnu/libgnuradio-atscplus.so*` — both already on
+the default Python/loader paths, so the import works straight after `make install`.
+If it fails, check `ldconfig -p | grep atscplus` and that `/usr/local/lib` (and the
+`aarch64-linux-gnu` subdir) are on the loader path.
 
 ---
 
