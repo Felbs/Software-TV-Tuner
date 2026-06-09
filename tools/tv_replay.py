@@ -50,6 +50,36 @@ def make_rx_filter(input_rate, sps):
     LOG.info(f"rx_filter: rrc_syms={rrc_syms} nfilts={nfilts} ntaps={ntaps}")
     return _gfilter.pfb_arb_resampler_ccf(interp, rrc_taps, nfilts)
 
+
+def make_fused_rx_filter(native_rate, sps):
+    """FUSED resampler + matched filter (STVT_RXF_FUSED=1) — replica of
+    tv_live.py's make_fused_rx_filter so replay matches the LIVE chain. Replaces
+    BOTH the rational_resampler (native->6.25M) AND the pfb_arb_resampler matched
+    filter with ONE fixed-ratio rational_resampler_ccc carrying the RRC taps,
+    going native_rate -> output_rate directly. The arbitrary resampler was the
+    chain's hottest front-end thread; a fixed P/Q polyphase has no per-sample
+    phase computation. Returns (block, actual_output_rate)."""
+    from fractions import Fraction
+    rrc_syms    = int(os.environ.get("STVT_RRC_SYMS", "8"))
+    target_out  = ATSC_SYMBOL_RATE * sps
+    frac        = Fraction(target_out / native_rate).limit_denominator(64)
+    interp, decim = frac.numerator, frac.denominator
+    out_rate    = native_rate * interp / decim
+    proto_rate  = native_rate * interp
+    symbol_rate = ATSC_SYMBOL_RATE / 2.0
+    excess_bw   = 0.1152
+    ntaps       = int((2 * rrc_syms + 1) * (proto_rate / symbol_rate))
+    gmul        = float(os.environ.get("STVT_RXF_FUSED_GAIN", "1.9"))
+    gain        = gmul * interp * symbol_rate / proto_rate
+    rrc_taps    = firdes.root_raised_cosine(gain, proto_rate, symbol_rate,
+                                            excess_bw, ntaps)
+    LOG.info(f"fused_rx_filter: {interp}/{decim} native={native_rate:.0f} "
+             f"out={out_rate:.0f} sps_eff={out_rate/ATSC_SYMBOL_RATE:.4f} "
+             f"rrc_syms={rrc_syms} ntaps={ntaps} gain_mul={gmul}")
+    return (gr_filter.rational_resampler_ccc(interpolation=interp,
+                                             decimation=decim, taps=rrc_taps),
+            out_rate)
+
 ATSC_NATIVE_SAMPLE_RATE = 8_000_000
 ATSC_RX_SAMPLE_RATE     = 6_250_000
 RESAMP_INTERP = 25
@@ -111,7 +141,10 @@ class ReplayTopBlock(gr.top_block):
                 int(os.environ.get("STVT_NB_BLANK_SAMPLES", "8")),
                 float(os.environ.get("STVT_NB_ALPHA", "1e-4")))
 
-        if int(os.environ.get("STVT_SKIP_RESAMP", "0")):
+        # The FUSED filter goes native(8M)->output in one rational stage, so it
+        # subsumes the separate 8M->6.25M rational_resampler.
+        _fused = int(os.environ.get("STVT_RXF_FUSED", "0"))
+        if int(os.environ.get("STVT_SKIP_RESAMP", "0")) or _fused:
             resamp = None
         else:
             resamp = gr_filter.rational_resampler_ccc(
@@ -135,8 +168,13 @@ class ReplayTopBlock(gr.top_block):
                 float(os.environ.get("STVT_NOTCH_PILOT_HZ", "-2.69e6")),
                 float(os.environ.get("STVT_NOTCH_GUARD_HZ", "200e3")))
 
-        # Stock matched filter, or the tunable one when STVT_RRC_SYMS is set.
-        if os.environ.get("STVT_RRC_SYMS"):
+        # FUSED resampler+matched filter (matches tv_live), the tunable matched
+        # filter (STVT_RRC_SYMS), or the stock one. The fused path also redefines
+        # output_rate (used by fpll/sync below) to the filter's actual out rate.
+        if _fused:
+            rxf, output_rate = make_fused_rx_filter(ATSC_NATIVE_SAMPLE_RATE, SPS)
+            LOG.info(f"FUSED rx filter active — output_rate={output_rate:.0f}")
+        elif os.environ.get("STVT_RRC_SYMS"):
             rxf = make_rx_filter(ATSC_RX_SAMPLE_RATE, SPS)
         else:
             rxf = atsc_rx_filter(ATSC_RX_SAMPLE_RATE, SPS)

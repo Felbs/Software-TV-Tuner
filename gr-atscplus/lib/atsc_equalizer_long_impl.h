@@ -21,7 +21,21 @@ namespace atscplus {
 class atsc_equalizer_long_impl : public atsc_equalizer_long
 {
 private:
-#ifdef ATSC_EQ_ECO
+// Equalizer tap-count override (2026-06-08). The data-segment path runs a full
+// NTAPS VOLK dot-product per symbol (filterN_dd → filterN when DD is off) at
+// ~10.76 M sym/s. Shrinking NTAPS cuts that cost ~proportionally; a strong,
+// near-flat OTA channel (e.g. a +60 dB local mux) needs far fewer than 256 taps.
+// MEASURED on a Pi 4 (radiopi, 2026-06-08): 256→96 gave NO useful speedup
+// (0.31x vs 0.29x replay) — the equalizer is ~32% of load, NOT the wall; the
+// FPLL/sync front-end threads are. Left as an inert opt-in (default 256, which
+// also decodes cleaner) that may still help when stacked with front-end cuts on
+// a faster ARM core. Override per-file (fast relink, not a full rebuild):
+//   cmake -DATSC_EQ_NTAPS=96 ..    (try 64 / 96 / 128)
+// NTAPS is used uniformly for all geometry/loop bounds, so changing only this
+// constant is correct-by-construction. Default (no flag) is unchanged at 256.
+#if defined(ATSC_EQ_NTAPS)
+    static constexpr int NTAPS = ATSC_EQ_NTAPS;
+#elif defined(ATSC_EQ_ECO)
     static constexpr int NTAPS = 128;
 #elif defined(ATSC_EQ_LONG_TAPS)
     // Wider equalizer: 32μs span (was 16μs). Captures longer multipath echoes.
@@ -29,6 +43,7 @@ private:
 #else
     static constexpr int NTAPS = 256;
 #endif
+    static_assert(NTAPS >= 16 && NTAPS <= 1024, "ATSC_EQ_NTAPS out of sane range");
     static constexpr int NPRETAPS = (int)(NTAPS * 0.2);
 
     static constexpr int KNOWN_FIELD_SYNC_LENGTH = 4 + 511 + 3 * 63;

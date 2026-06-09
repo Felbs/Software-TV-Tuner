@@ -45,6 +45,19 @@ if(NOT atscplus_sources)
 endif(NOT atscplus_sources)
 
 add_library(gnuradio-atscplus SHARED ${atscplus_sources})
+
+# Pi-lean equalizer tap-count override (2026-06-08). The atsc_equalizer_long
+# data path runs an NTAPS-tap dot-product per symbol — a top CPU cost on ARM.
+# Configure a smaller span to trade multipath reach for throughput, e.g.:
+#   cmake -DATSC_EQ_NTAPS=96 ..
+# Applied only to the equalizer TU, so flipping it relinks in seconds rather
+# than triggering a full rebuild. Empty (default) keeps the stock 256 taps.
+set(ATSC_EQ_NTAPS "" CACHE STRING "atsc_equalizer_long tap count (e.g. 64/96/128; empty=256)")
+if(ATSC_EQ_NTAPS)
+    set_source_files_properties(atsc_equalizer_long_impl.cc PROPERTIES
+        COMPILE_DEFINITIONS "ATSC_EQ_NTAPS=${ATSC_EQ_NTAPS}")
+    message(STATUS "atsc_equalizer_long: NTAPS overridden to ${ATSC_EQ_NTAPS}")
+endif()
 find_package(Eigen3 3.3 QUIET NO_MODULE)
 if(NOT Eigen3_FOUND)
     # Fallback: header-only, just point at the system include path.
