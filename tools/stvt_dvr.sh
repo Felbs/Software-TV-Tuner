@@ -36,7 +36,14 @@ case "$FMT" in
 esac
 
 die(){ echo "[dvr] ERROR: $*" >&2; exit 1; }
-free_gb(){ df -BG --output=avail "$DIR" 2>/dev/null | tail -1 | tr -dc '0-9'; }
+free_gb(){ df -BG --output=avail "${1:-$DIR}" 2>/dev/null | tail -1 | tr -dc '0-9'; }
+
+# STVT_DVR_RAM=1 writes the (transient) IQ to RAM (/dev/shm) instead of the SD
+# card, so the SD's ~30 MB/s write can't drop samples — guaranteed-clean capture
+# for SHORT clips (tmpfs is ~half RAM, ~2 min of cs16). The kept .ts still lands
+# in $DIR. Measured: SD capture ~99.7% aligned vs RAM ~99.99%.
+IQDIR="$DIR"
+if [ "${STVT_DVR_RAM:-0}" = 1 ]; then IQDIR=/dev/shm/stvt_dvr_iq; mkdir -p "$IQDIR"; fi
 
 ensure_sdr_free(){
   # all-on-Pi DVR talks to the SDR directly; release anything else holding it
@@ -53,12 +60,12 @@ cmd_record(){
   local RF="${1:-34}"   # default RF34 (clean 99.99%-aligned channel)
   local MIN="${2:?usage: record <rf> <minutes> [name]}"
   local NAME="${3:-rec_$(date +%Y%m%d_%H%M%S)_rf${RF}}"
-  local IQ="$DIR/$NAME.$EXT"
+  local IQ="$IQDIR/$NAME.$EXT"
   local need avail maxmin
   need=$(awk "BEGIN{printf \"%d\", $MIN*$GB_PER_MIN+3}")     # +3 GB margin
-  avail=$(free_gb)
+  avail=$(free_gb "$IQDIR")
   maxmin=$(awk "BEGIN{printf \"%d\", ($avail-3)/$GB_PER_MIN}")
-  echo "[dvr] ${MIN}min $FMT IQ needs ~${need}GB; ${avail}GB free in $DIR (max ~${maxmin}min)"
+  echo "[dvr] ${MIN}min $FMT IQ needs ~${need}GB; ${avail}GB free in $IQDIR (max ~${maxmin}min)"
   [ "${avail:-0}" -lt "$need" ] && die "not enough disk. Shorter recording, STVT_DVR_FORMAT=cs16 (half size), or STVT_DVR_DIR=<usb drive>."
   ensure_sdr_free
   echo "[dvr] recording RF$RF for ${MIN}min ($FMT) -> $IQ  (Ctrl-C stops early but keeps the file)"
@@ -71,9 +78,11 @@ cmd_record(){
 cmd_decode(){
   local NAME="${1:?usage: decode <name>}"
   local TS="$DIR/$NAME.ts" IQ=""
-  # find the IQ by either extension; tv_replay auto-detects format from it
-  for e in cs16 cf32; do [ -f "$DIR/$NAME.$e" ] && IQ="$DIR/$NAME.$e" && break; done
-  [ -n "$IQ" ] || die "no IQ file $DIR/$NAME.{cs16,cf32}  (run: $0 list)"
+  # find the IQ by either extension, in the RAM dir (if STVT_DVR_RAM) or $DIR;
+  # tv_replay auto-detects format from the file. The .ts always lands in $DIR.
+  for d in "$IQDIR" "$DIR"; do for e in cs16 cf32; do
+    [ -f "$d/$NAME.$e" ] && IQ="$d/$NAME.$e" && break 2; done; done
+  [ -n "$IQ" ] || die "no IQ file for '$NAME' in $IQDIR or $DIR  (run: $0 list)"
   local dur eta eq bpers
   case "$IQ" in *.cs16) bpers=32e6;; *) bpers=64e6;; esac   # bytes per signal-second
   dur=$(python3 -c "import os;print(os.path.getsize('$IQ')/$bpers)")
