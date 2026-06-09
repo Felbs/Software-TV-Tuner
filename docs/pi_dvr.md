@@ -22,6 +22,16 @@ tools/stvt_dvr.sh decode tonight
 tools/stvt_dvr.sh list                    # recordings + free disk
 ```
 
+## Channel choice matters — a lot
+
+Measured 2026-06-09: decode quality is dominated by which RF channel you record.
+On this antenna **RF34 and RF36 decode at ~99.99% segment alignment (clean 1080
+HD)**, while **RF15 sits at ~65% (glitchy)** no matter how you tune gain/EQ — it's
+an impaired channel (multipath). If a recording looks blocky, **try a different
+channel first** before touching anything else. Good capture gain here is
+`STVT_IFGR=50` (IFGR=59 can clip a strong channel). Quick health check on a 8s
+RAM capture: decode and `grep segs_aligned` in the log — want >95%.
+
 ## Disk is the binding constraint
 
 Raw IQ is **CF32 = ~3.84 GB/min (~230 GB/hr)**. With ~100 GB free that's only
