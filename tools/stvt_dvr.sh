@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# stvt_dvr.sh — all-on-the-Pi record-then-watch DVR.
+#
+# The Pi 4 CANNOT decode ATSC live (~0.33-0.46x real-time, proven core-count
+# floor). So instead of decoding live, the Pi RECORDS raw IQ (the SDR does that
+# at ~0 CPU), DECODES it offline on the Pi (slower than real-time but it
+# finishes), and PLAYS the result. Everything on the Pi, no second machine.
+#
+#   stvt_dvr.sh record <rf> <minutes> [name]   capture IQ from the SDR
+#   stvt_dvr.sh decode <name>                  offline-decode IQ -> playable .ts
+#   stvt_dvr.sh watch  <name>                  play the decoded .ts
+#   stvt_dvr.sh auto   <rf> <minutes> [name]   record, then decode (then watch)
+#   stvt_dvr.sh list                           show recordings + disk
+#
+# DISK (the binding constraint): raw IQ is CF32 = ~3.84 GB/min (~230 GB/hr). The
+# decoded .ts is only ~65 MB/min, so the huge IQ is DELETED after a good decode
+# (keep it with STVT_DVR_KEEP_IQ=1). For long shows put STVT_DVR_DIR on a USB SSD.
+#
+# Config (env): STVT_DVR_DIR (~/stvt_dvr), STVT_DVR_EQ (long=quality | stock=~30%
+# faster), STVT_DVR_KEEP_IQ (0).
+#
+# NOTE 2026-06-09: written overnight, NOT yet tested end-to-end (the SDR was busy
+# with the soak). Verify record+decode+play against the SDR before trusting it.
+set -u
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DIR="${STVT_DVR_DIR:-$HOME/stvt_dvr}"
+mkdir -p "$DIR"
+GB_PER_MIN=3.84   # CF32 @ 8 MS/s
+
+die(){ echo "[dvr] ERROR: $*" >&2; exit 1; }
+free_gb(){ df -BG --output=avail "$DIR" 2>/dev/null | tail -1 | tr -dc '0-9'; }
+
+ensure_sdr_free(){
+  # all-on-Pi DVR talks to the SDR directly; release anything else holding it
+  if systemctl is-active --quiet soapyremote-server 2>/dev/null; then
+    echo "[dvr] stopping soapyremote-server to free the SDR"; sudo systemctl stop soapyremote-server
+  fi
+  for p in $(pgrep -f 'pi_server_soak|tv_live.py' 2>/dev/null); do
+    [ "$(cat /proc/$p/comm 2>/dev/null)" = python3 ] && kill -INT "$p" 2>/dev/null
+  done
+  sleep 2
+}
+
+cmd_record(){
+  local RF="${1:?usage: record <rf> <minutes> [name]}"
+  local MIN="${2:?usage: record <rf> <minutes> [name]}"
+  local NAME="${3:-rec_$(date +%Y%m%d_%H%M%S)_rf${RF}}"
+  local IQ="$DIR/$NAME.cf32"
+  local need avail
+  need=$(awk "BEGIN{printf \"%d\", $MIN*$GB_PER_MIN+3}")     # +3 GB margin
+  avail=$(free_gb)
+  echo "[dvr] ${MIN}min CF32 IQ needs ~${need}GB; ${avail}GB free in $DIR"
+  [ "${avail:-0}" -lt "$need" ] && die "not enough disk. Shorter recording, free space, or STVT_DVR_DIR=<usb drive>. (max here ~$((avail/4))min)"
+  ensure_sdr_free
+  echo "[dvr] recording RF$RF for ${MIN}min -> $IQ  (Ctrl-C stops early but keeps the file)"
+  python3 "$HERE/record_iq.py" --rf "$RF" --seconds $((MIN*60)) --out "$IQ" \
+      --ifgr "${STVT_IFGR:-59}" --rfgain-sel "${STVT_RFGAIN_SEL:-5}" --antenna "${STVT_ANTENNA:-Antenna A}" \
+      || die "record_iq.py failed"
+  echo "[dvr] recorded $(du -h "$IQ" 2>/dev/null|cut -f1).  Next: $0 decode $NAME"
+}
+
+cmd_decode(){
+  local NAME="${1:?usage: decode <name>}"
+  local IQ="$DIR/$NAME.cf32" TS="$DIR/$NAME.ts"
+  [ -f "$IQ" ] || die "no IQ file: $IQ  (run: $0 list)"
+  local dur eta eq
+  dur=$(python3 -c "import os;print(os.path.getsize('$IQ')/64e6)")
+  eq="${STVT_DVR_EQ:-long}"     # long=best quality; stock=~30% faster
+  local rate; [ "$eq" = stock ] && rate=0.43 || rate=0.33
+  eta=$(awk "BEGIN{printf \"%.0f\", $dur/$rate/60}")
+  echo "[dvr] decoding '$NAME' (${dur}s signal, EQ=$eq) at ~${rate}x -> ETA ~${eta}min"
+  STVT_RS=stock STVT_VITERBI=hard STVT_EQ="$eq" STVT_SPS="${STVT_SPS:-1.1}" \
+    STVT_RRC_SYMS="${STVT_RRC_SYMS:-4}" STVT_TEISCRUB=1 STVT_RXF_FUSED=1 \
+    python3 "$HERE/tv_replay.py" --iq "$IQ" --out "$TS" --log "$DIR/$NAME.decode.log" \
+    || die "tv_replay.py failed (see $DIR/$NAME.decode.log)"
+  echo "[dvr] decoded -> $TS ($(du -h "$TS" 2>/dev/null|cut -f1))"
+  if [ "${STVT_DVR_KEEP_IQ:-0}" != "1" ]; then
+    rm -f "$IQ"; echo "[dvr] removed $NAME.cf32 to reclaim disk (keep next time with STVT_DVR_KEEP_IQ=1)"
+  fi
+  echo "[dvr] watch:  $0 watch $NAME"
+}
+
+cmd_watch(){
+  local NAME="${1:?usage: watch <name>}"
+  local TS="$DIR/$NAME.ts"
+  [ -f "$TS" ] || die "no decoded TS: $TS  (run: $0 decode $NAME)"
+  # ATSC = MPEG-2 (no Pi HW decode) -> software via mpv. Multi-program muxes can
+  # show a bad SD track; if so, use tools/stvt_play_hd.sh "$TS" to pick the HD one.
+  echo "[dvr] playing $TS (software MPEG-2; if you get a tiny/garbage track try: $HERE/stvt_play_hd.sh \"$TS\")"
+  exec mpv --hwdec=no --vo=gpu --cache=yes "$TS"
+}
+
+cmd_auto(){
+  local RF="${1:?usage: auto <rf> <minutes> [name]}" MIN="${2:?}" NAME="${3:-rec_$(date +%Y%m%d_%H%M%S)_rf${RF}}"
+  cmd_record "$RF" "$MIN" "$NAME"
+  cmd_decode "$NAME"
+  echo "[dvr] ready. watch with:  $0 watch $NAME"
+}
+
+cmd_list(){
+  echo "[dvr] $DIR  ($(free_gb)GB free)"
+  ls -lh "$DIR"/*.ts "$DIR"/*.cf32 2>/dev/null | awk '{print "  "$5"  "$9}' || echo "  (no recordings yet)"
+}
+
+case "${1:-help}" in
+  record) shift; cmd_record "$@";;
+  decode) shift; cmd_decode "$@";;
+  watch)  shift; cmd_watch "$@";;
+  auto)   shift; cmd_auto "$@";;
+  list)   cmd_list;;
+  *) grep '^#' "$0" | sed 's/^# \{0,1\}//' | head -28;;
+esac
