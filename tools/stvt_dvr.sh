@@ -28,7 +28,7 @@ mkdir -p "$DIR"
 # IQ format: cf32 = complex float32 (8 B/sample, default, fully tested) or
 # cs16 = interleaved int16 (4 B/sample, HALF the disk -> ~2x record time).
 # cs16 scaling is verified exact; SDR-record test still pending (see docs/pi_dvr.md).
-FMT="${STVT_DVR_FORMAT:-cf32}"
+FMT="${STVT_DVR_FORMAT:-cs16}"   # cs16 default: validated, and required for the 29.6MB/s SD card
 case "$FMT" in
   cs16) EXT=cs16; GB_PER_MIN=1.92;;
   *)    FMT=cf32; EXT=cf32; GB_PER_MIN=3.84;;
@@ -49,7 +49,7 @@ ensure_sdr_free(){
 }
 
 cmd_record(){
-  local RF="${1:?usage: record <rf> <minutes> [name]}"
+  local RF="${1:-34}"   # default RF34 (clean 99.99%-aligned channel)
   local MIN="${2:?usage: record <rf> <minutes> [name]}"
   local NAME="${3:-rec_$(date +%Y%m%d_%H%M%S)_rf${RF}}"
   local IQ="$DIR/$NAME.$EXT"
@@ -62,7 +62,7 @@ cmd_record(){
   ensure_sdr_free
   echo "[dvr] recording RF$RF for ${MIN}min ($FMT) -> $IQ  (Ctrl-C stops early but keeps the file)"
   python3 "$HERE/record_iq.py" --rf "$RF" --seconds $((MIN*60)) --out "$IQ" --format "$FMT" \
-      --ifgr "${STVT_IFGR:-59}" --rfgain-sel "${STVT_RFGAIN_SEL:-5}" --antenna "${STVT_ANTENNA:-Antenna A}" \
+      --ifgr "${STVT_IFGR:-50}" --rfgain-sel "${STVT_RFGAIN_SEL:-5}" --antenna "${STVT_ANTENNA:-Antenna A}" \
       || die "record_iq.py failed"
   echo "[dvr] recorded $(du -h "$IQ" 2>/dev/null|cut -f1).  Next: $0 decode $NAME"
 }
@@ -102,7 +102,7 @@ cmd_watch(){
 }
 
 cmd_auto(){
-  local RF="${1:?usage: auto <rf> <minutes> [name]}" MIN="${2:?}" NAME="${3:-rec_$(date +%Y%m%d_%H%M%S)_rf${RF}}"
+  local RF="${1:-34}" MIN="${2:?usage: auto [rf] <minutes> [name]}" NAME="${3:-rec_$(date +%Y%m%d_%H%M%S)_rf${RF}}"
   cmd_record "$RF" "$MIN" "$NAME"
   cmd_decode "$NAME"
   echo "[dvr] ready. watch with:  $0 watch $NAME"
