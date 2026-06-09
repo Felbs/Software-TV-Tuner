@@ -10,6 +10,7 @@
 #   stvt_dvr.sh decode <name>                  offline-decode IQ -> playable .ts
 #   stvt_dvr.sh watch  <name>                  play the decoded .ts
 #   stvt_dvr.sh auto   <rf> <minutes> [name]   record, then decode (then watch)
+#   stvt_dvr.sh verify [rf] [secs]             health check: is the channel giving stable video?
 #   stvt_dvr.sh list                           show recordings + disk
 #
 # DISK (the binding constraint): raw IQ is CF32 = ~3.84 GB/min (~230 GB/hr). The
@@ -108,6 +109,14 @@ cmd_auto(){
   echo "[dvr] ready. watch with:  $0 watch $NAME"
 }
 
+cmd_verify(){
+  # quick "is this channel/setup giving stable video?" check via the acceptance
+  # gate (records a clean clip to RAM, decodes, reports segs_aligned + PASS/FAIL).
+  local RF="${1:-34}" SECS="${2:-20}"
+  echo "[dvr] verify: ${SECS}s RF$RF -> acceptance gate (want segs_aligned >= 98%)"
+  bash "$HERE/stvt_dvr_accept.sh" "$RF" "$SECS" "${STVT_DVR_EQ:-long}"
+}
+
 cmd_list(){
   echo "[dvr] $DIR  ($(free_gb)GB free)"
   ls -lh "$DIR"/*.ts "$DIR"/*.cf32 "$DIR"/*.cs16 2>/dev/null | awk '{print "  "$5"  "$9}' || echo "  (no recordings yet)"
@@ -118,6 +127,7 @@ case "${1:-help}" in
   decode) shift; cmd_decode "$@";;
   watch)  shift; cmd_watch "$@";;
   auto)   shift; cmd_auto "$@";;
+  verify) shift; cmd_verify "$@";;
   list)   cmd_list;;
   *) grep '^#' "$0" | sed 's/^# \{0,1\}//' | head -28;;
 esac
