@@ -123,7 +123,22 @@ class ReplayTopBlock(gr.top_block):
     def __init__(self, iq_path: Path, ts_path: Path, repeat: bool, diag_dir: str):
         super().__init__("tv_replay")
 
-        src = blocks.file_source(gr.sizeof_gr_complex, str(iq_path), repeat)
+        # Input format: CF32 (complex float32, default) or CS16 (interleaved
+        # int16, half the disk — what record_iq.py --format cs16 writes). Detected
+        # by .cs16/.sc16 extension, override with STVT_IQ_FORMAT=cf32|cs16. The
+        # CS16 path divides by 32767 to undo record_iq's *32767 (verified exact).
+        _ext = str(iq_path).lower()
+        _fmt = os.environ.get("STVT_IQ_FORMAT",
+                              "cs16" if _ext.endswith((".cs16", ".sc16")) else "cf32")
+        if _fmt == "cs16":
+            _fsrc = blocks.file_source(gr.sizeof_short, str(iq_path), repeat)
+            _s2c  = blocks.interleaved_short_to_complex(False, False, 32767.0)
+            self.connect(_fsrc, _s2c)
+            src = _s2c
+            LOG.info(f"input: CS16 interleaved int16 (scale 32767) {iq_path}")
+        else:
+            src = blocks.file_source(gr.sizeof_gr_complex, str(iq_path), repeat)
+            LOG.info(f"input: CF32 {iq_path}")
 
         # SPS = internal oversampling (samples/symbol). 1.5 = stock 16.14 MS/s.
         # Lowering it cuts the matched-filter/resampler + all front-end blocks

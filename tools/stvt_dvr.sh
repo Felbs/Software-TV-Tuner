@@ -25,7 +25,14 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIR="${STVT_DVR_DIR:-$HOME/stvt_dvr}"
 mkdir -p "$DIR"
-GB_PER_MIN=3.84   # CF32 @ 8 MS/s
+# IQ format: cf32 = complex float32 (8 B/sample, default, fully tested) or
+# cs16 = interleaved int16 (4 B/sample, HALF the disk -> ~2x record time).
+# cs16 scaling is verified exact; SDR-record test still pending (see docs/pi_dvr.md).
+FMT="${STVT_DVR_FORMAT:-cf32}"
+case "$FMT" in
+  cs16) EXT=cs16; GB_PER_MIN=1.92;;
+  *)    FMT=cf32; EXT=cf32; GB_PER_MIN=3.84;;
+esac
 
 die(){ echo "[dvr] ERROR: $*" >&2; exit 1; }
 free_gb(){ df -BG --output=avail "$DIR" 2>/dev/null | tail -1 | tr -dc '0-9'; }
@@ -45,15 +52,16 @@ cmd_record(){
   local RF="${1:?usage: record <rf> <minutes> [name]}"
   local MIN="${2:?usage: record <rf> <minutes> [name]}"
   local NAME="${3:-rec_$(date +%Y%m%d_%H%M%S)_rf${RF}}"
-  local IQ="$DIR/$NAME.cf32"
-  local need avail
+  local IQ="$DIR/$NAME.$EXT"
+  local need avail maxmin
   need=$(awk "BEGIN{printf \"%d\", $MIN*$GB_PER_MIN+3}")     # +3 GB margin
   avail=$(free_gb)
-  echo "[dvr] ${MIN}min CF32 IQ needs ~${need}GB; ${avail}GB free in $DIR"
-  [ "${avail:-0}" -lt "$need" ] && die "not enough disk. Shorter recording, free space, or STVT_DVR_DIR=<usb drive>. (max here ~$((avail/4))min)"
+  maxmin=$(awk "BEGIN{printf \"%d\", ($avail-3)/$GB_PER_MIN}")
+  echo "[dvr] ${MIN}min $FMT IQ needs ~${need}GB; ${avail}GB free in $DIR (max ~${maxmin}min)"
+  [ "${avail:-0}" -lt "$need" ] && die "not enough disk. Shorter recording, STVT_DVR_FORMAT=cs16 (half size), or STVT_DVR_DIR=<usb drive>."
   ensure_sdr_free
-  echo "[dvr] recording RF$RF for ${MIN}min -> $IQ  (Ctrl-C stops early but keeps the file)"
-  python3 "$HERE/record_iq.py" --rf "$RF" --seconds $((MIN*60)) --out "$IQ" \
+  echo "[dvr] recording RF$RF for ${MIN}min ($FMT) -> $IQ  (Ctrl-C stops early but keeps the file)"
+  python3 "$HERE/record_iq.py" --rf "$RF" --seconds $((MIN*60)) --out "$IQ" --format "$FMT" \
       --ifgr "${STVT_IFGR:-59}" --rfgain-sel "${STVT_RFGAIN_SEL:-5}" --antenna "${STVT_ANTENNA:-Antenna A}" \
       || die "record_iq.py failed"
   echo "[dvr] recorded $(du -h "$IQ" 2>/dev/null|cut -f1).  Next: $0 decode $NAME"
@@ -61,10 +69,13 @@ cmd_record(){
 
 cmd_decode(){
   local NAME="${1:?usage: decode <name>}"
-  local IQ="$DIR/$NAME.cf32" TS="$DIR/$NAME.ts"
-  [ -f "$IQ" ] || die "no IQ file: $IQ  (run: $0 list)"
-  local dur eta eq
-  dur=$(python3 -c "import os;print(os.path.getsize('$IQ')/64e6)")
+  local TS="$DIR/$NAME.ts" IQ=""
+  # find the IQ by either extension; tv_replay auto-detects format from it
+  for e in cs16 cf32; do [ -f "$DIR/$NAME.$e" ] && IQ="$DIR/$NAME.$e" && break; done
+  [ -n "$IQ" ] || die "no IQ file $DIR/$NAME.{cs16,cf32}  (run: $0 list)"
+  local dur eta eq bpers
+  case "$IQ" in *.cs16) bpers=32e6;; *) bpers=64e6;; esac   # bytes per signal-second
+  dur=$(python3 -c "import os;print(os.path.getsize('$IQ')/$bpers)")
   eq="${STVT_DVR_EQ:-long}"     # long=best quality; stock=~30% faster
   local rate; [ "$eq" = stock ] && rate=0.43 || rate=0.33
   eta=$(awk "BEGIN{printf \"%.0f\", $dur/$rate/60}")
@@ -75,7 +86,7 @@ cmd_decode(){
     || die "tv_replay.py failed (see $DIR/$NAME.decode.log)"
   echo "[dvr] decoded -> $TS ($(du -h "$TS" 2>/dev/null|cut -f1))"
   if [ "${STVT_DVR_KEEP_IQ:-0}" != "1" ]; then
-    rm -f "$IQ"; echo "[dvr] removed $NAME.cf32 to reclaim disk (keep next time with STVT_DVR_KEEP_IQ=1)"
+    rm -f "$IQ"; echo "[dvr] removed $(basename "$IQ") to reclaim disk (keep next time with STVT_DVR_KEEP_IQ=1)"
   fi
   echo "[dvr] watch:  $0 watch $NAME"
 }
@@ -99,7 +110,7 @@ cmd_auto(){
 
 cmd_list(){
   echo "[dvr] $DIR  ($(free_gb)GB free)"
-  ls -lh "$DIR"/*.ts "$DIR"/*.cf32 2>/dev/null | awk '{print "  "$5"  "$9}' || echo "  (no recordings yet)"
+  ls -lh "$DIR"/*.ts "$DIR"/*.cf32 "$DIR"/*.cs16 2>/dev/null | awk '{print "  "$5"  "$9}' || echo "  (no recordings yet)"
 }
 
 case "${1:-help}" in
