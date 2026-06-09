@@ -106,10 +106,27 @@ cmd_watch(){
   local NAME="${1:?usage: watch <name>}"
   local TS="$DIR/$NAME.ts"
   [ -f "$TS" ] || die "no decoded TS: $TS  (run: $0 decode $NAME)"
-  # ATSC = MPEG-2 (no Pi HW decode) -> software via mpv. Multi-program muxes can
-  # show a bad SD track; if so, use tools/stvt_play_hd.sh "$TS" to pick the HD one.
-  echo "[dvr] playing $TS (software MPEG-2; if you get a tiny/garbage track try: $HERE/stvt_play_hd.sh \"$TS\")"
-  exec mpv --hwdec=no --vo=gpu --cache=yes "$TS"
+  # ATSC video is MPEG-2 (no Pi HW decode) -> software decode (fast, ~5x) but the
+  # Pi's GPU video-OUTPUT can't present 1080 at full rate with mpv's default heavy
+  # quality, so it drops frames. Fixes (measured on a Pi 4): --profile=fast + cheap
+  # scalers + NO deinterlace (1080i sw-deint is too heavy) => full-rate, in sync.
+  # Multi-program mux: extract the HD program (first 1920/1280-wide) to a seekable
+  # single-program file so mpv doesn't pick a bad SD track AND --start can skip the
+  # ~1-2s startup glitch (chain lock-in + decoder warmup).
+  local hd hdfile="$DIR/$NAME.hd.ts"
+  hd=$(ffprobe -v error -show_entries program=program_id:stream=width -of compact "$TS" 2>/dev/null \
+       | grep -oE "program_id=[0-9]+\|stream\|width=(1920|1280)" | grep -oE "program_id=[0-9]+" | grep -oE "[0-9]+" | head -1)
+  if [ -n "$hd" ]; then
+    [ -f "$hdfile" ] || { echo "[dvr] extracting HD program $hd..."; \
+      ffmpeg -loglevel error -y -i "$TS" -map 0:p:$hd -c copy "$hdfile" 2>/dev/null; }
+    TS="$hdfile"
+  fi
+  local audio="--ao=pipewire"; [ -n "${STVT_DVR_AUDIO:-}" ] && audio="--ao=pipewire --audio-device=$STVT_DVR_AUDIO"
+  echo "[dvr] playing $NAME (Pi-tuned: fast profile, no deinterlace, skip ${STVT_DVR_START:-1.5}s startup)"
+  exec mpv --hwdec=no --vo=gpu --profile=fast \
+    --scale=bilinear --cscale=bilinear --dither=no --deinterlace="${STVT_DVR_DEINT:-no}" \
+    --cache=yes --start="${STVT_DVR_START:-1.5}" --force-window=yes --volume=100 $audio \
+    "${@:2}" "$TS"
 }
 
 cmd_auto(){
