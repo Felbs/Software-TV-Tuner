@@ -91,8 +91,11 @@ cmd_decode(){
   local rate; [ "$eq" = stock ] && rate=0.43 || rate=0.33
   eta=$(awk "BEGIN{printf \"%.0f\", $dur/$rate/60}")
   echo "[dvr] decoding '$NAME' (${dur}s signal, EQ=$eq) at ~${rate}x -> ETA ~${eta}min"
+  # STVT_EQ_S16=1 default: int16 NEON equalizer data path (commit b0eadbc).
+  # Same-IQ A/B: -13% decode wall, segs_aligned bit-identical. Opt out with 0.
   STVT_RS=stock STVT_VITERBI=hard STVT_EQ="$eq" STVT_SPS="${STVT_SPS:-1.1}" \
     STVT_RRC_SYMS="${STVT_RRC_SYMS:-4}" STVT_TEISCRUB=1 STVT_RXF_FUSED=1 \
+    STVT_EQ_S16="${STVT_EQ_S16:-1}" \
     python3 "$HERE/tv_replay.py" --iq "$IQ" --out "$TS" --log "$DIR/$NAME.decode.log" \
     || die "tv_replay.py failed (see $DIR/$NAME.decode.log)"
   echo "[dvr] decoded -> $TS ($(du -h "$TS" 2>/dev/null|cut -f1))"
