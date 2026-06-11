@@ -89,12 +89,98 @@ void atsc_equalizer_long_impl::filterN(const float* input_samples,
                                   float* output_samples,
                                   int nsamples)
 {
+#if defined(__ARM_NEON) || defined(__aarch64__)
+    static const bool S16 = []() {
+        const char* p = std::getenv("STVT_EQ_S16");
+        return p && std::atoi(p) != 0;
+    }();
+    if (S16) {
+        filterN_s16(input_samples, output_samples, nsamples);
+        return;
+    }
+#endif
     for (int j = 0; j < nsamples; j++) {
         output_samples[j] = 0;
         volk_32f_x2_dot_prod_32f(
             &output_samples[j], &input_samples[j], &d_taps[0], NTAPS);
     }
 }
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#include <arm_neon.h>
+
+// Register-blocked int16 FIR: 4 outputs per pass, taps loaded once and shared,
+// shifted input windows formed with vext (registers, not loads). See header.
+static inline void eq_fir_s16_x4(const int16_t* x, const int16_t* t, int ntaps,
+                                 int32_t* out)
+{
+    int32x4_t a0 = vdupq_n_s32(0), a1 = vdupq_n_s32(0),
+              a2 = vdupq_n_s32(0), a3 = vdupq_n_s32(0);
+    int16x8_t xv0 = vld1q_s16(x);
+    for (int i = 0; i < ntaps; i += 8) {
+        int16x8_t tv  = vld1q_s16(t + i);
+        int16x8_t xv1 = vld1q_s16(x + i + 8);
+        int16x8_t s1 = vextq_s16(xv0, xv1, 1);
+        int16x8_t s2 = vextq_s16(xv0, xv1, 2);
+        int16x8_t s3 = vextq_s16(xv0, xv1, 3);
+        a0 = vmlal_s16(a0, vget_low_s16(xv0),  vget_low_s16(tv));
+        a0 = vmlal_s16(a0, vget_high_s16(xv0), vget_high_s16(tv));
+        a1 = vmlal_s16(a1, vget_low_s16(s1),   vget_low_s16(tv));
+        a1 = vmlal_s16(a1, vget_high_s16(s1),  vget_high_s16(tv));
+        a2 = vmlal_s16(a2, vget_low_s16(s2),   vget_low_s16(tv));
+        a2 = vmlal_s16(a2, vget_high_s16(s2),  vget_high_s16(tv));
+        a3 = vmlal_s16(a3, vget_low_s16(s3),   vget_low_s16(tv));
+        a3 = vmlal_s16(a3, vget_high_s16(s3),  vget_high_s16(tv));
+        xv0 = xv1;
+    }
+    out[0] = vaddvq_s32(a0);
+    out[1] = vaddvq_s32(a1);
+    out[2] = vaddvq_s32(a2);
+    out[3] = vaddvq_s32(a3);
+}
+
+void atsc_equalizer_long_impl::filterN_s16(const float* input_samples,
+                                           float* output_samples,
+                                           int nsamples)
+{
+    // Q10 input (8-VSB levels ±7, headroom to ±31), Q11 taps (headroom to ±15).
+    // Worst-case int32 accumulation: 64 products/lane × |x|·|t| stays under
+    // 2^31 for any input the divergence bail (|taps|²<2500) permits.
+    constexpr float X_SCALE = 1024.0f, T_SCALE = 2048.0f;
+    constexpr float OUT_SCALE = 1.0f / (X_SCALE * T_SCALE);
+
+    // Taps change only on field syncs (and DD/divergence paths); re-quantizing
+    // 256 floats per 832-symbol segment is ~0.1% of the segment's MAC work —
+    // cheaper than tracking dirtiness across every tap-writing code path.
+    for (int k = 0; k < NTAPS; k++) {
+        float v = d_taps[k] * T_SCALE;
+        v = v > 32767.f ? 32767.f : (v < -32767.f ? -32767.f : v);
+        d_tq[k] = (int16_t)lrintf(v);
+    }
+    const int span = nsamples + NTAPS;
+    for (int k = 0; k < span; k++) {
+        float v = input_samples[k] * X_SCALE;
+        v = v > 32767.f ? 32767.f : (v < -32767.f ? -32767.f : v);
+        d_xq[k] = (int16_t)lrintf(v);
+    }
+    memset(&d_xq[span], 0, 16 * sizeof(int16_t));
+
+    int32_t o[4];
+    int j = 0;
+    for (; j + 4 <= nsamples; j += 4) {
+        eq_fir_s16_x4(&d_xq[j], d_tq, NTAPS, o);
+        output_samples[j + 0] = o[0] * OUT_SCALE;
+        output_samples[j + 1] = o[1] * OUT_SCALE;
+        output_samples[j + 2] = o[2] * OUT_SCALE;
+        output_samples[j + 3] = o[3] * OUT_SCALE;
+    }
+    for (; j < nsamples; j++) {   // tail (never hit: 832 % 4 == 0)
+        output_samples[j] = 0;
+        volk_32f_x2_dot_prod_32f(
+            &output_samples[j], &input_samples[j], &d_taps[0], NTAPS);
+    }
+}
+#endif /* __ARM_NEON */
 
 void atsc_equalizer_long_impl::filterN_dd(const float* input_samples,
                                           float* output_samples,
