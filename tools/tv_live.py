@@ -496,6 +496,27 @@ class LiveTVTopBlock(gr.top_block):
         if smoother is not None:
             chain_blocks.append(smoother)
         chain_blocks += [rxf, fpll, dcr, agc, sync, fs_check]
+
+        # STVT_MIN_BUF (items) / STVT_MIN_BUF_BYTES (bytes-per-edge): enlarge
+        # the output buffers of the front-end blocks. GR's default (~32KB)
+        # buffers run the 4-core Pi 5 in lockstep (every thread <100%, chain
+        # <1x real-time). 8MB/edge measured 0.91x -> 1.09x, segs_aligned
+        # unchanged, ~555MB RSS. The BYTES form scales per item size so the
+        # vector-output blocks (832B items) don't eat GB of RAM. 0 = stock.
+        _min_buf = int(os.environ.get("STVT_MIN_BUF", "0"))
+        _min_buf_bytes = int(os.environ.get("STVT_MIN_BUF_BYTES", "0"))
+        if _min_buf or _min_buf_bytes:
+            for blk in chain_blocks:
+                try:
+                    n = _min_buf
+                    if _min_buf_bytes:
+                        isz = blk.output_signature().sizeof_stream_item(0)
+                        n = max(65536, _min_buf_bytes // max(1, isz))
+                    blk.set_min_output_buffer(n)
+                except Exception:
+                    pass
+            LOG.info(f"min_output_buffer: items={_min_buf} bytes={_min_buf_bytes}")
+
         self.connect(*chain_blocks)
         if _rs_is_2port:
             for blk_in, blk_out in [(fs_check, equalizer),
