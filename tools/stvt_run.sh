@@ -45,6 +45,10 @@ export STVT_SPS="${STVT_SPS:-1.1}" STVT_RRC_SYMS="${STVT_RRC_SYMS:-4}" STVT_TEIS
 export STVT_IFGR="${STVT_IFGR:-50}" STVT_RFGAIN_SEL="${STVT_RFGAIN_SEL:-5}" STVT_ANTENNA="${STVT_ANTENNA:-Antenna A}"
 export STVT_RXF_FUSED="${STVT_RXF_FUSED:-1}" STVT_EQ_S16="${STVT_EQ_S16:-1}"
 export STVT_MIN_BUF_BYTES="${STVT_MIN_BUF_BYTES:-8388608}"
+# FPLL fold (2026-06-13): dc_blocker+agc run inside the fpll block — two
+# fewer threads/buffer-hops. Bit-identical decode; 1.17x -> 1.21x and ~27%
+# of a core cheaper (the margin that stops desktop-contention overflows).
+export STVT_FPLL_FOLD="${STVT_FPLL_FOLD:-1}"
 
 log(){ echo "$(printf '%(%H:%M:%S)T' -1) $*" | tee -a "$RUNLOG" ; }
 
