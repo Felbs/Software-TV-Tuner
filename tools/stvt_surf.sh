@@ -160,7 +160,7 @@ case "${STVT_DEINT:-lowdeint}" in
   low)       DEINT_FLAG="--vd-lavc-o=lowres=1";;
   # low+yadif: deinterlace AT the halved resolution (~1/4 the filter cost
   # that failed at 1080) — removes residual half-res combing on motion.
-  lowdeint)  DEINT_FLAG="--vd-lavc-o=lowres=1 --vf=lavfi=[yadif=mode=send_frame:deint=interlaced]";;
+  lowdeint)  DEINT_FLAG="--vd-lavc-o=lowres=1 --vf=lavfi=[bwdif=mode=send_frame:deint=interlaced]";;
   field|yes) DEINT_FLAG="--deinterlace=yes";;
   # lavfi wrapper, NOT mpv's own yadif: mpv runs its filter on the single
   # video thread (measured: 2944 drops + video 61s behind audio), while the
@@ -181,7 +181,7 @@ start_player() {  # $1 = program
   rm -f "$SOCK"
   # mpv gets the Pi tune (fast profile, cheap scalers, no deint, ALSA-direct
   # HDMI audio, windowed autofit) + nice +10 so the chain wins the CPU.
-  setsid nice -n "${STVT_PLAYER_NICE:-10}" bash -c "tail -c 20000000 -F '$F' | ffmpeg -hide_banner -loglevel warning -err_detect ignore_err -f mpegts -i - -map 0:p:$p -c copy -flush_packets 1 -f mpegts - | mpv - --input-ipc-server='$SOCK' --input-conf='$ICONF' --vo=${STVT_MPV_VO:-gpu} --hwdec=no --cache=yes --cache-secs=30 --demuxer-readahead-secs=20 --cache-pause=no --cache-pause-initial=no --force-seekable=no --profile=fast --scale=bilinear --cscale=bilinear --dither=no $DEINT_FLAG --ao=alsa --audio-device='${STVT_AUDIO_DEV:-alsa/hdmi:CARD=vc4hdmi0,DEV=0}' --autofit-larger='${STVT_FIT:-85%x85%}' --geometry=50%:50% --osd-align-x=center --osd-align-y=bottom --osd-font-size=42 --osd-border-size=2 --title='STVT Surf'" </dev/null >/tmp/stvt_surf_mpv.log 2>&1 &
+  setsid nice -n "${STVT_PLAYER_NICE:-10}" bash -c "tail -c 20000000 -F '$F' | ffmpeg -hide_banner -loglevel warning -err_detect ignore_err -f mpegts -i - -map 0:p:$p -c copy -flush_packets 1 -f mpegts - | mpv - --input-ipc-server='$SOCK' --input-conf='$ICONF' --vo=${STVT_MPV_VO:-gpu} --hwdec=no --cache=yes --cache-secs=30 --demuxer-readahead-secs=20 --cache-pause=no --cache-pause-initial=no --force-seekable=no --profile=fast --scale=${STVT_SCALE:-spline36} --cscale=bilinear --dither=no $DEINT_FLAG --ao=alsa --audio-device='${STVT_AUDIO_DEV:-alsa/hdmi:CARD=vc4hdmi0,DEV=0}' --autofit-larger='${STVT_FIT:-85%x85%}' --geometry=50%:50% --osd-align-x=center --osd-align-y=bottom --osd-font-size=42 --osd-border-size=2 --title='STVT Surf'" </dev/null >/tmp/stvt_surf_mpv.log 2>&1 &
   MPV_PG=$!
   for i in $(seq 1 30); do [ -S "$SOCK" ] && break; sleep 0.3; done
   setsid python3 "$HERE/stvt_cc_osd.py" --feed "$CCFEED" --channel 1 --sock "$SOCK" --delay "$CCDELAY" </dev/null >/dev/null 2>&1 &

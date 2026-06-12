@@ -54,7 +54,7 @@ case "${STVT_DEINT:-lowdeint}" in
   low)       DEINT_FLAG="--vd-lavc-o=lowres=1";;
   # low+yadif: deinterlace AT the halved resolution (~1/4 the filter cost
   # that failed at 1080) — removes residual half-res combing on motion.
-  lowdeint)  DEINT_FLAG="--vd-lavc-o=lowres=1 --vf=lavfi=[yadif=mode=send_frame:deint=interlaced]";;
+  lowdeint)  DEINT_FLAG="--vd-lavc-o=lowres=1 --vf=lavfi=[bwdif=mode=send_frame:deint=interlaced]";;
   field|yes) DEINT_FLAG="--deinterlace=yes";;
   # lavfi wrapper, NOT mpv's own yadif: mpv runs its filter on the single
   # video thread (measured: 2944 drops + video 61s behind audio), while the
@@ -103,7 +103,7 @@ launch(){
       -c copy -flush_packets 1 -f mpegts - | \
     mpv - --vo=${STVT_MPV_VO:-gpu} --hwdec=no --cache=yes --cache-secs=30 --demuxer-max-bytes=200MiB \
       --demuxer-readahead-secs=20 --cache-pause=no --cache-pause-initial=no \
-      --profile=fast --scale=bilinear --cscale=bilinear --dither=no $DEINT_FLAG \
+      --profile=fast --scale=${STVT_SCALE:-spline36} --cscale=bilinear --dither=no $DEINT_FLAG \
       --video-sync=${STVT_MPV_SYNC:-audio} \
       --alang=${STVT_ALANG:-eng,en} \
       --ao=alsa --audio-device='${STVT_AUDIO_DEV:-alsa/hdmi:CARD=vc4hdmi0,DEV=0}' \
