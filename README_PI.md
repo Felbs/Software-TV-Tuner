@@ -227,7 +227,7 @@ guaranteed-clean capture.
 | **Blocky / glitchy video** | It's almost always the **channel**, not the software — some stations decode 99.99 % clean, others 65 % from the same antenna. Run `tools/stvt_dvr.sh scan ...` and use what scores ≥ 98. Then try `STVT_IFGR` ±4. |
 | **"No devices found" / chain can't open the SDR** | Unplug and replug the RSPdx USB (a wedged API service survives everything else). Then check `systemctl status sdrplay`. |
 | **Restart loop at startup, picture never comes** | Check `vcgencmd get_throttled` — must be `0x0`. Anything else = power/cooling problem; fix that first. |
-| **A brief freeze + jump every ~hour** | That's the `live.ts` rotation blip (see `STVT_ROTATE_GB`). The player recovers in ~2 s on its own. |
+| **A brief rough patch (~once an hour)** | That's the `live.ts` rotation (every ~55 min at the default `STVT_ROTATE_GB=8`). Measured overnight: it usually rides through seamlessly; occasionally there's up to a minute of dropped frames / slight A-V offset that self-corrects. Nothing to do. |
 | **Player window gone but audio continues** | The supervisor relaunches it within ~20 s; if not, restart with the one-liner in *Stop everything* + `tools/stvt_run.sh`. |
 | **Everything was fine yesterday, garbage today** | RF changes day to day. Re-run `scan`; antennas move, trees grow leaves, gain wants re-touching. |
 
