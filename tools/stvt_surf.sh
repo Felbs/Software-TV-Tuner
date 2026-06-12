@@ -64,6 +64,7 @@ PGUP       run /bin/sh -c "echo up > $FIFO"
 PGDWN      run /bin/sh -c "echo down > $FIFO"
 WHEEL_UP   run /bin/sh -c "echo up > $FIFO"
 WHEEL_DOWN run /bin/sh -c "echo down > $FIFO"
+q          run /bin/sh -c "echo quit > $FIFO"
 EOF
 rm -f "$FIFO"; mkfifo "$FIFO"
 
@@ -77,7 +78,9 @@ ensure_chain() {  # $1 = rf ; (re)tune only if the RF actually changed
   sleep 3; rm -f "$F"
   setsid bash -c "exec python3 '$HERE/tv_live.py' --rf $1 --rotate-gb ${STVT_ROTATE_GB:-16} > '$HERE/data/tv_live/tv_tuner.tv_live.log' 2>&1" </dev/null >/dev/null 2>&1 &
   CHAIN_PG=$!; CUR_RF="$1"
-  for i in $(seq 1 25); do [ "$(stat -c%s "$F" 2>/dev/null || echo 0)" -gt 40000000 ] && break; sleep 1; done
+  # 10MB (~4s of TS) is enough cushion for the player's tail/probe — the
+  # old 40MB threshold added ~12s of dead air to every cross-mux change.
+  for i in $(seq 1 25); do [ "$(stat -c%s "$F" 2>/dev/null || echo 0)" -gt 10000000 ] && break; sleep 1; done
 }
 
 stop_player() {
@@ -114,11 +117,12 @@ PY
 
 tune() {  # $1 = index
   IFS='|' read -r rf prog virt call <<< "${CHANS[$1]}"
-  echo "-> [$(( $1 + 1 ))/$N]  $virt  $call  (RF$rf prog$prog)"
+  echo "$(date +%T.%2N) -> [$(( $1 + 1 ))/$N]  $virt  $call  (RF$rf prog$prog)"
   ensure_chain "$rf"
   stop_player
   start_player "$prog"
   sleep 1; banner "  $virt   $call  "
+  echo "$(date +%T.%2N) tuned [$(( $1 + 1 ))/$N]"
 }
 
 cleanup() { stop_player; [ -n "$CHAIN_PG" ] && kill -- -"$CHAIN_PG" 2>/dev/null; rm -f "$FIFO"; }
@@ -126,12 +130,55 @@ trap cleanup EXIT INT TERM
 
 IDX="${STVT_SURF_START:-0}"
 tune "$IDX"
-echo "=== SURFING: PageUp/PageDown or mouse-wheel in the mpv window to change channel. Ctrl-C here to stop. ==="
-while read -r cmd <"$FIFO"; do
-  case "$cmd" in
-    up)   IDX=$(( (IDX + 1) % N )) ;;
-    down) IDX=$(( (IDX - 1 + N) % N )) ;;
-    *)    continue ;;
-  esac
-  tune "$IDX"
+TUNED_IDX=$IDX
+echo "=== SURFING: PageUp/PageDown or mouse-wheel in the mpv window to change channel. q in the window (or Ctrl-C here) to stop. ==="
+
+# ── Real-TV control loop (2026-06-13 rewrite) ────────────────────────────
+# The old loop did one blocking read per tune, so presses made DURING a
+# multi-second tune queued in the FIFO and replayed afterwards as full
+# tunes ("stuck on a channel, then jumped 3 really fast" — measured user
+# report). Real-TV model instead:
+#   * every press updates the TARGET channel instantly and shows it in an
+#     on-screen banner — feedback is immediate even while a tune runs;
+#   * tuning fires once the press burst goes quiet for 0.45s, and only
+#     for the NET target (3 quick ups = ONE tune, 3 channels away);
+#   * presses that land during the tune coalesce the same way and cause
+#     at most one follow-up tune.
+# The FIFO is held open read+write on fd 3: a plain `read < fifo` blocks
+# in OPEN (not read) until a writer appears, which is why `read -t` alone
+# can't poll a FIFO — the <> open never blocks and keeps the pipe alive
+# between writers.
+# Idle ticks double as the player watchdog: a glitchy stream can kill mpv
+# (and with it the keybindings), which used to leave the surfer dead with
+# no recovery ("found a glitchy channel, pressed up, it crashed"). Now a
+# dead player relaunches on the current channel within ~2s.
+exec 3<>"$FIFO"
+IDLE_TICKS=0
+while :; do
+  if IFS= read -r -t 0.45 -u 3 cmd; then
+    case "$cmd" in
+      up)   IDX=$(( (IDX + 1) % N )) ;;
+      down) IDX=$(( (IDX - 1 + N) % N )) ;;
+      quit) echo "$(date +%T.%2N) quit"; exit 0 ;;
+      *)    continue ;;
+    esac
+    IDLE_TICKS=0
+    IFS='|' read -r _rf _prog virt call <<< "${CHANS[$IDX]}"
+    banner "  > $virt  $call"
+    continue          # keep coalescing while presses are still arriving
+  fi
+  # input quiet for 0.45s — commit the pending change, if any
+  if [ "$IDX" != "$TUNED_IDX" ]; then
+    tune "$IDX"
+    TUNED_IDX=$IDX
+    IDLE_TICKS=0
+    continue
+  fi
+  # truly idle — watch the player (cheap pgrep every ~2s)
+  IDLE_TICKS=$(( IDLE_TICKS + 1 ))
+  if [ $(( IDLE_TICKS % 4 )) -eq 0 ] && ! pgrep -x mpv >/dev/null; then
+    echo "$(date +%T.%2N) player died — relaunching [$(( IDX + 1 ))/$N]"
+    tune "$IDX"
+    TUNED_IDX=$IDX
+  fi
 done
