@@ -511,7 +511,7 @@ class LiveTVTopBlock(gr.top_block):
                     n = _min_buf
                     if _min_buf_bytes:
                         isz = blk.output_signature().sizeof_stream_item(0)
-                        n = max(65536, _min_buf_bytes // max(1, isz))
+                        n = max(4096, _min_buf_bytes // max(1, isz))
                     blk.set_min_output_buffer(n)
                 except Exception:
                     pass
