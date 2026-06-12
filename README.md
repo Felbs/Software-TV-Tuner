@@ -1,15 +1,17 @@
-# Software TV Tuner (STVT) — Linux
+# Software TV Tuner (STVT) — Raspberry Pi / ARM
 
 A free and open source software TV tuner. Watch free over-the-air
-television on an SDR (Software Defined Radio). This is the most
-stable open source software TV decoder on the Internet right now.
+television on an SDR (Software Defined Radio) — **entirely on a
+Raspberry Pi 5**. This is the most stable open source software TV
+decoder on the Internet right now.
 
 A custom GNU Radio fork (`gr-atscplus`) decodes ATSC 1.0 broadcast TV
-into a live MPEG-TS stream. A CLI launcher (`tv_tuner.py`) scans your
-area, builds an on-screen TV guide from the broadcast PSIP/EIT data,
-picks a channel, tunes it, and plays it — also records to MP4,
-re-streams to RTMP (Twitch, YouTube), changes channels live, and
-overlays closed captions in English or Spanish.
+into a live MPEG-TS stream, in real time, on the Pi's four ARM cores
+(VOLK NEON kernels + an int16 equalizer data path + tuned GNU Radio
+buffering). One command starts a supervised pipeline that tunes,
+decodes, and plays 1080 HD with sound on the Pi's own HDMI output —
+and auto-recovers from signal glitches, player stalls, and SDR
+hiccups without your help.
 
 It's also a **DVR**: read the on-air program guide, schedule shows,
 record whole muxes (several subchannels at once), and browse the
@@ -17,244 +19,212 @@ results. A **channel surfer** flips channels right in the player like a
 remote, captions can be **overlaid on the picture**, and a **signal
 meter** helps you aim an antenna. See the sections below.
 
-The pipeline runs hours of live TV on marginal indoor antennas
-without manual intervention: three independent watchdogs (decoder,
-ffmpeg, optional player) detect equalizer drift, ffmpeg stalls, and
-SDR dropouts and respawn the affected stage automatically. We've
-watched full sports games, news blocks, and overnight programming
-end-to-end on this stack. If your antenna can lock the carrier, the
-software keeps the picture up.
-
-> **Looking for the Windows build?** That lives on the `main` branch.
-> This README and branch are Linux-only.
-
-## Install — three steps
-
-Tested on **Ubuntu 22.04 / 24.04** (bare-metal). See the WSL2 note at
-the bottom of this section before you start if you're on Windows.
-
-### 1. Clone and bootstrap (~5 minutes)
-
-```bash
-git clone -b linux-port-stvt-v3 https://github.com/Felbs/Software-TV-Tuner.git
-cd Software-TV-Tuner
-chmod +x bootstrap.sh && ./bootstrap.sh
+```
+antenna → SDRplay RSPdx → [Pi 5: SDR I/Q → DSP chain → MPEG-TS → mpv] → your TV
 ```
 
-`bootstrap.sh` apt-installs GNU Radio 3.10 + ffmpeg + SoapySDR + the
-Python bindings, builds and installs the `gr-atscplus` OOT module,
-and pip-installs optional player extras. After it finishes:
-
-```bash
-python3 -c "from gnuradio import atscplus; print('OK')"   # should print: OK
-```
-
-### 2. Install your SDR driver
-
-**SDRplay (RSPdx, RSP1A, RSPduo)** — needs the vendor API *and* a
-SoapySDRPlay3 build with our ring-buffer patch. The patch is the
-single biggest quality fix on Linux; without it you get OsO sample
-overruns several times a second.
-
-```bash
-# 2a. SDRplay API v3 (vendor installer)
-wget https://www.sdrplay.com/software/SDRplay_RSP_API-Linux-3.15.2.run
-chmod +x SDRplay_RSP_API-Linux-3.15.2.run
-sudo ./SDRplay_RSP_API-Linux-3.15.2.run
-sudo systemctl enable --now sdrplay
-
-# 2b. SoapySDRPlay3 with the enlarged ring buffer
-sudo apt-get install -y libsoapysdr-dev
-git clone https://github.com/pothosware/SoapySDRPlay3.git
-
-# IMPORTANT: patch the ring buffer BEFORE building. Bumps 2 MiB / 83 ms
-# of headroom up to 32 MiB / 1.3 s. Re-run after any SoapySDRPlay3
-# upstream pull.
-~/Software-TV-Tuner/tools/patch_soapy_ringbuffer.sh ./SoapySDRPlay3
-
-cd SoapySDRPlay3 && mkdir build && cd build
-cmake .. && make -j"$(nproc)" && sudo make install && sudo ldconfig
-cd ~  # back to home
-```
-
-**RTL-SDR, HackRF, BladeRF, Airspy** — `bootstrap.sh` already pulled
-the SoapySDR module via apt. Nothing more to do.
-
-Verify your SDR is visible:
-
-```bash
-SoapySDRUtil --probe    # should list driver=... + antennas + sample rates
-```
-
-If `--probe` finds nothing, the driver isn't installed correctly —
-check vendor docs and replug the SDR.
-
-### 3. Per-boot CPU tuning (re-run after every reboot)
-
-The 8-VSB matched filter is single-threaded and pinned to one core.
-Linux's default `schedutil` governor + deep C-states starve it,
-causing OsO overruns → picture freezes. One script fixes everything:
-
-```bash
-sudo tools/fix_linux_tuning.sh
-```
-
-It sets the CPU governor to `performance`, disables USB autosuspend
-on the SDRplay, raises the realtime priority limit, and holds CPUs
-out of deep C-states. On a 2017-era CPU this is the difference
-between freezing after ~90 s and running for an hour. On a modern
-CPU it matters less but still helps. **Re-run after every reboot** —
-the governor resets on boot.
-
-### First run
-
-```bash
-python3 tools/tv_tuner.py
-```
-
-The interactive picker shows every channel in your DMA grouped by RF
-frequency, with on-now show titles, ratings, and signal strength
-pulled live from PSIP / EIT after a successful scan. The default
-table covers DC/Baltimore — edit `tools/default_stations.py` for
-your area's RF channels and callsigns.
-
-For a separate window per stream (so the picker stays clean), make
-sure one of `gnome-terminal`, `konsole`, `xfce4-terminal`, or
-`xterm` is installed; the launcher detects whichever is available.
-Headless environments without a terminal emulator just print the
-streaming output inline.
-
-### WSL2 note
-
-The full receive chain (bootstrap → decoder build → SDR enumeration →
-scan → equalizer lock) runs cleanly under WSL2 Ubuntu via the
-Windows-side SDR exposed through SoapyRemote. **However, sustained
-sample-stream integrity over WSL2's NAT loopback is not reliable
-enough for end-to-end MPEG-TS decode** — we measured ~1.8% sample
-loss + ~22k UDP-buffer overflow events per second, which the FS
-checker survives but Reed-Solomon decoding does not. The equalizer
-locks textbook-clean but the TS downstream is corrupted, so ffmpeg
-never sees a valid program.
-
-This is a WSL2 USB / network passthrough limitation, not a project
-limitation. Run it natively: dual-boot Ubuntu, native Linux desktop,
-or any Linux machine with USB plugged directly into the host.
-
-## Watch live HD — the proven recipe
-
-This is the exact two-process setup verified end-to-end on bare-metal
-Ubuntu (SDRplay RSPdx, native Wayland desktop): one process decodes
-the broadcast to a growing `live.ts`, a second plays one program
-from it in mpv.
-
-`tv_tuner.py` (the all-in-one launcher with scan + guide + watchdogs)
-also works, but the two-process split below is the most robust for
-sustained viewing and is what the troubleshooting section assumes.
-
-### Easiest: one command, hands-off (recommended)
-
-```bash
-tools/stvt_run.sh 34 3        # RF channel 34, play program 3 (HD 1080)
-```
-
-`stvt_run.sh` supervises the whole pipeline for you: it starts the
-decoder chain with the lean config, starts the HD player once the
-chain locks, and **auto-recovers**. On a modest CPU the chain
-periodically slips into a "noise drought" (locks the carrier but
-decodes garbage — see Troubleshooting); the supervisor detects it and
-restarts the chain, then brings the player back, with a hard cap on
-restarts so a dead SDR can't spin forever. A drought shows up as a
-~40 s blip (picture freezes, window closes and reopens) instead of a
-permanent freeze. Stop everything with:
-
-```bash
-pkill -f stvt_run.sh; pkill -f tv_live.py; pkill -f stvt_play_hd.sh
-```
-
-The two steps below are what `stvt_run.sh` runs internally — use them
-directly if you want to drive the chain and player by hand.
-
-### 1. Start the decoder chain
-
-```bash
-cd tools
-# Lean real-time config — for modest / older CPUs (e.g. Ryzen 1600X).
-# Trades a little decode margin for throughput so the single-thread
-# matched filter keeps up. This is the config validated for sustained
-# live HD.
-export STVT_RS=stock STVT_VITERBI=hard STVT_EQ=long
-export STVT_SPS=1.1 STVT_RRC_SYMS=4 STVT_TEISCRUB=0
-export STVT_IFGR=59 STVT_RFGAIN_SEL=5 STVT_ANTENNA="Antenna A"
-python3 tv_live.py --rf 34          # writes tools/data/tv_live/live.ts
-```
-
-On a **fast modern CPU** you can run full quality instead — drop the
-lean knobs (`STVT_SPS`, `STVT_RRC_SYMS`, `STVT_TEISCRUB`) and it
-defaults to `SPS=1.5`, 8-symbol RRC, TEI scrub on. Pick your channel
-with `--rf N` (find N by running `python3 tv_tuner.py --scan` once,
-or from your local ATSC channel listings).
-
-### 2. Watch one program in HD
-
-An ATSC channel is a **multiplex of several programs** (often 1–2 HD
-1080 + some SD subchannels). Point a player at the raw multi-program
-stream and it picks a track at random — you may get "Invalid frame
-dimensions 0x0" garbage even though the decode is perfect. The
-supervisor below stream-copies **one** program and feeds it to mpv
-with a buffer cushion, and self-heals if playback freezes:
-
-```bash
-# from the repo root, in a second terminal:
-tools/stvt_play_hd.sh 3        # play program 3 (an HD 1080 feed)
-```
-
-List the programs to choose one whose video is `1920x1080`:
-
-```bash
-ffprobe -show_programs tools/data/tv_live/live.ts
-```
-
-`tools/stvt_play_hd.sh [program] [tailMB]` runs `tail -c | ffmpeg
--map 0:p:N -c copy | mpv` with all the flags that took this project
-a while to get right (`-flush_packets`, last-N-bytes tail, software
-decode, a cache cushion), plus a bounded watchdog that relaunches
-the player — never the chain — if it freezes.
-
-### 3. Verify it's actually working
-
-```bash
-cd tools/data/tv_live
-
-# OsO (sample-overflow) count should stay LOW and not climb ~1/s:
-grep -c OsO tv_tuner.tv_live.log
-
-# The single most useful health check — is the chain emitting real TV
-# or noise? A healthy mux has ~20-40 unique PIDs. Hundreds/thousands =
-# the chain locked the carrier but is decoding NOISE (a "drought");
-# restart the chain.
-tail -c 2000000 live.ts | python3 -c '
-import sys; d=sys.stdin.buffer.read(); s=set(); i=d.find(b"\x47")
-while i+188<=len(d):
-    if d[i]==0x47: s.add(((d[i+1]&0x1f)<<8)|d[i+2])
-    i+=188 if d[i]==0x47 else 1
-print(len(s), "unique PIDs")'
-```
-
-### Environment / config reference
-
-All knobs are env vars read by `tv_live.py` (defaults in parentheses):
-
-| Variable | Default | Meaning |
+| Board | Live TV | DVR (record → decode → watch) |
 |---|---|---|
-| `STVT_RS` | `stock` | Reed-Solomon decoder: `stock` or `erasure` |
-| `STVT_VITERBI` | `hard` | Viterbi: `hard` (fast) or `soft` (heavier) |
-| `STVT_EQ` | `long` | Equalizer variant |
-| `STVT_SPS` | `1.5` | Internal samples/symbol. `1.1` = lean (less CPU); `1.0` breaks timing |
-| `STVT_RRC_SYMS` | `8` | Matched-filter RRC half-span. `4` = lean (fewer taps) |
-| `STVT_TEISCRUB` | `1` | Rewrite RS-failed packets to NULL. `0` = lean (skip, saves CPU) |
-| `STVT_IFGR` | `59` | SDRplay IF gain reduction (20–59 dB) |
-| `STVT_RFGAIN_SEL` | `5` | SDRplay LNA stage selector |
-| `STVT_ANTENNA` | `Antenna A` | SDRplay antenna port |
+| **Pi 5** | ✅ ~1.1× real-time | ✅ |
+| Pi 4 | ❌ (~0.4× real-time, hardware floor) | ✅ use `tools/stvt_dvr.sh` |
+
+> **Other platforms** live on their own branches: `main` = Windows,
+> `wsl-port-stvt-v2` = Windows + WSL, `linux-port-stvt-v3` = x86 Linux
+> desktop. This branch (`pi-port-stvt`) and this README are
+> Raspberry Pi / ARM only.
+
+## What you need
+
+- **Raspberry Pi 5** (8 GB tested; 4 GB should work) + **active
+  cooler** + official 27 W power supply. Throttling or undervolting
+  will glitch the decode.
+- **SDRplay RSPdx** plugged into a **USB 3.0 (blue) port** (other
+  SoapySDR radios work too — see "Configure for your SDR" below; the
+  RSPdx is the reference setup).
+- A **TV antenna** with coax to the SDR input. See "Antennas — what
+  works" below.
+- HDMI display (sound goes over HDMI too).
+- **Raspberry Pi OS 64-bit, Desktop** (Debian 13 "trixie" tested).
+  Verify: `uname -m` must print `aarch64`.
+
+Find your local channels first: look up your address on
+[rabbitears.info](https://www.rabbitears.info) and note the **RF
+channels** (real broadcast channel numbers, not the "virtual"
+7.1-style ones) of the strong stations near you.
+
+## Install (copy-paste, top to bottom)
+
+### 1. System packages
+
+```bash
+sudo apt update
+sudo apt install -y \
+  gnuradio gnuradio-dev \
+  cmake build-essential git pkg-config \
+  libsoapysdr-dev soapysdr-tools \
+  libvolk-dev pybind11-dev python3-numpy python3-packaging \
+  ffmpeg mpv
+```
+
+> On older Bookworm (Debian 12) the VOLK package is `libvolk2-dev`
+> instead of `libvolk-dev`.
+
+Verify GNU Radio is the 3.10 series (required — other ABIs won't load
+our blocks):
+
+```bash
+gnuradio-config-info --version   # expect 3.10.x
+```
+
+### 2. Clone this repo
+
+```bash
+cd ~
+git clone -b pi-port-stvt https://github.com/Felbs/Software-TV-Tuner.git
+cd Software-TV-Tuner
+```
+
+### 3. SDRplay API (vendor driver)
+
+Download the **Linux ARM64** API installer from
+<https://www.sdrplay.com/api/> (`SDRplay_RSP_API-Linux-3.x.x.run`, the
+aarch64 build), then:
+
+```bash
+chmod +x SDRplay_RSP_API-Linux-*.run
+sudo ./SDRplay_RSP_API-Linux-*.run
+```
+
+> ⚠️ The installer shows its license through the `more` pager — it
+> will appear to hang in a non-interactive shell. Run it in a **real
+> terminal**, press `q` to leave the license, then `y` to accept.
+
+```bash
+sudo systemctl enable --now sdrplay
+SoapySDRUtil --find          # should list "SDRplay Dev0 RSPdx ..."
+```
+
+If the device isn't found: replug the USB cable (really — the API
+service binds at plug-in time), then re-run `SoapySDRUtil --find`.
+
+(Using an RTL-SDR / HackRF / Airspy instead? Skip this step and
+`sudo apt install soapysdr-module-rtlsdr` or `-hackrf` / `-airspy`.)
+
+### 4. SoapySDRPlay3 driver (with the ring-buffer patch)
+
+The stock driver's 2 MiB USB ring buffer overflows under load; the
+repo ships a patch script that bumps it to 32 MiB — **the single
+biggest reliability win**:
+
+```bash
+cd ~
+git clone https://github.com/pothosware/SoapySDRPlay3
+~/Software-TV-Tuner/tools/patch_soapy_ringbuffer.sh ~/SoapySDRPlay3
+cd SoapySDRPlay3 && mkdir build && cd build
+cmake -DCMAKE_BUILD_TYPE=Release ..
+make -j4
+sudo make install && sudo ldconfig
+```
+
+### 5. Build the DSP blocks (gr-atscplus)
+
+Custom equalizer / FPLL / sync / Viterbi blocks — this is where the
+real-time speed comes from (VOLK auto-selects NEON on the Pi). Takes
+~10–20 min on a Pi 5:
+
+```bash
+cd ~/Software-TV-Tuner/gr-atscplus
+mkdir build && cd build
+cmake -DCMAKE_BUILD_TYPE=Release ..
+make -j4                  # drop to -j2 on a 4 GB Pi if the linker runs out of RAM
+sudo make install && sudo ldconfig
+python3 -c "from gnuradio import atscplus; print('atscplus OK')"
+```
+
+No per-boot CPU tuning is needed on the Pi 5 (unlike the x86
+branches) — but **cooling is**: check `vcgencmd get_throttled` prints
+`0x0` whenever something seems off.
+
+## Watch live TV
+
+```bash
+cd ~/Software-TV-Tuner
+tools/stvt_run.sh 34 3        # RF channel 34, program 3
+```
+
+That one command supervises everything: it starts the decode chain
+with the Pi-tuned config, waits for lock, opens the player on the
+Pi's screen, and **auto-restarts either half if it ever dies or the
+signal glitches**. First picture takes ~30–60 s (RF lock + equalizer
+convergence — a "drought" warning or one chain restart during startup
+is normal). Roughly once an hour the capture file recycles; the
+player relaunches itself for a clean ~10 s blip and carries on.
+
+**Don't know your RF channel / program numbers?** Rank your local
+channels by actual decode quality (records a short clip of each and
+scores it):
+
+```bash
+tools/stvt_dvr.sh scan 7 15 27 31 34 36     # your rabbitears RF list
+```
+
+Then list the programs (subchannels) inside the winner — HD programs
+are the 1920- or 1280-wide ones:
+
+```bash
+ffprobe -v error -show_entries program=program_id:stream=width \
+  -of compact tools/data/tv_live/live.ts | grep 'width=19\|width=12'
+```
+
+**Player keys** (click the video window first): `f` fullscreen · `#`
+switch audio language · `9`/`0` volume · `m` mute.
+
+**Stop everything:**
+
+```bash
+pkill -f stvt_run.sh; pkill -f tv_live.py; pkill -f stvt_play_hd.sh; pkill -x mpv
+```
+
+> ⚠️ Never `kill -9` the chain (`tv_live.py`). A hard kill wedges the
+> SDRplay API service and only a USB replug recovers it. The commands
+> above send normal signals and shut down cleanly.
+
+### Settings
+
+Everything is an environment variable — set it before `stvt_run.sh`:
+
+```bash
+STVT_IFGR=48 tools/stvt_run.sh 36 1
+```
+
+Everyday knobs:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `STVT_IFGR` | `50` | IF gain reduction (20–59). **Higher number = less gain.** Try ±4 if a channel won't lock. |
+| `STVT_RFGAIN_SEL` | `5` | RF gain step (0–9). Lower it if a very strong local signal clips. |
+| `STVT_ANTENNA` | `Antenna A` | RSPdx antenna port (`Antenna A` / `Antenna B` / `Antenna C`). |
+| `STVT_ALANG` | `eng,en` | Preferred audio language (`spa` for Spanish SAP). |
+| `STVT_AUDIO_DEV` | `alsa/hdmi:CARD=vc4hdmi0,DEV=0` | Audio output. Use `...vc4hdmi1...` for the Pi's second HDMI port. |
+| `STVT_FIT` | `85%x85%` | Max window size as % of the screen (player starts windowed; press `f` for fullscreen). |
+| `STVT_MPV_MUTE` | `no` | `yes` = start muted (unattended/overnight runs). |
+| `STVT_ROTATE_GB` | `8` | Recycle `live.ts` at this size (≈55 min of TV per rotation). |
+
+Under-the-hood (already tuned for the Pi 5 — change only if
+experimenting):
+
+| Variable | Default | What it does |
+|---|---|---|
+| `STVT_MIN_BUF_BYTES` | `8388608` | Per-edge GNU Radio buffer size. **The Pi 5 live-TV unlock**: stock 32 KB buffers run the 4-core pipeline in lockstep at 0.91× real-time; 8 MB decouples the stages → 1.10×. |
+| `STVT_RXF_FUSED` | `1` | Fused resampler+matched-filter front end (one polyphase stage instead of two). |
+| `STVT_EQ_S16` | `1` | int16 NEON equalizer data path (−13 % decode time, bit-identical output). |
+| `STVT_EQ` | `long` | Equalizer (`long` = quality, `stock` = cheaper). |
+| `STVT_SPS` | `1.1` | Samples per symbol through the back half of the chain. |
+| `STVT_RRC_SYMS` | `4` | Matched-filter half-span in symbols. |
+| `STVT_RS` / `STVT_VITERBI` | `stock` / `hard` | Reed-Solomon / Viterbi variants (the lean, validated pair). |
+| `STVT_PLAYER_NICE` | `10` | Player priority handicap so the decode chain always wins the CPU. |
+| `STVT_ROTATE_RELAUNCH` | `1` | Deterministic player relaunch when `live.ts` rotates (`0` = ride through). |
+| `STVT_MPV_VO` | `gpu` | mpv video output driver. |
 
 ## Configure for your SDR + antenna
 
@@ -264,30 +234,25 @@ different physical port, edit a few constants in `tools/config.py`.
 
 ### What SDRs work
 
-This project decodes anything **SoapySDR** supports. Tested in-house:
+This project decodes anything **SoapySDR** supports. Tested in-house
+(on x86; the Soapy layer is identical on ARM):
 
 | SDR | Notes |
 |---|---|
 | **SDRplay RSPdx** | reference setup. 8 MS/s, 14-bit, three antenna ports |
 | **SDRplay RSP1A / RSPduo** | works; one antenna port (RSP1A) or two (RSPduo) |
-| **RTL-SDR (R820T2 dongle)** | works for strong stations only; max sample rate is ~2.4 MS/s, which is below ATSC's full bandwidth so SNR margin shrinks. Fine for nearby transmitters. |
-| **HackRF One** | works; 8 MS/s available; gain naming differs (no IFGR — uses LNA + VGA gain stages) |
+| **RTL-SDR (R820T2 dongle)** | strong stations only; max ~2.4 MS/s is below ATSC's full bandwidth so SNR margin shrinks |
+| **HackRF One** | works; 8 MS/s; gain naming differs (no IFGR — LNA + VGA stages) |
 | **Airspy R2 / Mini** | works; 10 MS/s; gain ladder names differ |
 | **BladeRF** | works; expensive but excellent SNR |
 
-To check what SoapySDR sees on your machine:
+To check what SoapySDR sees:
 
 ```bash
 SoapySDRUtil --probe
 ```
 
-That should print at minimum a `driver=...` line and list of antennas
-+ sample-rate ranges. If it prints nothing or "No supported devices
-found", your SoapySDR drivers aren't installed for that SDR — see
-your SDR vendor's docs (e.g. SoapySDRPlay3 for SDRplay,
-SoapyHackRF for HackRF).
-
-For deep diagnostics, we ship two helper scripts:
+For deep diagnostics, two helper scripts:
 
 ```bash
 python3 tools/probe_sdr.py            # antennas, sample-rate, gain elements
@@ -310,35 +275,29 @@ The string must match what your SDR's driver advertises. Run
 - **HackRF**: `TX/RX` (single port)
 - **RTL-SDR**: `RX` (single port)
 
-If your SDR has only one port, the value doesn't matter much — but
-it does have to be a string the driver recognizes, or the call
-fails silently. If `tools/probe_sdr.py` prints `('A', 'B', 'C')`
-instead of `('Antenna A', 'Antenna B', 'Antenna C')`, use the
-short-form names.
+If your SDR has only one port, the value doesn't matter much — but it
+does have to be a string the driver recognizes, or the call fails
+silently.
 
 ### Gain settings
 
-The two knobs in `tools/config.py`:
+The two SDRplay knobs (env vars `STVT_IFGR` / `STVT_RFGAIN_SEL`
+override the `tools/config.py` defaults):
 
-```python
-ATSC_IF_GAIN_REDUCTION = 59   # SDRplay-specific; range 20-59 dB
-ATSC_RFGAIN_SEL        = 5    # SDRplay-specific; LNA stage selector
-```
+- `IFGR` — IF gain **reduction**, 20–59 dB. Higher = less gain. The
+  Pi reference antenna runs `50`.
+- `RFGAIN_SEL` — LNA stage selector, 0–9.
 
-Both are SDRplay terminology. Other SDRs use different names:
-
-- **HackRF**: replace with `LNA` (0–40 dB, 8 dB steps) and `VGA`
-  (0–62 dB, 2 dB steps).
-- **RTL-SDR**: a single `TUNER` gain (0–49 dB), and AGC bool.
-- **Airspy**: `LNA`, `MIX`, `VGA` (0–15 each), or `linearity` /
-  `sensitivity` presets.
+Other SDRs use different names: **HackRF** `LNA` (0–40 dB) + `VGA`
+(0–62 dB); **RTL-SDR** a single `TUNER` gain (0–49 dB) + AGC bool;
+**Airspy** `LNA`/`MIX`/`VGA` or `linearity`/`sensitivity` presets.
 
 Rule of thumb: **start with a strong UHF station (RF 14–36)**, set
-gain so the raw signal sits at about 60–80% of the ADC's range, and
+gain so the raw signal sits at about 60–80 % of the ADC's range, and
 verify lock. Too high → clipping → equalizer fails. Too low →
-quantization noise → no lock. The included `tools/probe_sdr.py`
-prints the device's full gain range so you can pick a starting
-point.
+quantization noise → no lock. The honest measure of a channel/gain
+combo is `tools/stvt_dvr.sh scan` — it scores actual decode quality
+(`segs_aligned`), not just signal bars.
 
 ### Configure for non-DC markets
 
@@ -348,24 +307,23 @@ callsigns. The format is documented in the file. The first scan
 channel that locks, but the static table is what shows up in the
 picker before that.
 
-## Run
+## Run — the all-in-one CLI
+
+`tv_tuner.py` bundles scan, guide, picker, player, recorder, and
+channel changer:
 
 ```bash
 # Interactive: banner, channel picker, live channel-changer
 python3 tools/tv_tuner.py
 
-# Direct: tune RF36 (Fox 5 DC) and play locally
+# Direct: tune RF36 and play locally
 python3 tools/tv_tuner.py --rf 36
 
-# Pick a subchannel (4.1 NBC = --program 1, 4.4 Oxygen = --program 4)
+# Pick a subchannel
 python3 tools/tv_tuner.py --rf 34 --program 1
 
 # Record to MP4 (no playback window)
 python3 tools/tv_tuner.py --rf 36 --no-play --record fox5_news.mp4
-
-# Stream live to Twitch / YouTube / any RTMP destination
-python3 tools/tv_tuner.py --config-set twitch rtmp://live.twitch.tv/app/YOUR_KEY
-python3 tools/tv_tuner.py --rf 36 --stream twitch
 
 # Closed captions on (English by default, --cc-channel 2 for Spanish)
 python3 tools/tv_tuner.py --rf 36 --cc
@@ -374,30 +332,31 @@ python3 tools/tv_tuner.py --rf 36 --cc
 python3 tools/tv_tuner.py --rf 36 --dry-run
 ```
 
-`tv_tuner.py` uses ffmpeg's `tee` muxer so one command can play
-locally, record, and push to RTMP simultaneously without re-encoding
-twice.
+> **Pi budget note:** the live decode chain needs ~91 % of the Pi 5's
+> four cores. Stream-copy outputs (recording, the mpv player) fit in
+> the rest; anything that **re-encodes video** (e.g. RTMP push to
+> Twitch/YouTube, which works on the x86 branches) does not — don't
+> expect it to keep up here. Likewise avoid heavy desktop work while
+> watching live; a busy browser can tip the chain into overflows.
 
 ## Live channel-changer
 
-The interactive picker doubles as a remote: pick a channel, watch
-it, then back at the picker prompt type another row number or
-virtual channel — the running TV instantly retunes to the new
-station without restarting from scratch. Single-keystroke commands
+The interactive picker doubles as a remote: pick a channel, watch it,
+then back at the picker prompt type another row number or virtual
+channel — the running TV instantly retunes. Single-keystroke commands
 at the prompt:
 
 | key | action |
 |-----|--------|
 | `5` | tune the 5th row in the guide |
-| `5.1` | tune virtual channel 5.1 (`WTTG` Fox) |
+| `5.1` | tune virtual channel 5.1 |
 | `g` | reprint the guide (refreshes show titles + signal %) |
 | `i 7` | inspect row 7 (signal detail, all PIDs, EIT-now/next) |
 | `c` | cycle captions: OFF → English (CC1) → Spanish (CC2) |
 | `q` | quit |
 
-Spanish captions on bilingual stations (Univision, Telemundo,
-WFDC, WZDC) come through on CC2 / SAP — the `c` cycle is the
-fastest way to switch.
+Spanish captions on bilingual stations come through on CC2 / SAP —
+the `c` cycle is the fastest way to switch.
 
 ## Closed captioning
 
@@ -406,15 +365,10 @@ Two backends, picked automatically:
 - **`ccextractor`** if installed on PATH — handles both CEA-608 and
   CEA-708. `sudo apt install ccextractor` to add. Recommended.
 - **Bundled pure-Python decoder** (`tools/atsc_cc.py`) — CEA-608
-  only, no external deps. Always available. Implements:
-  full TS demux (PAT → PMT → video PID), MPEG-2 picture
-  reorder by `temporal_reference` so B-frame captions arrive
-  in display order, CC1/CC2 channel demux, doubled-control-code
-  suppression, and pop-on / roll-up / paint-on mode buffering.
+  only, no external deps. Always available.
 
 With `tv_tuner.py --cc`, captions appear in their own console window
-beside the TV. To overlay them **on the picture** (like a real TV),
-use the dedicated mpv launcher:
+beside the TV. To overlay them **on the picture** (like a real TV):
 
 ```bash
 # captions burned onto the mpv video via its OSD (program 3, CC1 English)
@@ -425,19 +379,14 @@ tools/stvt_watch_cc_osd.sh 3 2
 STVT_CC_DELAY=4.5 tools/stvt_watch_cc_osd.sh 3 1
 ```
 
-It decodes CEA-608 from the program with `atsc_cc.py` and pushes each
-line into the running mpv over its JSON IPC socket. (Verified live on
-native Linux — clean real-time English/Spanish captions.) The video
-uses mpv's `gpu` VO by default; override with `STVT_MPV_VO` if needed.
+If captions don't show, the broadcaster may simply not be
+transmitting them on that subchannel.
 
-If captions don't show, the broadcaster may simply not be transmitting
-them on that subchannel (rare for major networks, common for
-secondary subchannels and shopping channels).
+## DVR
 
-## DVR — guide, schedule & record
+Two complementary recorders:
 
-A full set-top-box loop: read the on-air program guide, schedule
-shows, record them, and browse the results.
+### TS-level DVR (guide, schedule & record) — while the chain runs
 
 ```bash
 # Electronic Program Guide — a printable grid from the broadcast EIT
@@ -460,14 +409,28 @@ python3 tools/stvt_recordings.py          # interactive browser
 python3 tools/stvt_dvr_play.py 3          # play a recorded program
 ```
 
-The scheduler persists its queue to `~/.tv_tuner/schedule.json`, so a
-daemon restart keeps your timers. Recordings are stream-copied (no
-re-encode), auto-named from PSIP (e.g. `mux_p3_4_1_WRC-HD_*.ts`).
-Because all programs in one mux ride shared transport-stream PIDs,
-`stvt_multirec.py` records every program you list from a **single**
-SDR tune — you can't, however, record two different RF channels at
-once with one SDR. The scheduler defers conflicting cross-mux timers
-rather than dropping them.
+Recordings are stream-copied (no re-encode), auto-named from PSIP.
+One SDR = one mux at a time; the scheduler defers conflicting
+cross-mux timers rather than dropping them.
+
+### Raw-IQ DVR (`stvt_dvr.sh`) — also the Pi 4 path
+
+Recording raw I/Q costs almost no CPU, so any Pi can record now and
+decode later — and on a Pi 4 (which can't decode live) this is the
+*only* mode:
+
+```bash
+tools/stvt_dvr.sh record 34 30 myshow   # record RF34 for 30 minutes
+tools/stvt_dvr.sh decode myshow         # offline-decode to a playable .ts
+tools/stvt_dvr.sh watch  myshow         # play it
+tools/stvt_dvr.sh auto   34 30 myshow   # all three
+tools/stvt_dvr.sh list                  # recordings + disk space
+```
+
+Mind the disk: raw I/Q is ~1.9 GB/min. The I/Q is deleted after a
+good decode (`STVT_DVR_KEEP_IQ=1` keeps it); for long shows point
+`STVT_DVR_DIR` at a USB SSD. `STVT_DVR_RAM=1` records short clips to
+RAM for guaranteed-clean capture.
 
 ## Channel surfer
 
@@ -478,150 +441,71 @@ PageDown or the mouse wheel — with captions carried across channels:
 tools/stvt_surf.sh        # PgUp/PgDn or scroll to change channel; Ctrl-C to stop
 ```
 
-Channels come from your last scan (`~/.tv_tuner/scan.json`), sorted by
-virtual channel. Switching to a subchannel in the **same** mux is
-instant (no retune); changing mux retunes the SDR (a few seconds, like
-any OTA tuner).
+Channels come from your last scan (`~/.tv_tuner/scan.json`). Switching
+to a subchannel in the **same** mux is instant; changing mux retunes
+the SDR (a few seconds, like any OTA tuner).
 
 ## Signal meter (antenna aiming)
-
-A real-time signal-strength readout for pointing an antenna:
 
 ```bash
 python3 tools/stvt_signal.py --rf 34          # live bars for one channel
 python3 tools/stvt_signal.py --scan-band      # sweep the whole UHF band
 ```
 
-It sniffs the RF every few seconds and renders pilot SNR / VSB lock /
-RMS so you can rotate the antenna for the strongest reading before
-committing to a watch.
+It renders pilot SNR / VSB lock / RMS every few seconds so you can
+rotate the antenna for the strongest reading before committing to a
+watch.
 
 ## Troubleshooting
 
-### `SoapySDRUtil --probe` shows no devices
+| Symptom | Fix |
+|---|---|
+| **No sound** | Sound goes ALSA-direct to HDMI0 by default (PipeWire can't drive the Pi 5's HDMI audio — it shows only a "Dummy Output"; this is normal and expected). TV on the other port? `STVT_AUDIO_DEV=alsa/hdmi:CARD=vc4hdmi1,DEV=0`. Also check the TV isn't muted. |
+| **Blocky / glitchy video** | It's almost always the **channel**, not the software — some stations decode 99.99 % clean, others 65 % from the same antenna. Run `tools/stvt_dvr.sh scan ...` and use what scores ≥ 98. Then try `STVT_IFGR` ±4. |
+| **`SoapySDRUtil --probe` shows no devices / chain can't open the SDR** | Unplug and replug the SDR's USB (a wedged SDRplay API service survives everything else, including service restarts). Then check `systemctl status sdrplay`. For non-SDRplay radios: `sudo apt install soapysdr-module-<your radio>`. |
+| **Restart loop at startup, picture never comes** | Check `vcgencmd get_throttled` — must be `0x0`. Anything else = power/cooling problem; fix that first. |
+| **A brief player restart about once an hour** | That's the `live.ts` rotation (`STVT_ROTATE_GB`); the player deliberately relaunches for a clean ~10 s blip. Nothing to do. |
+| **Picture froze but `live.ts` is still growing** | The **player** starved, not the decoder; the supervisor relaunches it within ~30 s on its own. The chain is fine — never restart the chain for a player problem. |
+| **Video turned into garbage / random blocks after running a while** | A "noise drought": the chain locks the carrier but decodes noise (live edge shows hundreds of unique PIDs instead of ~25–40). `stvt_run.sh` detects and restarts the chain automatically (~40 s blip). If it droughts repeatedly, check cooling/throttling and stop other CPU-heavy work — even frequent `ffprobe` sampling can tip the chain over. |
+| **Carriers found but lock fails ("PAT=0")** | Equalizer convergence is probabilistic on weak signals: re-aim the antenna, try the strongest channel from `scan`, or give it more time with `STVT_CONVERGENCE_SEC=30`. |
+| **Everything was fine yesterday, garbage today** | RF changes day to day. Re-run `scan`; antennas move, trees grow leaves, gain wants re-touching. |
 
-Your SoapySDR driver for that SDR isn't installed. Install the
-vendor module:
-
-- **SDRplay**: API v3 from sdrplay.com + SoapySDRPlay3 from source
-  (see install step 2 above).
-- **HackRF**: `sudo apt install soapysdr-module-hackrf`
-- **RTL-SDR**: `sudo apt install soapysdr-module-rtlsdr`
-
-After install, replug the SDR and re-run `SoapySDRUtil --probe`.
-
-### `[scan] phase-1 sweep failed` / "no SDR detected"
-
-Same root cause: SoapySDR can't open the device. Verify with
-`SoapySDRUtil --probe` first; if that works but the scan still
-fails, another process is holding the SDR open (a stray `tv_live`
-or another SoapySDR app — `pkill -f tv_live.py` to clear).
-
-### Scan finds carriers but every channel says "no live.ts growth"
-
-The decoder pipeline started but didn't produce output. Check the
-log at `tools/data/tv_live/tv_tuner.tv_live.log` for errors. Common cause:
-the antenna port in `config.py` doesn't match what your physical
-feed is connected to (silent failure — driver accepts the antenna
-name but the port has no signal).
-
-### Carriers found but lock fails ("PAT=0 in 5MB")
-
-Equalizer convergence is probabilistic on weak signals. Try:
-1. Re-aim the antenna (point at the transmitter; horizontal-V for
-   indoor rabbit ears).
-2. Run `python3 tools/tv_tuner.py --rf <strongest_channel>` and let
-   it retry up to 6 times — convergence sometimes needs multiple
-   cold-starts.
-3. Set `STVT_CONVERGENCE_SEC=30` and `STVT_MIN_PAT=3` env vars to
-   give weaker signals more time + lower the lock threshold.
-
-### Video stutters / picture freezes briefly
-
-This is normal on marginal signals. The three watchdogs (decoder,
-ffmpeg, optional player) auto-respawn the failing stage. If freezes
-last more than 10s and don't recover, your SNR is too low — better
-antenna or closer to the transmitter.
-
-### Picture froze but `live.ts` is still growing and OsO is low
-
-The **player** starved, not the decoder. This happens if you point
-mpv straight at the live edge with no buffer, or feed it through a
-pipe that stalls. Use `tools/stvt_play_hd.sh` (above) — it keeps a
-buffer cushion and self-heals. Tell-tale: in mpv's status line the
-playback clock (1st number) stops advancing while `tail -c live.ts`
-shows the file still growing. The chain is fine; restart only the
-player.
-
-### Video turned into garbage / random blocks after running a while
-
-The chain fell into a **noise drought**: it still locks the carrier
-(FPLL fine, `live.ts` growing, ~0% NULL) but is decoding noise — the
-live edge shows hundreds or thousands of unique PIDs instead of
-~20-40 (run the PID-count check above). This is usually OsO
-accumulation after a long uptime, **not** RF. Fix: restart the
-decoder chain.
-
-**`tools/stvt_run.sh` does this automatically** — it watches the live
-edge and restarts the chain on a drought, so you rarely need to do it
-by hand. To restart manually:
-
-```bash
-pkill -f tv_live.py
-rm tools/data/tv_live/live.ts            # start a fresh capture
-# then relaunch the chain (step 1 above); stvt_play_hd.sh will pick
-# it back up
-```
-
-If it droughts again quickly, make sure `sudo tools/fix_linux_tuning.sh`
-was run this boot and that the SoapySDRPlay3 ring-buffer patch is
-applied — both directly reduce OsO. Avoid running other CPU-heavy work
-(the matched filter needs a full core); even frequent `ffprobe`/PID
-sampling can tip a marginal CPU into more droughts.
-
-### "Unknown codec / PID 0x30" when piping live.ts to ffmpeg
-
-You're either reading the file before the equalizer converged
-(wait ~30 seconds after `tv_live` starts), or sample loss in the
-SDR-to-decoder path is breaking RS decoding (WSL2 caveat — see the
-install section above).
-
-### No window pops up
-
-You need a display server. Ubuntu Desktop has one by default;
-Ubuntu Server doesn't. If you're SSH'd in, run `ssh -Y` from your
-local machine (X11 forwarding) or install a desktop environment on
-the server.
+Logs live at `/tmp/stvt_run.log` (supervisor),
+`tools/data/tv_live/tv_tuner.tv_live.log` (chain),
+`/tmp/stvt_mpv.log` (player), `/tmp/stvt_play_hd.sup.log` (player
+supervisor).
 
 ## Watchdogs
 
-Three layers keep playback alive on marginal signals:
+Layers that keep playback alive on marginal signals, all bounded so a
+dead SDR can't cause an infinite respawn storm:
 
-- **Decoder watchdog** — periodically samples PAT count from the live
-  TS. When the equalizer drifts (PAT drops below threshold), kills and
-  respawns `tv_live` for a fresh equalizer convergence.
-- **Pipeline watchdog** — when ffmpeg blocks on bad input, the watchdog
-  detects no-bytes-forwarded-while-data-flowing and respawns ffmpeg
-  while keeping `tv_live` alive.
-- **`tv_player.py`** — optional Python video player with decoupled
-  audio/video clocks. When the SDR briefly produces corrupt video PES,
-  video holds the last good frame while audio keeps decoding from its
-  own PID — a more honest diagnostic than ffplay's all-or-nothing
-  freeze. Toggle with `--player magic`.
+- **`stvt_run.sh`** — the top-level supervisor: restarts the chain on
+  death or noise-drought (with a grace window for the chain's own
+  in-DSP re-acquire), and brings the player supervisor back when the
+  chain is healthy.
+- **`stvt_play_hd.sh`** — the player supervisor: relaunches the
+  `tail | ffmpeg | mpv` pipeline when mpv dies, when playback freezes
+  (~30 s with no progress), and proactively at each `live.ts`
+  rotation for a clean cushion + clock.
+- **In-chain re-acquire** — the field-sync checker re-acquires framing
+  after lock loss instead of latching into permanent noise (the fix
+  that made unattended multi-hour viewing possible).
 
 ## How does this actually work?
 
 [`docs/science.md`](docs/science.md) is a long-form explainer of every
 signal-processing step, written for readers without an RF engineering
-background: 8-VSB modulation, the Hilbert transform, the FPLL carrier-
-lock loop, the LMS equalizer, soft-decision Viterbi, Reed-Solomon, the
-field-sync spacing-validation fix that finally made it watch a baseball
-game, and how to read `atsc_fs_checker_inst`'s output to find which
-step is broken when something goes wrong.
+background: 8-VSB modulation, the FPLL carrier-lock loop, the LMS
+equalizer, soft-decision Viterbi, Reed-Solomon, and the field-sync
+spacing-validation fix that finally made it watch a baseball game.
 
-[`docs/proven_capture_recipe.md`](docs/proven_capture_recipe.md)
-documents the SDRplay gain settings, antenna polarization, and capture
-parameters that produce the best lock.
+Pi-specific docs with the measurement history:
+[`docs/raspberry_pi_setup.md`](docs/raspberry_pi_setup.md)
+(feasibility methodology), [`docs/pi_dvr.md`](docs/pi_dvr.md) (DVR
+design + channel-quality findings),
+[`docs/pi_split_decode.md`](docs/pi_split_decode.md)
+(Pi-as-SDR-server alternative).
 
 ## Antennas — what works
 
@@ -643,11 +527,10 @@ traveling. The orientation of that oscillation is the wave's
 
 For maximum reception, the receiving antenna's element should be
 oriented in the *same plane* as the transmitted wave. A vertically-
-mounted whip catches a horizontally-polarized wave at maybe
-10–20% of the energy of a properly-oriented horizontal antenna —
-roughly **10–15 dB of signal loss**. That's a lot. For a marginal
-station it can be the difference between a clean picture and no
-lock at all.
+mounted whip catches a horizontally-polarized wave at maybe 10–20 %
+of the energy of a properly-oriented horizontal antenna — roughly
+**10–15 dB of signal loss**. For a marginal station that can be the
+difference between a clean picture and no lock at all.
 
 So a **proper TV antenna helps** — and "proper" here means two
 things:
@@ -657,26 +540,23 @@ things:
   surprisingly well; a purpose-built UHF Yagi or log-periodic gives
   the best SNR margin.
 - **Connected with proper coax**, ideally short, ideally low-loss
-  (RG-6 or LMR-style) with the right F-connector or N-connector
-  matching for your SDR. Long thin coax + bad connectors throws
-  away signal you can't get back.
+  (RG-6 or LMR-style) with the right connector for your SDR.
 
-Both of these make the receive side easier. **Neither is required
-to use this program** — if your station is loud enough at your
-location, a "wrong" antenna often still works. The watchdogs and
-the equalizer's tracking margin cover a lot of sins.
+Both make the receive side easier. **Neither is required** — if your
+station is loud enough at your location, a "wrong" antenna often
+still works.
 
 ## Repo layout
 
 ```
 gr-atscplus/                  GNU Radio OOT module (custom C++ blocks)
 tools/
-  tv_tuner.py                 Channel picker, player, recorder, streamer,
-                              and live channel changer all in one CLI
-  tv_live.py                  Continuous SDR → MPEG-TS pipeline
-  tv_live_softvit.py          Same pipeline, soft-Viterbi variant
-  stvt_run.sh                 Hands-off watcher (chain+player, auto-recovers)
+  stvt_run.sh                 THE command: supervised live TV (chain+player)
   stvt_play_hd.sh             Single-program HD playback supervisor
+  stvt_dvr.sh                 Raw-IQ DVR: record/decode/watch/scan (Pi 4 path)
+  tv_live.py                  Continuous SDR → MPEG-TS pipeline
+  tv_replay.py                Deterministic offline decode of recorded I/Q
+  tv_tuner.py                 Channel picker, player, recorder, channel changer
   stvt_surf.sh                Channel surfer (PgUp/PgDn / wheel to change)
   stvt_watch_cc_osd.sh        Player with captions overlaid on the picture
   atsc_cc.py                  Pure-Python CEA-608 caption decoder
@@ -685,16 +565,12 @@ tools/
   stvt_multirec.py            Multi-program recorder (whole mux at once)
   stvt_recordings.py          Browse / play / dedupe recordings
   stvt_signal.py              Real-time signal meter for antenna aiming
-  sdr_sweep.py                Fast carrier-presence pre-scanner
   atsc_psip.py                PSIP parser (virtual channels + EIT)
   default_stations.py         Sample channel table (edit for your DMA)
   config.py                   Default tuner/antenna/gain config
-  tv_player.py                Resilient video player (decoupled A/V clocks)
-  fix_linux_tuning.sh         Per-boot CPU governor + USB tuning
   patch_soapy_ringbuffer.sh   SoapySDRPlay3 USB ring-buffer enlargement
   tests/                      Unit tests (DVR, EPG, scheduler, signal, …)
-docs/                         Science explainer, capture recipe, session log
-bootstrap.sh                  Linux setup + build + install
+docs/                         Science explainer, Pi setup + DVR docs
 ```
 
 ## License
