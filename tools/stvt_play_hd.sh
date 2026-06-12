@@ -131,10 +131,28 @@ relaunch(){
 restarts=0
 relaunch "initial" || exit 1
 last=$(av_pos); stuck=0
+fsz_prev=$(stat -c %s "$F" 2>/dev/null || echo 0)
 while true; do
   sleep 10
   if ! pgrep -f '[t]v_live.py' >/dev/null; then log "chain DOWN — supervisor exiting"; exit 0; fi
   if ! pgrep -x mpv >/dev/null; then relaunch "mpv died" || exit 1; last=$(av_pos); stuck=0; continue; fi
+  # Proactive rotation relaunch (STVT_ROTATE_RELAUNCH=0 disables): when the
+  # chain recycles live.ts the size shrinks; tail -F follows the truncation
+  # but drags an MPEG-TS timestamp discontinuity through ffmpeg/mpv — it
+  # usually rides through, but occasionally costs ~1min of dropped frames +
+  # A-V offset and leaves mpv's clock bookkeeping skewed (measured overnight
+  # 2026-06-13). A deterministic relaunch at the rotation instant costs a
+  # ~5s blip and restores a clean clock + full cushion. The 100MB margin
+  # keeps sampling jitter from false-tripping.
+  fsz=$(stat -c %s "$F" 2>/dev/null || echo 0)
+  if [ "${STVT_ROTATE_RELAUNCH:-1}" = 1 ] && [ "$fsz" -lt $((fsz_prev - 100000000)) ]; then
+    log "rotation detected ($((fsz_prev/1000000))MB -> $((fsz/1000000))MB) — proactive relaunch"
+    sleep 3   # let the fresh file accumulate a few MB for ffmpeg's probe
+    relaunch "rotation" || exit 1
+    last=$(av_pos); stuck=0; fsz_prev=$(stat -c %s "$F" 2>/dev/null || echo 0)
+    continue
+  fi
+  fsz_prev=$fsz
   # True freeze = playback POSITION stops advancing (cache=0 while still
   # advancing at the live edge is fine — not a freeze).
   pos=$(av_pos)
