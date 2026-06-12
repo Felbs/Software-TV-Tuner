@@ -134,7 +134,7 @@ last=$(av_pos); stuck=0
 fsz_prev=$(stat -c %s "$F" 2>/dev/null || echo 0)
 while true; do
   sleep 10
-  if ! pgrep -f '[t]v_live.py' >/dev/null; then log "chain DOWN — supervisor exiting"; exit 0; fi
+  if ! pgrep -f '^python3 [^ ]*tv_live\.py' >/dev/null; then log "chain DOWN — supervisor exiting"; exit 0; fi
   if ! pgrep -x mpv >/dev/null; then relaunch "mpv died" || exit 1; last=$(av_pos); stuck=0; continue; fi
   # Proactive rotation relaunch (STVT_ROTATE_RELAUNCH=0 disables): when the
   # chain recycles live.ts the size shrinks; tail -F follows the truncation

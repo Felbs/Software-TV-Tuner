@@ -64,8 +64,13 @@ if [ "$CPU_ISOLATE" = 1 ]; then
   TSET_OTHER="taskset -c $ISO_OTHER_CPUS"
 fi
 
-chain_up(){ pgrep -f '[t]v_live.py' >/dev/null; }
-player_up(){ pgrep -f '[s]tvt_play_hd.sh' >/dev/null; }
+# Anchored to the interpreter at argv[0] so a SHELL whose command text merely
+# MENTIONS the script (an editor, a git commit, an assistant running
+# "git add tools/stvt_play_hd.sh") can't false-positive. Measured failure
+# 2026-06-13: a lingering shell containing that text made player_up() true
+# and the player never started. Same pp.sh lesson, now fixed at the source.
+chain_up(){ pgrep -f '^python3 [^ ]*tv_live\.py' >/dev/null; }
+player_up(){ pgrep -f '^bash [^ ]*stvt_play_hd\.sh' >/dev/null; }
 
 start_chain(){
   rm -f "$TS"
