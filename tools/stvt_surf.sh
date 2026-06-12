@@ -113,6 +113,19 @@ stop_player() {
   sleep 0.2
 }
 
+# Unique PIDs at the live edge. A healthy mux shows ~25-40; ~1-10 means the
+# chain locked the carrier but is decoding NOISE (a "drought") and no amount
+# of player relaunching will help — the CHAIN needs a fresh cold start.
+edge_pids() {
+  tail -c 1000000 "$F" 2>/dev/null | python3 -c '
+import sys
+d=sys.stdin.buffer.read(); s=set(); i=d.find(b"\x47")
+while i>=0 and i+188<=len(d):
+    if d[i]==0x47: s.add(((d[i+1]&0x1f)<<8)|d[i+2]); i+=188
+    else: i+=1
+print(len(s))' 2>/dev/null || echo 0
+}
+
 # Current playback clock via mpv's IPC socket; empty on any failure.
 mpv_timepos() {
   python3 - "$SOCK" <<'PY' 2>/dev/null
@@ -235,7 +248,20 @@ while :; do
       if [ -z "$tp" ] || [ "$tp" = "${LAST_TP:-}" ]; then
         FROZEN=$(( ${FROZEN:-0} + 1 ))
         if [ "$FROZEN" -ge 5 ]; then
-          echo "$(date +%T.%2N) player FROZEN (${tp:-ipc unresponsive}) — relaunching [$(( IDX + 1 ))/$N]"
+          # Drought-aware recovery (2026-06-13): when the freeze is really
+          # the CHAIN decoding noise (live edge shows ~1 PID instead of
+          # ~25-40), relaunching the player forever can't help — observed
+          # as a player relaunch loop every ~13s over a black window. Kill
+          # the chain so tune()'s ensure_chain gives it a fresh cold start.
+          ep=$(edge_pids)
+          if [ "${ep:-0}" -lt 10 ]; then
+            echo "$(date +%T.%2N) player FROZEN + chain DROUGHT (${ep} PIDs) — chain restart [$(( IDX + 1 ))/$N]"
+            [ -n "$CHAIN_PG" ] && kill -- -"$CHAIN_PG" 2>/dev/null
+            CHAIN_PG=""; CUR_RF=""
+            sleep 3
+          else
+            echo "$(date +%T.%2N) player FROZEN (${tp:-ipc unresponsive}, mux healthy ${ep} PIDs) — relaunching [$(( IDX + 1 ))/$N]"
+          fi
           tune "$IDX"; TUNED_IDX=$IDX; FROZEN=0; LAST_TP=""
           continue
         fi
