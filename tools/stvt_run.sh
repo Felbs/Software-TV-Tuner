@@ -72,7 +72,10 @@ start_chain(){
   [ -f "$CLOG" ] && mv "$CLOG" "$CLOG.$(printf '%(%H%M%S)T' -1)" 2>/dev/null
   # exec 9>&- closes the inherited single-instance lock fd so the detached
   # chain (and its descendants) don't hold the lock after THIS supervisor exits.
-  ( exec 9>&- 2>/dev/null; cd "$HERE" && setsid $TSET_CHAIN python3 tv_live.py --rf "$RF" > "$CLOG" 2>&1 < /dev/null & )
+  # --rotate-gb 8 (was tv_live's 1GB default): every rotation truncates
+  # live.ts under the player = a visible blip + position reset. 8GB ≈ 55min
+  # of TV between blips; ~8GB of SD is cheap (100GB free measured).
+  ( exec 9>&- 2>/dev/null; cd "$HERE" && setsid $TSET_CHAIN python3 tv_live.py --rf "$RF" --rotate-gb "${STVT_ROTATE_GB:-8}" > "$CLOG" 2>&1 < /dev/null & )
   log "started chain (RF$RF, lean config${TSET_CHAIN:+, cpus $ISO_CHAIN_CPUS})"
 }
 
