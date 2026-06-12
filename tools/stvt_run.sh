@@ -23,6 +23,7 @@ PROG="${2:-3}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TS="$HERE/data/tv_live/live.ts"
 CLOG="$HERE/data/tv_live/tv_tuner.tv_live.log"
+mkdir -p "$HERE/data/tv_live"   # fresh checkout: chain dies instantly if its log dir is missing
 RUNLOG="/tmp/stvt_run.log"
 MAX_CHAIN_RESTARTS=30
 COOLDOWN=5
@@ -34,10 +35,16 @@ DROUGHT_STRIKES="${DROUGHT_STRIKES:-3}"  # consecutive high samples (~2s apart) 
 # time), then restart only if it truly hasn't recovered. 1 = old behavior.
 DROUGHT_GRACE_LOOPS="${DROUGHT_GRACE_LOOPS:-2}"
 
-# Lean real-time config (good for modest CPUs; harmless on fast ones).
+# Lean real-time config, Pi 5 flavor (2026-06-12). The Pi 5 decodes live at
+# ~1.1x real-time ONLY with all three of: the fused front-end, the int16 NEON
+# equalizer, and enlarged front-end buffers (STVT_MIN_BUF_BYTES — GR's default
+# 32KB buffers run the 4-core chain in lockstep at 0.91x). IFGR=50 is the
+# DVR-validated gain for this antenna (59 was the old Ryzen-era value).
 export STVT_RS=stock STVT_VITERBI=hard STVT_EQ=long
 export STVT_SPS="${STVT_SPS:-1.1}" STVT_RRC_SYMS="${STVT_RRC_SYMS:-4}" STVT_TEISCRUB="${STVT_TEISCRUB:-0}"
-export STVT_IFGR="${STVT_IFGR:-59}" STVT_RFGAIN_SEL="${STVT_RFGAIN_SEL:-5}" STVT_ANTENNA="${STVT_ANTENNA:-Antenna A}"
+export STVT_IFGR="${STVT_IFGR:-50}" STVT_RFGAIN_SEL="${STVT_RFGAIN_SEL:-5}" STVT_ANTENNA="${STVT_ANTENNA:-Antenna A}"
+export STVT_RXF_FUSED="${STVT_RXF_FUSED:-1}" STVT_EQ_S16="${STVT_EQ_S16:-1}"
+export STVT_MIN_BUF_BYTES="${STVT_MIN_BUF_BYTES:-8388608}"
 
 log(){ echo "$(printf '%(%H:%M:%S)T' -1) $*" | tee -a "$RUNLOG" ; }
 

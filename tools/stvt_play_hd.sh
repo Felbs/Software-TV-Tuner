@@ -54,14 +54,22 @@ launch(){
   # The trailing ? makes the higher slots optional (programs with fewer tracks
   # don't error). --alang is the belt-and-suspenders default; press # to switch
   # live; STVT_ALANG=spa to start on Spanish.
-  setsid bash -c "tail -c $bytes -F '$F' | \
+  # Pi 5: the whole player stack runs nice +10 — the chain saturates ~91% of
+  # the 4 cores, and at equal priority the player steals just enough to cause
+  # SDR overflows (~5/min measured). Niced, the chain wins every contention.
+  # mpv flags after --cache-pause-initial are the Pi tune from stvt_dvr watch:
+  # software MPEG-2 decode is fine, but mpv's default high-quality VO path
+  # can't present 1080 full-rate on the Pi GPU — fast profile + cheap scalers
+  # + NO deinterlace (1080i sw-deint is too heavy) = full-rate, in sync.
+  setsid nice -n "${STVT_PLAYER_NICE:-10}" bash -c "tail -c $bytes -F '$F' | \
     ffmpeg -hide_banner -loglevel warning -fflags nobuffer+flush_packets \
       -flags low_delay -probesize 3M -analyzeduration 3M -err_detect ignore_err \
       -f mpegts -i - -map 0:p:$PROG:0 -map 0:p:$PROG:1? -map 0:p:$PROG:2? -map 0:p:$PROG:3? \
       -c copy -flush_packets 1 -f mpegts - | \
     mpv - --vo=${STVT_MPV_VO:-gpu} --hwdec=no --cache=yes --cache-secs=30 --demuxer-max-bytes=200MiB \
       --demuxer-readahead-secs=20 --cache-pause=no --cache-pause-initial=no \
-      --alang=${STVT_ALANG:-eng,en} \
+      --profile=fast --scale=bilinear --cscale=bilinear --dither=no --deinterlace=no \
+      --alang=${STVT_ALANG:-eng,en} --ao=pipewire \
       --title='STVT Live (prog $PROG)' --force-seekable=no \
       --msg-level=all=status" >> "$MPVLOG" 2>&1 < /dev/null &
   log "launched player prog=$PROG tail=${BACKMB}MB"

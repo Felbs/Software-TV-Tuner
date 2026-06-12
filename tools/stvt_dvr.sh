@@ -6,6 +6,10 @@
 # at ~0 CPU), DECODES it offline on the Pi (slower than real-time but it
 # finishes), and PLAYS the result. Everything on the Pi, no second machine.
 #
+# 2026-06-12: the Pi 5 DOES decode live — ~1.1x real-time with the fused
+# front-end + int16 NEON eq + STVT_MIN_BUF_BYTES (see stvt_run.sh, which has
+# the Pi 5 config baked in). This DVR remains the Pi 4 path / archival tool.
+#
 #   stvt_dvr.sh record <rf> <minutes> [name]   capture IQ from the SDR
 #   stvt_dvr.sh decode <name>                  offline-decode IQ -> playable .ts
 #   stvt_dvr.sh watch  <name>                  play the decoded .ts
