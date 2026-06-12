@@ -65,17 +65,22 @@ FFPROBE = r"C:\ffmpeg\bin\ffprobe.exe" if sys.platform == "win32" else "ffprobe"
 
 # Winning chain env from quality tuner
 DEFAULT_ENV = {
-    "STVT_EQ":          "long",
-    "STVT_RS":          "stock",
-    "STVT_VITERBI":     "soft",
-    "STVT_SPS":         "1.1",
-    "STVT_RRC_SYMS":    "8",
-    "STVT_TEISCRUB":    "1",
-    "STVT_EQ_LKG":      "1",
-    "STVT_EQ_LKG_RMS":  "1.0",
-    "STVT_IFGR":        "45",
-    "STVT_RFGAIN_SEL":  "3",
-    "STVT_ANTENNA":     "Antenna A",
+    # Keep in sync with tv_tuner.py CHAIN_DEFAULTS (Pi 5 validated set,
+    # 2026-06-13). NOTE: this dict OVERRIDES os.environ for the spawned
+    # chain, so it must carry the full Pi config itself.
+    "STVT_EQ":            "long",
+    "STVT_RS":            "stock",
+    "STVT_VITERBI":       "hard",
+    "STVT_SPS":           "1.1",
+    "STVT_RRC_SYMS":      "4",
+    "STVT_TEISCRUB":      "1",
+    "STVT_RXF_FUSED":     "1",
+    "STVT_EQ_S16":        "1",
+    "STVT_MIN_BUF_BYTES": "8388608",
+    "STVT_FPLL_FOLD":     "1",
+    "STVT_IFGR":          "50",
+    "STVT_RFGAIN_SEL":    "5",
+    "STVT_ANTENNA":       "Antenna A",
 }
 
 # DC-area UHF channels likely to carry Spanish content (Univision, Telemundo,
@@ -124,8 +129,12 @@ def kill_chain():
                 except (ValueError, IndexError):
                     pass
     else:
-        subprocess.run(["pkill", "-f", "tv_live.py"], capture_output=True)
-        subprocess.run(["pkill", "-f", "ffmpeg"], capture_output=True)
+        # Anchored / exact-name patterns ONLY: a bare `pkill -f ffmpeg`
+        # matches ANY process whose command text mentions ffmpeg — it
+        # killed this script's own parent shell during testing.
+        subprocess.run(["pkill", "-f", r"^[^ ]*python3 (-u )?[^ ]*tv_live\.py"],
+                       capture_output=True)
+        subprocess.run(["pkill", "-x", "ffmpeg"], capture_output=True)
         subprocess.run(["pkill", "-x", "vlc"], capture_output=True)
 
 
