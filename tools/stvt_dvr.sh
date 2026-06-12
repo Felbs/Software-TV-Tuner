@@ -91,15 +91,26 @@ cmd_decode(){
   local dur eta eq bpers
   case "$IQ" in *.cs16) bpers=32e6;; *) bpers=64e6;; esac   # bytes per signal-second
   dur=$(python3 -c "import os;print(os.path.getsize('$IQ')/$bpers)")
-  eq="${STVT_DVR_EQ:-long}"     # long=best quality; stock=~30% faster
-  local rate; [ "$eq" = stock ] && rate=0.43 || rate=0.33
+  eq="${STVT_DVR_EQ:-long}"     # long=best quality; stock=~30% faster on Pi 4
+  # ETA rate: Pi 5 decodes ~1.09x real-time with the enlarged GR buffers
+  # (commit 05f26b7 — EQ choice no longer changes speed there, the eq isn't
+  # the wall). Pi 4 rates are the measured originals.
+  local rate
+  if grep -q 'Raspberry Pi 5' /proc/device-tree/model 2>/dev/null; then
+    rate=1.09
+  else
+    [ "$eq" = stock ] && rate=0.43 || rate=0.33
+  fi
   eta=$(awk "BEGIN{printf \"%.0f\", $dur/$rate/60}")
   echo "[dvr] decoding '$NAME' (${dur}s signal, EQ=$eq) at ~${rate}x -> ETA ~${eta}min"
   # STVT_EQ_S16=1 default: int16 NEON equalizer data path (commit b0eadbc).
   # Same-IQ A/B: -13% decode wall, segs_aligned bit-identical. Opt out with 0.
+  # STVT_MIN_BUF_BYTES: 8MB/edge GR buffers (0.91x -> 1.09x on Pi 5,
+  # decode-identical; helps the Pi 4's lockstep too).
   STVT_RS=stock STVT_VITERBI=hard STVT_EQ="$eq" STVT_SPS="${STVT_SPS:-1.1}" \
     STVT_RRC_SYMS="${STVT_RRC_SYMS:-4}" STVT_TEISCRUB=1 STVT_RXF_FUSED=1 \
     STVT_EQ_S16="${STVT_EQ_S16:-1}" \
+    STVT_MIN_BUF_BYTES="${STVT_MIN_BUF_BYTES:-8388608}" \
     python3 "$HERE/tv_replay.py" --iq "$IQ" --out "$TS" --log "$DIR/$NAME.decode.log" \
     || die "tv_replay.py failed (see $DIR/$NAME.decode.log)"
   echo "[dvr] decoded -> $TS ($(du -h "$TS" 2>/dev/null|cut -f1))"
@@ -166,7 +177,7 @@ cmd_scan(){
     timeout $((secs+30)) python3 "$HERE/record_iq.py" --rf "$rf" --seconds "$secs" \
       --out "$D/s.cs16" --format cs16 --ifgr "${STVT_IFGR:-50}" --rfgain-sel "${STVT_RFGAIN_SEL:-5}" >/dev/null 2>&1
     STVT_RS=stock STVT_VITERBI=hard STVT_EQ=long STVT_SPS=1.1 STVT_RRC_SYMS=4 STVT_TEISCRUB=1 \
-      STVT_RXF_FUSED=1 STVT_IQ_FORMAT=cs16 \
+      STVT_RXF_FUSED=1 STVT_IQ_FORMAT=cs16 STVT_EQ_S16=1 STVT_MIN_BUF_BYTES=8388608 \
       timeout $((secs*5+60)) python3 "$HERE/tv_replay.py" --iq "$D/s.cs16" --out "$D/s.ts" --log "$D/s.log" >/dev/null 2>&1
     local al; al=$(grep -oE "segs_aligned=[0-9]+ \([0-9.]+%\)" "$D/s.log" 2>/dev/null | tail -1 | grep -oE "\([0-9.]+%\)" | tr -dc '0-9.')
     al=${al:-0}
