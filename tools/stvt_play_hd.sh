@@ -61,6 +61,12 @@ launch(){
   # software MPEG-2 decode is fine, but mpv's default high-quality VO path
   # can't present 1080 full-rate on the Pi GPU — fast profile + cheap scalers
   # + NO deinterlace (1080i sw-deint is too heavy) = full-rate, in sync.
+  # Audio is ALSA-direct (NOT pipewire): the Pi 5 vc4-hdmi PCM only takes
+  # IEC958_SUBFRAME_LE, which pipewire's pro-audio path can't negotiate (sink
+  # shows up as "Dummy Output"). ALSA's hdmi: device does the IEC958 wrapping.
+  # Override the port with STVT_AUDIO_DEV (HDMI1 = alsa/hdmi:CARD=vc4hdmi1).
+  # --fs because the panel may be smaller than 1080 (a 1360x768 TV measured);
+  # fullscreen scales to fit. Press f/ESC in the window to un-fullscreen.
   setsid nice -n "${STVT_PLAYER_NICE:-10}" bash -c "tail -c $bytes -F '$F' | \
     ffmpeg -hide_banner -loglevel warning -fflags nobuffer+flush_packets \
       -flags low_delay -probesize 3M -analyzeduration 3M -err_detect ignore_err \
@@ -69,7 +75,9 @@ launch(){
     mpv - --vo=${STVT_MPV_VO:-gpu} --hwdec=no --cache=yes --cache-secs=30 --demuxer-max-bytes=200MiB \
       --demuxer-readahead-secs=20 --cache-pause=no --cache-pause-initial=no \
       --profile=fast --scale=bilinear --cscale=bilinear --dither=no --deinterlace=no \
-      --alang=${STVT_ALANG:-eng,en} --ao=pipewire \
+      --alang=${STVT_ALANG:-eng,en} \
+      --ao=alsa --audio-device='${STVT_AUDIO_DEV:-alsa/hdmi:CARD=vc4hdmi0,DEV=0}' \
+      --fs \
       --title='STVT Live (prog $PROG)' --force-seekable=no \
       --msg-level=all=status" >> "$MPVLOG" 2>&1 < /dev/null &
   log "launched player prog=$PROG tail=${BACKMB}MB"
