@@ -66,6 +66,19 @@ WHEEL_UP   run /bin/sh -c "echo up > $FIFO"
 WHEEL_DOWN run /bin/sh -c "echo down > $FIFO"
 q          run /bin/sh -c "echo quit > $FIFO"
 EOF
+# Single-instance guard (same pattern as stvt_run.sh). Three stacked surfer
+# instances were found fighting over the screen on 2026-06-13 — each
+# restart's TERM failed to kill the old one (a surfer blocked opening its
+# FIFO ignores TERM until a writer appears), and their watchdogs kept
+# killing each other's players, which the user saw as random freezes.
+LOCKF="/tmp/stvt_surf.lock"
+exec 8>"$LOCKF" || { echo "cannot open lock $LOCKF" >&2; exit 3; }
+if ! flock -n 8; then
+  echo "stvt_surf.sh is already running (lock $LOCKF held). Refusing a 2nd instance." >&2
+  echo "Stop it first:  kill -9 \$(pgrep -f '^bash [^ ]*stvt_surf'); pkill -x mpv" >&2
+  exit 3
+fi
+
 rm -f "$FIFO"; mkfifo "$FIFO"
 
 CHAIN_PG=""; FEED_PG=""; MPV_PG=""; BR_PG=""; CUR_RF=""
@@ -86,6 +99,32 @@ ensure_chain() {  # $1 = rf ; (re)tune only if the RF actually changed
 stop_player() {
   for pg in "$MPV_PG" "$FEED_PG" "$BR_PG"; do [ -n "$pg" ] && kill -- -"$pg" 2>/dev/null; done
   MPV_PG=""; FEED_PG=""; BR_PG=""
+  # Belt-and-suspenders: a previous session's player can survive its cleanup
+  # (observed 2026-06-13: an orphaned frozen mpv sat on screen over the live
+  # one, both fighting for the IPC socket). The surfer owns the screen —
+  # sweep ANY leftover player-pipeline parts, not just our own PGIDs.
+  kill $(pgrep -x mpv) 2>/dev/null
+  kill $(pgrep -x ffmpeg) 2>/dev/null
+  kill $(pgrep -f '^tail .*live\.ts') 2>/dev/null
+  sleep 0.5
+  # TERM stays PENDING on a stopped/hard-hung process — KILL the survivors
+  # (a SIGSTOPped mpv survived the sweep in testing).
+  kill -9 $(pgrep -x mpv) $(pgrep -x ffmpeg) 2>/dev/null
+  sleep 0.2
+}
+
+# Current playback clock via mpv's IPC socket; empty on any failure.
+mpv_timepos() {
+  python3 - "$SOCK" <<'PY' 2>/dev/null
+import socket, json, sys
+try:
+    s = socket.socket(socket.AF_UNIX); s.settimeout(1); s.connect(sys.argv[1])
+    s.sendall(b'{"command":["get_property","time-pos"]}\n')
+    d = json.loads(s.recv(4096).decode().splitlines()[0]).get("data")
+    print("" if d is None else f"{d:.2f}")
+except Exception:
+    pass
+PY
 }
 
 start_player() {  # $1 = program
@@ -179,11 +218,31 @@ while :; do
     IDLE_TICKS=0
     continue
   fi
-  # truly idle — watch the player (cheap pgrep every ~2s)
+  # truly idle — watch the player every ~2s: dead OR frozen both relaunch.
+  # Frozen = mpv alive but its playback clock stuck (observed 2026-06-13:
+  # a stalled player sat on the last frame indefinitely; death-only
+  # supervision never fired). 5 consecutive identical clocks ≈ 9s frozen.
   IDLE_TICKS=$(( IDLE_TICKS + 1 ))
-  if [ $(( IDLE_TICKS % 4 )) -eq 0 ] && ! pgrep -x mpv >/dev/null; then
-    echo "$(date +%T.%2N) player died — relaunching [$(( IDX + 1 ))/$N]"
-    tune "$IDX"
-    TUNED_IDX=$IDX
+  if [ $(( IDLE_TICKS % 4 )) -eq 0 ]; then
+    if ! pgrep -x mpv >/dev/null; then
+      echo "$(date +%T.%2N) player died — relaunching [$(( IDX + 1 ))/$N]"
+      tune "$IDX"; TUNED_IDX=$IDX; FROZEN=0; LAST_TP=""
+    else
+      tp=$(mpv_timepos)
+      # Empty tp with mpv ALIVE = the player exists but its IPC won't answer
+      # (hard hang / SIGSTOP) — that IS a freeze, count it. Only an
+      # ADVANCING clock resets the counter.
+      if [ -z "$tp" ] || [ "$tp" = "${LAST_TP:-}" ]; then
+        FROZEN=$(( ${FROZEN:-0} + 1 ))
+        if [ "$FROZEN" -ge 5 ]; then
+          echo "$(date +%T.%2N) player FROZEN (${tp:-ipc unresponsive}) — relaunching [$(( IDX + 1 ))/$N]"
+          tune "$IDX"; TUNED_IDX=$IDX; FROZEN=0; LAST_TP=""
+          continue
+        fi
+      else
+        FROZEN=0
+      fi
+      LAST_TP="$tp"
+    fi
   fi
 done
