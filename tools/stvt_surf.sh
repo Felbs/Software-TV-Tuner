@@ -30,8 +30,13 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 #   export STVT_SOAPY_ARGS=driver=remote,remote=127.0.0.1:55132,remote:driver=sdrplay
 #   export STVT_STREAM_ARGS=remote:prot=tcp PULSE_SERVER=unix:/mnt/wslg/PulseServer
 #   export STVT_MPV_VO=wlshm LIBGL_ALWAYS_SOFTWARE=1
-export STVT_IFGR=59 STVT_RFGAIN_SEL=5 STVT_ANTENNA="Antenna A"
+# Pi 5 chain config (2026-06-13) — same trio as stvt_run.sh: fused front-end +
+# int16 NEON eq + 8MB GR buffers + FPLL fold = 1.21x real-time. IFGR=50 is the
+# DVR-validated gain (59 was the Ryzen-era value).
+export STVT_IFGR="${STVT_IFGR:-50}" STVT_RFGAIN_SEL="${STVT_RFGAIN_SEL:-5}" STVT_ANTENNA="${STVT_ANTENNA:-Antenna A}"
 export STVT_RS=stock STVT_VITERBI=hard STVT_EQ=long STVT_SPS=1.1 STVT_RRC_SYMS=4
+export STVT_RXF_FUSED="${STVT_RXF_FUSED:-1}" STVT_EQ_S16="${STVT_EQ_S16:-1}"
+export STVT_MIN_BUF_BYTES="${STVT_MIN_BUF_BYTES:-8388608}" STVT_FPLL_FOLD="${STVT_FPLL_FOLD:-1}"
 pactl unload-module module-suspend-on-idle 2>/dev/null || true   # keep audio alive
 
 # --- channel list (rf|program|virtual|callsign), sorted by virtual channel ---
@@ -70,7 +75,7 @@ ensure_chain() {  # $1 = rf ; (re)tune only if the RF actually changed
   fi
   [ -n "$CHAIN_PG" ] && kill -- -"$CHAIN_PG" 2>/dev/null
   sleep 3; rm -f "$F"
-  setsid bash -c "exec python3 '$HERE/tv_live.py' --rf $1 > '$HERE/data/tv_live/tv_tuner.tv_live.log' 2>&1" </dev/null >/dev/null 2>&1 &
+  setsid bash -c "exec python3 '$HERE/tv_live.py' --rf $1 --rotate-gb ${STVT_ROTATE_GB:-16} > '$HERE/data/tv_live/tv_tuner.tv_live.log' 2>&1" </dev/null >/dev/null 2>&1 &
   CHAIN_PG=$!; CUR_RF="$1"
   for i in $(seq 1 25); do [ "$(stat -c%s "$F" 2>/dev/null || echo 0)" -gt 40000000 ] && break; sleep 1; done
 }
@@ -85,7 +90,9 @@ start_player() {  # $1 = program
   setsid bash -c "tail -s 0.1 -c 20000000 -F '$F' | ffmpeg -hide_banner -loglevel error -i pipe:0 -map 0:p:$p -c copy -f mpegts '$CCFEED'" </dev/null >/dev/null 2>&1 &
   FEED_PG=$!
   rm -f "$SOCK"
-  setsid bash -c "tail -c 20000000 -F '$F' | ffmpeg -hide_banner -loglevel warning -err_detect ignore_err -i - -map 0:p:$p -c copy -flush_packets 1 -f mpegts - | mpv - --input-ipc-server='$SOCK' --input-conf='$ICONF' --vo=${STVT_MPV_VO:-gpu} --hwdec=no --cache=yes --cache-secs=30 --demuxer-readahead-secs=20 --cache-pause=no --cache-pause-initial=no --force-seekable=no --osd-align-x=center --osd-align-y=bottom --osd-font-size=42 --osd-border-size=2 --title='STVT Surf'" </dev/null >/tmp/stvt_surf_mpv.log 2>&1 &
+  # mpv gets the Pi tune (fast profile, cheap scalers, no deint, ALSA-direct
+  # HDMI audio, windowed autofit) + nice +10 so the chain wins the CPU.
+  setsid nice -n "${STVT_PLAYER_NICE:-10}" bash -c "tail -c 20000000 -F '$F' | ffmpeg -hide_banner -loglevel warning -err_detect ignore_err -f mpegts -i - -map 0:p:$p -c copy -flush_packets 1 -f mpegts - | mpv - --input-ipc-server='$SOCK' --input-conf='$ICONF' --vo=${STVT_MPV_VO:-gpu} --hwdec=no --cache=yes --cache-secs=30 --demuxer-readahead-secs=20 --cache-pause=no --cache-pause-initial=no --force-seekable=no --profile=fast --scale=bilinear --cscale=bilinear --dither=no --deinterlace=no --ao=alsa --audio-device='${STVT_AUDIO_DEV:-alsa/hdmi:CARD=vc4hdmi0,DEV=0}' --autofit-larger='${STVT_FIT:-85%x85%}' --geometry=50%:50% --osd-align-x=center --osd-align-y=bottom --osd-font-size=42 --osd-border-size=2 --title='STVT Surf'" </dev/null >/tmp/stvt_surf_mpv.log 2>&1 &
   MPV_PG=$!
   for i in $(seq 1 30); do [ -S "$SOCK" ] && break; sleep 0.3; done
   setsid python3 "$HERE/stvt_cc_osd.py" --feed "$CCFEED" --channel 1 --sock "$SOCK" --delay "$CCDELAY" </dev/null >/dev/null 2>&1 &

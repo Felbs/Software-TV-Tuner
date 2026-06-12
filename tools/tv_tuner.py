@@ -278,17 +278,25 @@ def print_channel_list() -> list[dict]:
 # fewer channels than the picker can actually tune. Keep this in sync
 # with CHAIN_DEFAULTS in stvt_channel_step.py.
 CHAIN_DEFAULTS = {
-    "STVT_EQ":         "long",
-    "STVT_RS":         "stock",
-    "STVT_VITERBI":    "soft",
-    "STVT_SPS":        "1.1",
-    "STVT_RRC_SYMS":   "8",
-    "STVT_TEISCRUB":   "1",
-    "STVT_EQ_LKG":     "1",
-    "STVT_EQ_LKG_RMS": "1.0",
-    "STVT_IFGR":       "45",
-    "STVT_RFGAIN_SEL": "3",
-    "STVT_ANTENNA":    "Antenna A",
+    # Pi 5 validated chain (2026-06-13, matches stvt_run.sh): hard viterbi +
+    # 4-sym RRC + fused front-end + int16 NEON eq + 8MB GR buffers + FPLL
+    # fold = 1.21x real-time, bit-identical decode. The old soft-viterbi /
+    # RRC=8 / IFGR=45 set predates the Pi port and under-ran real-time,
+    # which made scan locks flaky. setdefault semantics: any env you export
+    # still wins.
+    "STVT_EQ":            "long",
+    "STVT_RS":            "stock",
+    "STVT_VITERBI":       "hard",
+    "STVT_SPS":           "1.1",
+    "STVT_RRC_SYMS":      "4",
+    "STVT_TEISCRUB":      "1",
+    "STVT_RXF_FUSED":     "1",
+    "STVT_EQ_S16":        "1",
+    "STVT_MIN_BUF_BYTES": "8388608",
+    "STVT_FPLL_FOLD":     "1",
+    "STVT_IFGR":          "50",
+    "STVT_RFGAIN_SEL":    "5",
+    "STVT_ANTENNA":       "Antenna A",
 }
 
 
@@ -734,13 +742,22 @@ def scan_one_rf(rf: int, dwell_sec: float = 12.0,
         # off legitimately-locking channels (RF 7 WJLA, RF 24, RF 27).
         if not wait_for_live_ts(timeout_sec=25.0):
             return {"rf": rf, "lock": False, "reason": "no live.ts growth"}
-        # Wait for the equalizer to converge.
+        # Wait for the equalizer to converge — POLL with early exit instead
+        # of sitting out the full dwell. ATSC mandates the PSIP VCT repeat
+        # every <=400ms, so once PAT flows, ~2s more of TS already carries
+        # the channel table. Saves 5-10s on every locking channel (the Pi
+        # scan's dominant cost was this fixed dwell).
         deadline = time.time() + dwell_sec
+        pat = 0
         while time.time() < deadline:
             if proc.poll() is not None:
                 return {"rf": rf, "lock": False, "reason": "tv_live died"}
-            time.sleep(0.5)
-        pat = measure_convergence()
+            time.sleep(1.0)
+            pat = measure_convergence()
+            if pat >= 5:
+                time.sleep(2.0)            # let PSIP/EIT depth accumulate
+                pat = measure_convergence()
+                break
         if pat < 5:
             return {"rf": rf, "lock": False, "pat_count": pat,
                     "reason": "weak signal / no lock"}

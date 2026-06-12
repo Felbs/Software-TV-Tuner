@@ -35,18 +35,22 @@ if sys.platform == "win32":
     SUBPROC_KW["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
 
 CHAIN_DEFAULTS = {
-    "STVT_EQ":          "long",
-    "STVT_RS":          "stock",
-    "STVT_VITERBI":     "soft",
-    "STVT_SPS":         "1.1",
-    "STVT_RRC_SYMS":    "8",
-    "STVT_TEISCRUB":    "1",
-    "STVT_EQ_LKG":      "1",
-    "STVT_EQ_LKG_RMS":  "1.0",
-    "STVT_IFGR":        "45",
-    "STVT_RFGAIN_SEL":  "3",
-    "STVT_ANTENNA":     "Antenna A",
-    "STVT_SUB_MARGIN":  "10",
+    # Keep in sync with tv_tuner.py CHAIN_DEFAULTS (Pi 5 validated set,
+    # 2026-06-13 — hard viterbi, fused+S16+8MB buffers+FPLL fold, IFGR 50).
+    "STVT_EQ":            "long",
+    "STVT_RS":            "stock",
+    "STVT_VITERBI":       "hard",
+    "STVT_SPS":           "1.1",
+    "STVT_RRC_SYMS":      "4",
+    "STVT_TEISCRUB":      "1",
+    "STVT_RXF_FUSED":     "1",
+    "STVT_EQ_S16":        "1",
+    "STVT_MIN_BUF_BYTES": "8388608",
+    "STVT_FPLL_FOLD":     "1",
+    "STVT_IFGR":          "50",
+    "STVT_RFGAIN_SEL":    "5",
+    "STVT_ANTENNA":       "Antenna A",
+    "STVT_SUB_MARGIN":    "10",
 }
 
 
