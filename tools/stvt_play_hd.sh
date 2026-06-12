@@ -76,6 +76,7 @@ launch(){
     mpv - --vo=${STVT_MPV_VO:-gpu} --hwdec=no --cache=yes --cache-secs=30 --demuxer-max-bytes=200MiB \
       --demuxer-readahead-secs=20 --cache-pause=no --cache-pause-initial=no \
       --profile=fast --scale=bilinear --cscale=bilinear --dither=no --deinterlace=no \
+      --video-sync=${STVT_MPV_SYNC:-audio} \
       --alang=${STVT_ALANG:-eng,en} \
       --ao=alsa --audio-device='${STVT_AUDIO_DEV:-alsa/hdmi:CARD=vc4hdmi0,DEV=0}' \
       --autofit-larger='${STVT_FIT:-85%x85%}' --geometry=50%:50% \
