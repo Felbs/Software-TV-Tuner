@@ -112,7 +112,10 @@ print(len(s))' 2>/dev/null || echo 0
 # an exclusive lock; a second invocation refuses rather than dueling.
 LOCK="/tmp/stvt_run.lock"
 exec 9>"$LOCK" || { echo "cannot open lock $LOCK" >&2; exit 3; }
-if ! flock -n 9; then
+# -w 15: a freshly-killed instance releases its lock asynchronously
+# (measured: up to ~10s) — wait briefly instead of refusing a restart;
+# a genuinely-running duplicate still gets refused after the wait.
+if ! flock -w 15 9; then
   echo "stvt_run.sh is already running (lock $LOCK held). Refusing a 2nd instance." >&2
   echo "Stop the existing one first: pkill -f stvt_run.sh" >&2
   exit 3

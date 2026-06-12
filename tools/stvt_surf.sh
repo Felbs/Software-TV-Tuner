@@ -73,7 +73,8 @@ EOF
 # killing each other's players, which the user saw as random freezes.
 LOCKF="/tmp/stvt_surf.lock"
 exec 8>"$LOCKF" || { echo "cannot open lock $LOCKF" >&2; exit 3; }
-if ! flock -n 8; then
+# -w 15: see stvt_run.sh — tolerate a dying instance's slow lock release.
+if ! flock -w 15 8; then
   echo "stvt_surf.sh is already running (lock $LOCKF held). Refusing a 2nd instance." >&2
   echo "Stop it first:  kill -9 \$(pgrep -f '^bash [^ ]*stvt_surf'); pkill -x mpv" >&2
   exit 3
