@@ -90,7 +90,12 @@ stop_player() {
 
 start_player() {  # $1 = program
   local p="$1"
-  setsid bash -c "tail -s 0.1 -c 20000000 -F '$F' | ffmpeg -hide_banner -loglevel error -i pipe:0 -map 0:p:$p -c copy -f mpegts '$CCFEED'" </dev/null >/dev/null 2>&1 &
+  # -y is LOAD-BEARING: without it, ffmpeg's "overwrite?" prompt reads its
+  # answer from stdin — which here is the TS pipe — and dies, so the caption
+  # feed silently never regenerated after the first tune (captions dead from
+  # the second channel on; found 2026-06-13 when the feed file was stale).
+  rm -f "$CCFEED"
+  setsid bash -c "tail -s 0.1 -c 20000000 -F '$F' | ffmpeg -hide_banner -loglevel error -y -i pipe:0 -map 0:p:$p -c copy -f mpegts '$CCFEED'" </dev/null >/dev/null 2>&1 &
   FEED_PG=$!
   rm -f "$SOCK"
   # mpv gets the Pi tune (fast profile, cheap scalers, no deint, ALSA-direct
