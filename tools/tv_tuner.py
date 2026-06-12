@@ -442,6 +442,47 @@ def measure_convergence(min_size: int = 5_000_000) -> int:
     return pat_count
 
 
+def measure_tei_rate(min_size: int = 5_000_000) -> float | None:
+    """Decode-quality metric for scan results: % of packets in the last
+    ~5MB of live.ts with the transport_error_indicator bit set (packets
+    Reed-Solomon could not correct). A clean channel measures ~0%; a
+    marginal one a few %; >10% looks decoded but plays badly. Stored in
+    scan.json so the picker can rank channels by HEALTH, not just lock
+    (lock alone is a poor proxy — DVR A/B showed two locked channels can
+    differ 99.99% vs 65% in usable segments). None if unreadable."""
+    try:
+        size = LIVE_TS.stat().st_size
+    except FileNotFoundError:
+        return None
+    read = min(min_size, size)
+    if read < 188 * 100:
+        return None
+    with open(LIVE_TS, "rb") as f:
+        f.seek(size - read)
+        buf = f.read(read)
+    start = 0
+    for i in range(min(len(buf) - 188 - 1, 10000)):
+        if buf[i] == 0x47 and buf[i + 188] == 0x47:
+            start = i
+            break
+    buf = buf[start:]
+    n = len(buf) // 188
+    if n == 0:
+        return None
+    tei = 0
+    total = 0
+    for i in range(n):
+        pkt = buf[i * 188 : (i + 1) * 188]
+        if pkt[0] != 0x47:
+            continue
+        total += 1
+        if pkt[1] & 0x80:
+            tei += 1
+    if total == 0:
+        return None
+    return round(100.0 * tei / total, 2)
+
+
 # ── Channel allocations ──────────────────────────────────────────
 # North American ATSC 1.0:  RF 2-6 (54-88 MHz), 7-13 (174-216 MHz),
 # 14-36 (470-608 MHz). 37-51 was reclaimed for 5G band 71 in the 2017
@@ -755,7 +796,7 @@ def scan_one_rf(rf: int, dwell_sec: float = 12.0,
             time.sleep(1.0)
             pat = measure_convergence()
             if pat >= 5:
-                time.sleep(2.0)            # let PSIP/EIT depth accumulate
+                time.sleep(3.0)            # let PSIP/EIT depth accumulate
                 pat = measure_convergence()
                 break
         if pat < 5:
@@ -767,6 +808,7 @@ def scan_one_rf(rf: int, dwell_sec: float = 12.0,
             "freq_mhz": rf_to_freq_mhz(rf),
             "lock": True,
             "pat_count": pat,
+            "tei_pct": measure_tei_rate(),
             "programs": progs,
         }
         # ATSC PSIP: virtual-channel labels + the next ~12 hours of EIT
@@ -802,7 +844,15 @@ def scan_one_rf_with_retry(rf: int, dwell_sec: float = 12.0,
     """Try scan_one_rf up to (1 + retries) times. Returns the first
     successful lock, otherwise the last failed result. Used for
     marginal-signal channels where the equalizer's probabilistic cold
-    start often misses the first attempt."""
+    start often misses the first attempt.
+
+    Retry POLICY (2026-06-13): retries exist for the equalizer's
+    probabilistic cold start — i.e. the chain segment-locked (live.ts
+    grew) but PAT never appeared ("weak signal / no lock"). When the
+    chain produced NO transport stream at all in the full 25s window
+    ("no live.ts growth"), there is no segment lock to be unlucky
+    about — that outcome is stable, and retrying it just burns ~30s per
+    attempt (measured: 2 dead channels cost 3 minutes of a 5:45 scan)."""
     last = None
     for attempt in range(retries + 1):
         res = scan_one_rf(rf, dwell_sec=dwell_sec, viterbi=viterbi,
@@ -811,6 +861,8 @@ def scan_one_rf_with_retry(rf: int, dwell_sec: float = 12.0,
         if res.get("lock"):
             res["lock_attempt"] = attempt + 1
             return res
+        if res.get("reason") == "no live.ts growth":
+            break  # stable outcome — see docstring
     return last or {"rf": rf, "lock": False, "reason": "all retries failed"}
 
 
@@ -857,7 +909,12 @@ def run_power_sweep(freqs_hz: list[int], log_fh=None,
 
 
 def run_scan(region: dict | None = None,
-             dwell_sec: float = 8.0,
+             # 20s dwell, NOT 8: since the dwell early-exits ~3s after PAT
+             # appears, a long ceiling costs nothing on locking channels but
+             # gives slow converging carriers (VHF especially) a real chance.
+             # Measured 2026-06-13: RF7/RF9 (strong VHF pilots, DVR-verified
+             # decodable) failed all 3 attempts at 8s dwell.
+             dwell_sec: float = 20.0,
              save: bool = True,
              include_weak: bool = False,
              # Thresholds tuned by tools/scan_lab/harness.py for max-margin F1=1.0
@@ -1033,11 +1090,11 @@ def run_scan(region: dict | None = None,
         # Phase 2: full lock test on hot ATSC channels only.
         decodable = region.get("decodable") in (True, "atsc_only")
         if decodable and hot_atsc:
-            # With retries=2, worst case per channel is 3 attempts.
-            # In practice strong locks finish in ~dwell_sec+8s and only
-            # marginal ones pay for retries — budget 1.6x for a realistic
-            # ceiling without scaring the user.
-            est = int(len(hot_atsc) * (dwell_sec + 8) * 1.6)
+            # Realistic budget: locking channels early-exit the dwell
+            # (~lock+3s+overhead ≈ 25s); 'no growth' channels pay one 29s
+            # attempt (no longer retried); only the rare segment-locked-
+            # but-never-converged case pays the full retry ladder.
+            est = int(len(hot_atsc) * 30)
             print(f"[scan] phase 2 — full lock test on {len(hot_atsc)} "
                   f"ATSC 1.0 carrier(s) (~{est}s, marginal channels may "
                   f"retry up to 3x)...")
