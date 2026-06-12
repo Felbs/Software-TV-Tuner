@@ -79,6 +79,7 @@ launch(){
       --alang=${STVT_ALANG:-eng,en} \
       --ao=alsa --audio-device='${STVT_AUDIO_DEV:-alsa/hdmi:CARD=vc4hdmi0,DEV=0}' \
       --autofit-larger='${STVT_FIT:-85%x85%}' --geometry=50%:50% \
+      --mute=${STVT_MPV_MUTE:-no} \
       --title='STVT Live (prog $PROG)' --force-seekable=no \
       --msg-level=all=status" >> "$MPVLOG" 2>&1 < /dev/null &
   log "launched player prog=$PROG tail=${BACKMB}MB"
