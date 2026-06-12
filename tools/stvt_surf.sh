@@ -141,6 +141,34 @@ except Exception:
 PY
 }
 
+
+# Deinterlace mode (STVT_DEINT) — NBC & friends broadcast 1080i; without
+# deinterlacing, moving edges show combing ("wavy lines on outlines",
+# user-reported). Modes, measured on the Pi 5 (chain leaves ~1.2 cores):
+#   no    : combing visible on 1080i motion (the old Pi 4 default)
+#   frame : yadif half-rate -> 30fps progressive. Combing gone at ~half the
+#           cost of full deint; the Pi 5 default.
+#   field : full 60fps deint (--deinterlace=yes). Smoothest motion but
+#           measured 1466 dropped frames/66s + player stalls on the Pi -- too heavy.
+# deint=interlaced applies the filter ONLY to frames flagged interlaced, so
+# progressive 720p channels (Fox) pass through untouched.
+case "${STVT_DEINT:-lowdeint}" in
+  # low: decode 1080i at HALF resolution (960x540). ~1/4 the decode cost and
+  # interlace combing collapses into sub-pixel blur — no filter needed at
+  # all. The soft trade is minor on a sub-1080 panel. The only mode measured
+  # to keep up on the Pi 5 alongside the live chain.
+  low)       DEINT_FLAG="--vd-lavc-o=lowres=1";;
+  # low+yadif: deinterlace AT the halved resolution (~1/4 the filter cost
+  # that failed at 1080) — removes residual half-res combing on motion.
+  lowdeint)  DEINT_FLAG="--vd-lavc-o=lowres=1 --vf=lavfi=[yadif=mode=send_frame:deint=interlaced]";;
+  field|yes) DEINT_FLAG="--deinterlace=yes";;
+  # lavfi wrapper, NOT mpv's own yadif: mpv runs its filter on the single
+  # video thread (measured: 2944 drops + video 61s behind audio), while the
+  # lavfi graph slice-threads yadif across all cores.
+  frame)     DEINT_FLAG="--vf=lavfi=[yadif=mode=send_frame:deint=interlaced]";;
+  *)         DEINT_FLAG="--deinterlace=no";;
+esac
+
 start_player() {  # $1 = program
   local p="$1"
   # -y is LOAD-BEARING: without it, ffmpeg's "overwrite?" prompt reads its
@@ -153,7 +181,7 @@ start_player() {  # $1 = program
   rm -f "$SOCK"
   # mpv gets the Pi tune (fast profile, cheap scalers, no deint, ALSA-direct
   # HDMI audio, windowed autofit) + nice +10 so the chain wins the CPU.
-  setsid nice -n "${STVT_PLAYER_NICE:-10}" bash -c "tail -c 20000000 -F '$F' | ffmpeg -hide_banner -loglevel warning -err_detect ignore_err -f mpegts -i - -map 0:p:$p -c copy -flush_packets 1 -f mpegts - | mpv - --input-ipc-server='$SOCK' --input-conf='$ICONF' --vo=${STVT_MPV_VO:-gpu} --hwdec=no --cache=yes --cache-secs=30 --demuxer-readahead-secs=20 --cache-pause=no --cache-pause-initial=no --force-seekable=no --profile=fast --scale=bilinear --cscale=bilinear --dither=no --deinterlace=no --ao=alsa --audio-device='${STVT_AUDIO_DEV:-alsa/hdmi:CARD=vc4hdmi0,DEV=0}' --autofit-larger='${STVT_FIT:-85%x85%}' --geometry=50%:50% --osd-align-x=center --osd-align-y=bottom --osd-font-size=42 --osd-border-size=2 --title='STVT Surf'" </dev/null >/tmp/stvt_surf_mpv.log 2>&1 &
+  setsid nice -n "${STVT_PLAYER_NICE:-10}" bash -c "tail -c 20000000 -F '$F' | ffmpeg -hide_banner -loglevel warning -err_detect ignore_err -f mpegts -i - -map 0:p:$p -c copy -flush_packets 1 -f mpegts - | mpv - --input-ipc-server='$SOCK' --input-conf='$ICONF' --vo=${STVT_MPV_VO:-gpu} --hwdec=no --cache=yes --cache-secs=30 --demuxer-readahead-secs=20 --cache-pause=no --cache-pause-initial=no --force-seekable=no --profile=fast --scale=bilinear --cscale=bilinear --dither=no $DEINT_FLAG --ao=alsa --audio-device='${STVT_AUDIO_DEV:-alsa/hdmi:CARD=vc4hdmi0,DEV=0}' --autofit-larger='${STVT_FIT:-85%x85%}' --geometry=50%:50% --osd-align-x=center --osd-align-y=bottom --osd-font-size=42 --osd-border-size=2 --title='STVT Surf'" </dev/null >/tmp/stvt_surf_mpv.log 2>&1 &
   MPV_PG=$!
   for i in $(seq 1 30); do [ -S "$SOCK" ] && break; sleep 0.3; done
   setsid python3 "$HERE/stvt_cc_osd.py" --feed "$CCFEED" --channel 1 --sock "$SOCK" --delay "$CCDELAY" </dev/null >/dev/null 2>&1 &

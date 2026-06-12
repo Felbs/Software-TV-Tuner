@@ -225,6 +225,7 @@ experimenting):
 | `STVT_PLAYER_NICE` | `10` | Player priority handicap so the decode chain always wins the CPU. |
 | `STVT_ROTATE_RELAUNCH` | `1` | Deterministic player relaunch when `live.ts` rotates (`0` = ride through). |
 | `STVT_MPV_VO` | `gpu` | mpv video output driver. |
+| `STVT_DEINT` | `lowdeint` | 1080i deinterlacing. `lowdeint` (default) = half-res decode + yadif: no combing, plays clean. `low` = half-res only (faintest residual comb). `no` = full-res but wavy lines on 1080i motion. `frame`/`field` = full-res deint — measured too heavy for the Pi 5 (thousands of dropped frames). Progressive 720p channels are never touched. |
 
 ## Configure for your SDR + antenna
 

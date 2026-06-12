@@ -35,6 +35,34 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
 log(){ echo "$(printf '%(%H:%M:%S)T' -1) $*" >> "$SUPLOG"; }
 
+
+# Deinterlace mode (STVT_DEINT) — NBC & friends broadcast 1080i; without
+# deinterlacing, moving edges show combing ("wavy lines on outlines",
+# user-reported). Modes, measured on the Pi 5 (chain leaves ~1.2 cores):
+#   no    : combing visible on 1080i motion (the old Pi 4 default)
+#   frame : yadif half-rate -> 30fps progressive. Combing gone at ~half the
+#           cost of full deint; the Pi 5 default.
+#   field : full 60fps deint (--deinterlace=yes). Smoothest motion but
+#           measured 1466 dropped frames/66s + player stalls on the Pi -- too heavy.
+# deint=interlaced applies the filter ONLY to frames flagged interlaced, so
+# progressive 720p channels (Fox) pass through untouched.
+case "${STVT_DEINT:-lowdeint}" in
+  # low: decode 1080i at HALF resolution (960x540). ~1/4 the decode cost and
+  # interlace combing collapses into sub-pixel blur — no filter needed at
+  # all. The soft trade is minor on a sub-1080 panel. The only mode measured
+  # to keep up on the Pi 5 alongside the live chain.
+  low)       DEINT_FLAG="--vd-lavc-o=lowres=1";;
+  # low+yadif: deinterlace AT the halved resolution (~1/4 the filter cost
+  # that failed at 1080) — removes residual half-res combing on motion.
+  lowdeint)  DEINT_FLAG="--vd-lavc-o=lowres=1 --vf=lavfi=[yadif=mode=send_frame:deint=interlaced]";;
+  field|yes) DEINT_FLAG="--deinterlace=yes";;
+  # lavfi wrapper, NOT mpv's own yadif: mpv runs its filter on the single
+  # video thread (measured: 2944 drops + video 61s behind audio), while the
+  # lavfi graph slice-threads yadif across all cores.
+  frame)     DEINT_FLAG="--vf=lavfi=[yadif=mode=send_frame:deint=interlaced]";;
+  *)         DEINT_FLAG="--deinterlace=no";;
+esac
+
 launch(){
   # last-N-bytes form (tail -c N) — NOT absolute offset (tail -c +OFF), which
   # stalls seeking into a multi-GB growing file.
@@ -75,7 +103,7 @@ launch(){
       -c copy -flush_packets 1 -f mpegts - | \
     mpv - --vo=${STVT_MPV_VO:-gpu} --hwdec=no --cache=yes --cache-secs=30 --demuxer-max-bytes=200MiB \
       --demuxer-readahead-secs=20 --cache-pause=no --cache-pause-initial=no \
-      --profile=fast --scale=bilinear --cscale=bilinear --dither=no --deinterlace=no \
+      --profile=fast --scale=bilinear --cscale=bilinear --dither=no $DEINT_FLAG \
       --video-sync=${STVT_MPV_SYNC:-audio} \
       --alang=${STVT_ALANG:-eng,en} \
       --ao=alsa --audio-device='${STVT_AUDIO_DEV:-alsa/hdmi:CARD=vc4hdmi0,DEV=0}' \
