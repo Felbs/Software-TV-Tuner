@@ -63,11 +63,15 @@ PY = sys.executable
 FFMPEG = r"C:\ffmpeg\bin\ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
 FFPROBE = r"C:\ffmpeg\bin\ffprobe.exe" if sys.platform == "win32" else "ffprobe"
 
-# Winning chain env from quality tuner
+# Winning chain env from quality tuner. x86 values: hard viterbi ported from
+# the Pi (bare/winning config here too), but keep this box's gain (IFGR=45 /
+# RFGAIN=3), quality RRC=8, and gear-shift lock-keeper — NOT the Pi's
+# fused/S16/8MB-buffer/FPLL-fold speed env. This dict OVERRIDES os.environ for
+# the spawned chain, so it carries the full config itself.
 DEFAULT_ENV = {
     "STVT_EQ":          "long",
     "STVT_RS":          "stock",
-    "STVT_VITERBI":     "soft",
+    "STVT_VITERBI":     "hard",
     "STVT_SPS":         "1.1",
     "STVT_RRC_SYMS":    "8",
     "STVT_TEISCRUB":    "1",
@@ -124,8 +128,12 @@ def kill_chain():
                 except (ValueError, IndexError):
                     pass
     else:
-        subprocess.run(["pkill", "-f", "tv_live.py"], capture_output=True)
-        subprocess.run(["pkill", "-f", "ffmpeg"], capture_output=True)
+        # Anchored / exact-name patterns ONLY: a bare `pkill -f ffmpeg`
+        # matches ANY process whose command text mentions ffmpeg — it
+        # killed this script's own parent shell during testing.
+        subprocess.run(["pkill", "-f", r"^[^ ]*python3 (-u )?[^ ]*tv_live\.py"],
+                       capture_output=True)
+        subprocess.run(["pkill", "-x", "ffmpeg"], capture_output=True)
         subprocess.run(["pkill", "-x", "vlc"], capture_output=True)
 
 

@@ -35,11 +35,58 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
 log(){ echo "$(printf '%(%H:%M:%S)T' -1) $*" >> "$SUPLOG"; }
 
+
+# Deinterlace mode (STVT_DEINT) — NBC & friends broadcast 1080i; without
+# deinterlacing, moving edges show combing ("wavy lines on outlines",
+# user-reported). x86 default is `field` (full 60fps deint): this box has the
+# headroom the Pi never did, so it gets the best picture instead of the Pi's
+# half-res speed trades.
+#   field : full 60fps deint (--deinterlace=yes). Smoothest motion. x86 DEFAULT.
+#   frame : yadif half-rate -> 30fps progressive. Combing gone at ~half cost.
+#   low   : decode 1080i at half resolution (Pi speed trade; combing blurs out).
+#   lowdeint : low + half-res bwdif (the Pi 5 default — too soft for x86).
+#   no    : combing visible on 1080i motion.
+# deint=interlaced applies the filter ONLY to frames flagged interlaced, so
+# progressive 720p channels (Fox) pass through untouched.
+case "${STVT_DEINT:-field}" in
+  # low: decode 1080i at HALF resolution (960x540). ~1/4 the decode cost and
+  # interlace combing collapses into sub-pixel blur — no filter needed at
+  # all. The soft trade is minor on a sub-1080 panel. The only mode measured
+  # to keep up on the Pi 5 alongside the live chain.
+  low)       DEINT_FLAG="--vd-lavc-o=lowres=1";;
+  # low+yadif: deinterlace AT the halved resolution (~1/4 the filter cost
+  # that failed at 1080) — removes residual half-res combing on motion.
+  lowdeint)  DEINT_FLAG="--vd-lavc-o=lowres=1 --vf=lavfi=[bwdif=mode=send_frame:deint=interlaced]";;
+  field|yes) DEINT_FLAG="--deinterlace=yes";;
+  # lavfi wrapper, NOT mpv's own yadif: mpv runs its filter on the single
+  # video thread (measured: 2944 drops + video 61s behind audio), while the
+  # lavfi graph slice-threads yadif across all cores.
+  frame)     DEINT_FLAG="--vf=lavfi=[yadif=mode=send_frame:deint=interlaced]";;
+  *)         DEINT_FLAG="--deinterlace=no";;
+esac
+
 launch(){
   # last-N-bytes form (tail -c N) — NOT absolute offset (tail -c +OFF), which
   # stalls seeking into a multi-GB growing file.
   local bytes=$(( BACKMB*1000000 ))
   : > "$MPVLOG"
+
+  # Resolution-aware deint + window fit (the SD-aware logic ported from the Pi).
+  # On an SD subchannel (e.g. 704x480 4:3 TeleXitos) a 4:3 stream opens as a
+  # tiny window; probe THIS program's height and, for SD (<720), force the
+  # bwdif full-res deint and enlarge the small window to fill the screen at its
+  # true aspect. HD opens at the panel's natural size (x86 default: no autofit
+  # cap — press f for fullscreen; set STVT_FIT to window it).
+  local deint="$DEINT_FLAG" fit=""
+  local vh
+  vh=$(timeout 8 ffprobe -v error -show_entries program=program_id:stream=height \
+        -of compact -i "$F" 2>/dev/null | grep -F "program_id=$PROG|" \
+        | grep -oE 'height=[0-9]+' | head -1 | cut -d= -f2)
+  if [ -n "$vh" ] && [ "$vh" -lt 720 ]; then
+    deint="--vf=lavfi=[bwdif=mode=send_frame:deint=interlaced]"
+    fit="--autofit-larger='${STVT_FIT:-90%x90%}' --autofit-smaller='${STVT_FIT:-90%x90%}'"
+    log "prog $PROG is SD (${vh}p) — full-res decode + enlarge-to-fill"
+  fi
   # -f mpegts on the INPUT is essential: tail -c starts mid-packet, so ffmpeg's
   # format auto-probe reads a partial packet and dies ("Invalid data found"),
   # which looks like a rough-patch hang and triggers an endless relaunch storm
@@ -54,6 +101,12 @@ launch(){
   # The trailing ? makes the higher slots optional (programs with fewer tracks
   # don't error). --alang is the belt-and-suspenders default; press # to switch
   # live; STVT_ALANG=spa to start on Spanish.
+  # x86 player: no nice (this box runs the chain at several x real-time, the
+  # player never starves it), mpv's default high-quality VO/scalers (the Pi's
+  # --profile=fast + cheap scalers were a GPU speed trade x86 doesn't need),
+  # and the session's own audio (pulse/pipewire — no Pi ALSA-direct HDMI).
+  # Keep the ported knobs: --video-sync (STVT_MPV_SYNC), --mute (STVT_MPV_MUTE),
+  # the SD-aware $deint/$fit, and the program-relative audio map.
   setsid bash -c "tail -c $bytes -F '$F' | \
     ffmpeg -hide_banner -loglevel warning -fflags nobuffer+flush_packets \
       -flags low_delay -probesize 3M -analyzeduration 3M -err_detect ignore_err \
@@ -61,7 +114,11 @@ launch(){
       -c copy -flush_packets 1 -f mpegts - | \
     mpv - --vo=${STVT_MPV_VO:-gpu} --hwdec=no --cache=yes --cache-secs=30 --demuxer-max-bytes=200MiB \
       --demuxer-readahead-secs=20 --cache-pause=no --cache-pause-initial=no \
+      $deint \
+      --video-sync=${STVT_MPV_SYNC:-audio} \
       --alang=${STVT_ALANG:-eng,en} \
+      $fit \
+      --mute=${STVT_MPV_MUTE:-no} \
       --title='STVT Live (prog $PROG)' --force-seekable=no \
       --msg-level=all=status" >> "$MPVLOG" 2>&1 < /dev/null &
   log "launched player prog=$PROG tail=${BACKMB}MB"
@@ -113,10 +170,28 @@ relaunch(){
 restarts=0
 relaunch "initial" || exit 1
 last=$(av_pos); stuck=0
+fsz_prev=$(stat -c %s "$F" 2>/dev/null || echo 0)
 while true; do
   sleep 10
-  if ! pgrep -f '[t]v_live.py' >/dev/null; then log "chain DOWN — supervisor exiting"; exit 0; fi
+  if ! pgrep -f '^python3 [^ ]*tv_live\.py' >/dev/null; then log "chain DOWN — supervisor exiting"; exit 0; fi
   if ! pgrep -x mpv >/dev/null; then relaunch "mpv died" || exit 1; last=$(av_pos); stuck=0; continue; fi
+  # Proactive rotation relaunch (STVT_ROTATE_RELAUNCH=0 disables): when the
+  # chain recycles live.ts the size shrinks; tail -F follows the truncation
+  # but drags an MPEG-TS timestamp discontinuity through ffmpeg/mpv — it
+  # usually rides through, but occasionally costs ~1min of dropped frames +
+  # A-V offset and leaves mpv's clock bookkeeping skewed (measured overnight
+  # 2026-06-13). A deterministic relaunch at the rotation instant costs a
+  # ~5s blip and restores a clean clock + full cushion. The 100MB margin
+  # keeps sampling jitter from false-tripping.
+  fsz=$(stat -c %s "$F" 2>/dev/null || echo 0)
+  if [ "${STVT_ROTATE_RELAUNCH:-1}" = 1 ] && [ "$fsz" -lt $((fsz_prev - 100000000)) ]; then
+    log "rotation detected ($((fsz_prev/1000000))MB -> $((fsz/1000000))MB) — proactive relaunch"
+    sleep 3   # let the fresh file accumulate a few MB for ffmpeg's probe
+    relaunch "rotation" || exit 1
+    last=$(av_pos); stuck=0; fsz_prev=$(stat -c %s "$F" 2>/dev/null || echo 0)
+    continue
+  fi
+  fsz_prev=$fsz
   # True freeze = playback POSITION stops advancing (cache=0 while still
   # advancing at the live edge is fine — not a freeze).
   pos=$(av_pos)
