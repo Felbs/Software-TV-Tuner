@@ -23,6 +23,7 @@ PROG="${2:-3}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TS="$HERE/data/tv_live/live.ts"
 CLOG="$HERE/data/tv_live/tv_tuner.tv_live.log"
+mkdir -p "$HERE/data/tv_live"   # fresh checkout: chain dies instantly if its log dir is missing
 RUNLOG="/tmp/stvt_run.log"
 MAX_CHAIN_RESTARTS=30
 COOLDOWN=5
@@ -34,7 +35,13 @@ DROUGHT_STRIKES="${DROUGHT_STRIKES:-3}"  # consecutive high samples (~2s apart) 
 # time), then restart only if it truly hasn't recovered. 1 = old behavior.
 DROUGHT_GRACE_LOOPS="${DROUGHT_GRACE_LOOPS:-2}"
 
-# Lean real-time config (good for modest CPUs; harmless on fast ones).
+# Lean real-time config (good for modest CPUs; harmless on fast ones). x86
+# keeps its own gain (IFGR=59) and does NOT default the Pi's speed env: the
+# fused front-end, int16-NEON equalizer (STVT_EQ_S16, ARM-only), enlarged
+# front-end buffers (STVT_MIN_BUF_BYTES), and the FPLL fold are all "barely-
+# enough-CPU" trades the Pi needed to clear real-time. This box runs the chain
+# at several x real-time, so they're off by default — export any of them to
+# opt in (STVT_FPLL_FOLD=1 once the folded C++ is built + A/B'd).
 export STVT_RS=stock STVT_VITERBI=hard STVT_EQ=long
 export STVT_SPS="${STVT_SPS:-1.1}" STVT_RRC_SYMS="${STVT_RRC_SYMS:-4}" STVT_TEISCRUB="${STVT_TEISCRUB:-0}"
 export STVT_IFGR="${STVT_IFGR:-59}" STVT_RFGAIN_SEL="${STVT_RFGAIN_SEL:-5}" STVT_ANTENNA="${STVT_ANTENNA:-Antenna A}"
@@ -57,15 +64,23 @@ if [ "$CPU_ISOLATE" = 1 ]; then
   TSET_OTHER="taskset -c $ISO_OTHER_CPUS"
 fi
 
-chain_up(){ pgrep -f '[t]v_live.py' >/dev/null; }
-player_up(){ pgrep -f '[s]tvt_play_hd.sh' >/dev/null; }
+# Anchored to the interpreter at argv[0] so a SHELL whose command text merely
+# MENTIONS the script (an editor, a git commit, an assistant running
+# "git add tools/stvt_play_hd.sh") can't false-positive. Measured failure
+# 2026-06-13: a lingering shell containing that text made player_up() true
+# and the player never started. Same pp.sh lesson, now fixed at the source.
+chain_up(){ pgrep -f '^python3 [^ ]*tv_live\.py' >/dev/null; }
+player_up(){ pgrep -f '^bash [^ ]*stvt_play_hd\.sh' >/dev/null; }
 
 start_chain(){
   rm -f "$TS"
   [ -f "$CLOG" ] && mv "$CLOG" "$CLOG.$(printf '%(%H%M%S)T' -1)" 2>/dev/null
   # exec 9>&- closes the inherited single-instance lock fd so the detached
   # chain (and its descendants) don't hold the lock after THIS supervisor exits.
-  ( exec 9>&- 2>/dev/null; cd "$HERE" && setsid $TSET_CHAIN python3 tv_live.py --rf "$RF" > "$CLOG" 2>&1 < /dev/null & )
+  # --rotate-gb 16 (was tv_live's 1GB default): each rotation costs one
+  # deterministic ~10s player relaunch (stvt_play_hd rotation-relaunch).
+  # 16GB ≈ 1h50m of TV between blips; ~16GB of SD is cheap (100GB free).
+  ( exec 9>&- 2>/dev/null; cd "$HERE" && setsid $TSET_CHAIN python3 tv_live.py --rf "$RF" --rotate-gb "${STVT_ROTATE_GB:-16}" > "$CLOG" 2>&1 < /dev/null & )
   log "started chain (RF$RF, lean config${TSET_CHAIN:+, cpus $ISO_CHAIN_CPUS})"
 }
 
@@ -93,7 +108,10 @@ print(len(s))' 2>/dev/null || echo 0
 # an exclusive lock; a second invocation refuses rather than dueling.
 LOCK="/tmp/stvt_run.lock"
 exec 9>"$LOCK" || { echo "cannot open lock $LOCK" >&2; exit 3; }
-if ! flock -n 9; then
+# -w 15: a freshly-killed instance releases its lock asynchronously
+# (measured: up to ~10s) — wait briefly instead of refusing a restart;
+# a genuinely-running duplicate still gets refused after the wait.
+if ! flock -w 15 9; then
   echo "stvt_run.sh is already running (lock $LOCK held). Refusing a 2nd instance." >&2
   echo "Stop the existing one first: pkill -f stvt_run.sh" >&2
   exit 3
