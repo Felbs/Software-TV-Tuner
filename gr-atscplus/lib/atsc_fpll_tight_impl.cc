@@ -44,6 +44,38 @@ atsc_fpll_tight_impl::atsc_fpll_tight_impl(float rate, float alpha, float afc_ta
     d_window_count = 0;
     d_window_in_pwr = 0.0;
     d_window_out_pwr = 0.0;
+
+    // STVT_FPLL_FOLD=1: absorb the downstream dc_blocker_ff + agc_ff here
+    // (see header). Parameter envs mirror the python chain's defaults
+    // (STVT_DCR_TAPS=32, STVT_AGC_ALPHA=1e-6, STVT_AGC_REFERENCE=4.0) so the
+    // folded path computes exactly what the separate blocks would.
+    if (const char* p = std::getenv("STVT_FPLL_FOLD")) {
+        d_fold = (std::atoi(p) == 1);
+    }
+    if (d_fold) {
+        int D = 32;
+        if (const char* p = std::getenv("STVT_DCR_TAPS")) {
+            int v = std::atoi(p);
+            if (v > 1) D = v;
+        }
+        if (const char* p = std::getenv("STVT_AGC_ALPHA")) {
+            char* e = nullptr; float v = std::strtof(p, &e);
+            if (e != p) d_agc_rate = v;
+        }
+        if (const char* p = std::getenv("STVT_AGC_REFERENCE")) {
+            char* e = nullptr; float v = std::strtof(p, &e);
+            if (e != p) d_agc_reference = v;
+        }
+        d_fma0 = std::make_unique<fold_moving_averager_f>(D);
+        d_fma1 = std::make_unique<fold_moving_averager_f>(D);
+        d_fma2 = std::make_unique<fold_moving_averager_f>(D);
+        d_fma3 = std::make_unique<fold_moving_averager_f>(D);
+        d_fold_delay = std::make_unique<fold_ring_f>(D - 1);
+        std::fprintf(stderr,
+                     "[fpll_tight] FOLD active: dc_blocker(D=%d) + agc(rate=%g ref=%g) in-loop\n",
+                     D, d_agc_rate, d_agc_reference);
+    }
+
     std::fprintf(stderr,
                  "[fpll_tight] rate=%.0f alpha=%.5f beta=%.3e afc_tau_us=%.1f\n",
                  rate, d_alpha, d_beta, afc_tau_us);
@@ -69,6 +101,22 @@ int atsc_fpll_tight_impl::work(int noutput_items,
         gr::fast_cc_multiply(result, in[k], gr_complex(a_sin, a_cos));
 
         out[k] = result.real();
+
+        if (d_fold) {
+            // Exact replica of dc_blocker_ff_impl::work() long-form branch
+            // followed by kernel::agc_ff::scale() — see header note.
+            float y1 = d_fma0->filter(out[k]);
+            float y2 = d_fma1->filter(y1);
+            float y3 = d_fma2->filter(y2);
+            float y4 = d_fma3->filter(y3);
+            float dly = d_fold_delay->rotate(d_fma0->delayed_sig());
+            float dcb = dly - y4;
+            float o = dcb * d_agc_gain;
+            d_agc_gain += (d_agc_reference - fabsf(o)) * d_agc_rate;
+            if (d_agc_max_gain > 0.0 && d_agc_gain > d_agc_max_gain)
+                d_agc_gain = d_agc_max_gain;
+            out[k] = o;
+        }
 
         filtered = d_afc.filter(result);
         x = gr::fast_atan2f(filtered.imag(), filtered.real());
