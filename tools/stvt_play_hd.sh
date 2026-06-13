@@ -68,6 +68,23 @@ launch(){
   # stalls seeking into a multi-GB growing file.
   local bytes=$(( BACKMB*1000000 ))
   : > "$MPVLOG"
+
+  # Resolution-aware deint + window fit. The lowres deint path is a 1080i tune;
+  # on an SD subchannel (e.g. 704x480 4:3 TeleXitos) lowres halves the picture
+  # to ~352x240 — a tiny square window (user-reported on the Spanish World Cup
+  # feed). Probe THIS program's height and, for SD (<720), decode full-res
+  # (bwdif at SD res is trivially cheap) and enlarge the small window so it
+  # fills the screen at its true aspect. HD keeps the lowres path + size cap.
+  local deint="$DEINT_FLAG" fit="--autofit-larger='${STVT_FIT:-85%x85%}'"
+  local vh
+  vh=$(timeout 8 ffprobe -v error -show_entries program=program_id:stream=height \
+        -of compact -i "$F" 2>/dev/null | grep -F "program_id=$PROG|" \
+        | grep -oE 'height=[0-9]+' | head -1 | cut -d= -f2)
+  if [ -n "$vh" ] && [ "$vh" -lt 720 ]; then
+    deint="--vf=lavfi=[bwdif=mode=send_frame:deint=interlaced]"
+    fit="--autofit-larger='${STVT_FIT:-90%x90%}' --autofit-smaller='${STVT_FIT:-90%x90%}'"
+    log "prog $PROG is SD (${vh}p) — full-res decode + enlarge-to-fill"
+  fi
   # -f mpegts on the INPUT is essential: tail -c starts mid-packet, so ffmpeg's
   # format auto-probe reads a partial packet and dies ("Invalid data found"),
   # which looks like a rough-patch hang and triggers an endless relaunch storm
@@ -103,11 +120,11 @@ launch(){
       -c copy -flush_packets 1 -f mpegts - | \
     mpv - --vo=${STVT_MPV_VO:-gpu} --hwdec=no --cache=yes --cache-secs=30 --demuxer-max-bytes=200MiB \
       --demuxer-readahead-secs=20 --cache-pause=no --cache-pause-initial=no \
-      --profile=fast --scale=${STVT_SCALE:-spline36} --cscale=bilinear --dither=no $DEINT_FLAG \
+      --profile=fast --scale=${STVT_SCALE:-spline36} --cscale=bilinear --dither=no $deint \
       --video-sync=${STVT_MPV_SYNC:-audio} \
       --alang=${STVT_ALANG:-eng,en} \
       --ao=alsa --audio-device='${STVT_AUDIO_DEV:-alsa/hdmi:CARD=vc4hdmi0,DEV=0}' \
-      --autofit-larger='${STVT_FIT:-85%x85%}' --geometry=50%:50% \
+      $fit --geometry=50%:50% \
       --mute=${STVT_MPV_MUTE:-no} \
       --title='STVT Live (prog $PROG)' --force-seekable=no \
       --msg-level=all=status" >> "$MPVLOG" 2>&1 < /dev/null &

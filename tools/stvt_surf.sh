@@ -90,7 +90,11 @@ ensure_chain() {  # $1 = rf ; (re)tune only if the RF actually changed
   fi
   [ -n "$CHAIN_PG" ] && kill -- -"$CHAIN_PG" 2>/dev/null
   sleep 3; rm -f "$F"
-  setsid bash -c "exec python3 '$HERE/tv_live.py' --rf $1 --rotate-gb ${STVT_ROTATE_GB:-16} > '$HERE/data/tv_live/tv_tuner.tv_live.log' 2>&1" </dev/null >/dev/null 2>&1 &
+  # exec 8>&- closes the inherited single-instance lock fd so the chain doesn't
+  # hold the flock after THIS surfer exits (else a restart can't reacquire the
+  # lock until the orphaned chain is found and killed — repeatedly hit
+  # 2026-06-13).
+  setsid bash -c "exec 8>&- 2>/dev/null; exec python3 '$HERE/tv_live.py' --rf $1 --rotate-gb ${STVT_ROTATE_GB:-16} > '$HERE/data/tv_live/tv_tuner.tv_live.log' 2>&1" </dev/null >/dev/null 2>&1 &
   CHAIN_PG=$!; CUR_RF="$1"
   # 10MB (~4s of TS) is enough cushion for the player's tail/probe — the
   # old 40MB threshold added ~12s of dead air to every cross-mux change.
@@ -176,15 +180,31 @@ start_player() {  # $1 = program
   # feed silently never regenerated after the first tune (captions dead from
   # the second channel on; found 2026-06-13 when the feed file was stale).
   rm -f "$CCFEED"
-  setsid bash -c "tail -s 0.1 -c 20000000 -F '$F' | ffmpeg -hide_banner -loglevel error -y -i pipe:0 -map 0:p:$p -c copy -f mpegts '$CCFEED'" </dev/null >/dev/null 2>&1 &
+  setsid bash -c "exec 8>&- 2>/dev/null; tail -s 0.1 -c 20000000 -F '$F' | ffmpeg -hide_banner -loglevel error -y -i pipe:0 -map 0:p:$p -c copy -f mpegts '$CCFEED'" </dev/null >/dev/null 2>&1 &
   FEED_PG=$!
   rm -f "$SOCK"
-  # mpv gets the Pi tune (fast profile, cheap scalers, no deint, ALSA-direct
-  # HDMI audio, windowed autofit) + nice +10 so the chain wins the CPU.
-  setsid nice -n "${STVT_PLAYER_NICE:-10}" bash -c "tail -c 20000000 -F '$F' | ffmpeg -hide_banner -loglevel warning -err_detect ignore_err -f mpegts -i - -map 0:p:$p -c copy -flush_packets 1 -f mpegts - | mpv - --input-ipc-server='$SOCK' --input-conf='$ICONF' --vo=${STVT_MPV_VO:-gpu} --hwdec=no --cache=yes --cache-secs=30 --demuxer-readahead-secs=20 --cache-pause=no --cache-pause-initial=no --force-seekable=no --profile=fast --scale=${STVT_SCALE:-spline36} --cscale=bilinear --dither=no $DEINT_FLAG --ao=alsa --audio-device='${STVT_AUDIO_DEV:-alsa/hdmi:CARD=vc4hdmi0,DEV=0}' --autofit-larger='${STVT_FIT:-85%x85%}' --geometry=50%:50% --osd-align-x=center --osd-align-y=bottom --osd-font-size=42 --osd-border-size=2 --title='STVT Surf'" </dev/null >/tmp/stvt_surf_mpv.log 2>&1 &
+  # Resolution-aware deint + fit (ported from stvt_play_hd.sh). The lowres
+  # deint path is a 1080i tune; on an SD subchannel (e.g. 704x480 4:3) lowres
+  # halves it to a tiny square window. Probe this program's height: SD (<720)
+  # gets full-res decode (bwdif is cheap at SD) + enlarge-to-fill; HD keeps the
+  # lowres path + size cap.
+  local deint="$DEINT_FLAG" fit="--autofit-larger='${STVT_FIT:-85%x85%}'" vh
+  vh=$(timeout 8 ffprobe -v error -show_entries program=program_id:stream=height \
+        -of compact -i "$F" 2>/dev/null | grep -F "program_id=$p|" \
+        | grep -oE 'height=[0-9]+' | head -1 | cut -d= -f2)
+  if [ -n "$vh" ] && [ "$vh" -lt 720 ]; then
+    deint="--vf=lavfi=[bwdif=mode=send_frame:deint=interlaced]"
+    fit="--autofit-larger='${STVT_FIT:-90%x90%}' --autofit-smaller='${STVT_FIT:-90%x90%}'"
+  fi
+  # mpv gets the Pi tune (fast profile, cheap scalers, ALSA-direct HDMI audio,
+  # windowed autofit) + nice +10 so the chain wins the CPU.
+  setsid nice -n "${STVT_PLAYER_NICE:-10}" bash -c "exec 8>&- 2>/dev/null; tail -c 20000000 -F '$F' | ffmpeg -hide_banner -loglevel warning -err_detect ignore_err -f mpegts -i - -map 0:p:$p -c copy -flush_packets 1 -f mpegts - | mpv - --input-ipc-server='$SOCK' --input-conf='$ICONF' --vo=${STVT_MPV_VO:-gpu} --hwdec=no --cache=yes --cache-secs=30 --demuxer-readahead-secs=20 --cache-pause=no --cache-pause-initial=no --force-seekable=no --profile=fast --scale=${STVT_SCALE:-spline36} --cscale=bilinear --dither=no $deint --ao=alsa --audio-device='${STVT_AUDIO_DEV:-alsa/hdmi:CARD=vc4hdmi0,DEV=0}' $fit --geometry=50%:50% --osd-align-x=center --osd-align-y=bottom --osd-font-size=42 --osd-border-size=2 --title='STVT Surf'" </dev/null >/tmp/stvt_surf_mpv.log 2>&1 &
   MPV_PG=$!
   for i in $(seq 1 30); do [ -S "$SOCK" ] && break; sleep 0.3; done
-  setsid python3 "$HERE/stvt_cc_osd.py" --feed "$CCFEED" --channel 1 --sock "$SOCK" --delay "$CCDELAY" </dev/null >/dev/null 2>&1 &
+  # 8>&- closes the inherited single-instance lock fd: stvt_cc_osd is long-lived
+  # (watches the mpv socket) and otherwise holds the flock after the surfer
+  # exits, blocking the next launch (the recurring 2026-06-13 lock holder).
+  setsid python3 "$HERE/stvt_cc_osd.py" --feed "$CCFEED" --channel 1 --sock "$SOCK" --delay "$CCDELAY" 8>&- </dev/null >/dev/null 2>&1 &
   BR_PG=$!
 }
 
@@ -207,7 +227,15 @@ tune() {  # $1 = index
   ensure_chain "$rf"
   stop_player
   start_player "$prog"
-  sleep 1; banner "  $virt   $call  "
+  # Rich banner: network + now-playing (EIT) + signal/decode-health, pushed to
+  # the mpv OSD once the socket is up. Falls back to the plain banner if the
+  # helper or guide data isn't available. Backgrounded so a slow EIT lookup
+  # doesn't delay the next channel change.
+  ( sleep 1
+    python3 "$HERE/stvt_surf_info.py" --rf "$rf" --program "$prog" \
+      --virtual "$virt" --callsign "$call" --sock "$SOCK" 2>/dev/null \
+      || banner "  $virt   $call  "
+  ) &
   echo "$(date +%T.%2N) tuned [$(( $1 + 1 ))/$N]"
 }
 
@@ -240,15 +268,19 @@ echo "=== SURFING: PageUp/PageDown or mouse-wheel in the mpv window to change ch
 # dead player relaunches on the current channel within ~2s.
 exec 3<>"$FIFO"
 IDLE_TICKS=0
+DEAD_RETRIES=0
+AUTO_SKIPS=0
+LAST_DIR=1
 while :; do
   if IFS= read -r -t 0.45 -u 3 cmd; then
     case "$cmd" in
-      up)   IDX=$(( (IDX + 1) % N )) ;;
-      down) IDX=$(( (IDX - 1 + N) % N )) ;;
+      up)   IDX=$(( (IDX + 1) % N )); LAST_DIR=1 ;;
+      down) IDX=$(( (IDX - 1 + N) % N )); LAST_DIR=-1 ;;
       quit) echo "$(date +%T.%2N) quit"; exit 0 ;;
       *)    continue ;;
     esac
     IDLE_TICKS=0
+    AUTO_SKIPS=0   # user took the wheel — reset the dead-channel skip budget
     IFS='|' read -r _rf _prog virt call <<< "${CHANS[$IDX]}"
     banner "  > $virt  $call"
     continue          # keep coalescing while presses are still arriving
@@ -258,6 +290,7 @@ while :; do
     tune "$IDX"
     TUNED_IDX=$IDX
     IDLE_TICKS=0
+    DEAD_RETRIES=0   # fresh channel — give it a clean retry budget
     continue
   fi
   # truly idle — watch the player every ~2s: dead OR frozen both relaunch.
@@ -267,8 +300,33 @@ while :; do
   IDLE_TICKS=$(( IDLE_TICKS + 1 ))
   if [ $(( IDLE_TICKS % 4 )) -eq 0 ]; then
     if ! pgrep -x mpv >/dev/null; then
-      echo "$(date +%T.%2N) player died — relaunching [$(( IDX + 1 ))/$N]"
-      tune "$IDX"; TUNED_IDX=$IDX; FROZEN=0; LAST_TP=""
+      # Cap relaunches per channel: an undecodable program (empty/no-video
+      # subchannel like a "no data" station) makes mpv exit instantly, which
+      # otherwise loops forever (observed on 25.1 WDVM-SD, RF15 prog7 — looked
+      # like a crash). After 3 tries, stop and wait for the user to surf away;
+      # DEAD_RETRIES resets when they change channel.
+      DEAD_RETRIES=$(( DEAD_RETRIES + 1 ))
+      if [ "$DEAD_RETRIES" -le 3 ]; then
+        echo "$(date +%T.%2N) player died — relaunching [$(( IDX + 1 ))/$N] (try $DEAD_RETRIES/3)"
+        tune "$IDX"; TUNED_IDX=$IDX; FROZEN=0; LAST_TP=""
+      else
+        # Channel won't decode (dead/empty subchannel, or droughting RF). Don't
+        # sit on a black screen — auto-skip to the next channel in the surf
+        # direction, exactly as if the user kept pressing. AUTO_SKIPS caps the
+        # cascade so an all-dead lineup can't loop forever; a keypress resets it.
+        AUTO_SKIPS=$(( AUTO_SKIPS + 1 ))
+        if [ "$AUTO_SKIPS" -ge "$N" ]; then
+          echo "$(date +%T.%2N) no decodable channel after skipping all $N — waiting for input"
+          banner "  no decodable channel — check antenna"
+          DEAD_RETRIES=0   # one quiet pass done; a keypress will retry fresh
+          AUTO_SKIPS=0
+        else
+          IDX=$(( (IDX + ${LAST_DIR:-1} + N) % N ))
+          IFS='|' read -r _rf _prog _v _c <<< "${CHANS[$IDX]}"
+          echo "$(date +%T.%2N) channel unavailable — auto-skip to [$(( IDX + 1 ))/$N] $_v"
+          tune "$IDX"; TUNED_IDX=$IDX; DEAD_RETRIES=0; FROZEN=0; LAST_TP=""
+        fi
+      fi
     else
       tp=$(mpv_timepos)
       # Empty tp with mpv ALIVE = the player exists but its IPC won't answer
