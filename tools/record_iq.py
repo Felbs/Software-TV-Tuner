@@ -40,7 +40,7 @@ def rf_to_freq_hz(rf_channel: int) -> int:
 
 class RecordIQ(gr.top_block):
     def __init__(self, rf: int, out_path: str, ifgr: int, rfgain_sel: int,
-                 antenna: str, sample_rate: int):
+                 antenna: str, sample_rate: int, fmt: str = "cf32"):
         super().__init__("record_iq")
         freq = rf_to_freq_hz(rf)
         print(f"[record_iq] RF {rf} = {freq/1e6:.3f} MHz, antenna={antenna}, "
@@ -59,9 +59,21 @@ class RecordIQ(gr.top_block):
         try: src.write_setting("rfgain_sel", str(rfgain_sel))
         except Exception: pass
 
-        sink = blocks.file_sink(gr.sizeof_gr_complex, out_path)
-        sink.set_unbuffered(False)
-        self.connect(src, sink)
+        if fmt == "cs16":
+            # Interleaved int16 = 4 B/sample, HALF of CF32's 8 B (more record time
+            # per GB of disk). short = fc32 * 32767; tv_replay reads it back with
+            # interleaved_short_to_complex(/32767). Round-trip verified exact to the
+            # int16 quantum. CAVEAT: clips if |fc32|>1 — keep gains so the SDR isn't
+            # near full-scale (IFGR/rfgain tuned for that already).
+            c2is = blocks.complex_to_interleaved_short(False, 32767.0)
+            sink = blocks.file_sink(gr.sizeof_short, out_path)
+            sink.set_unbuffered(False)
+            self.connect(src, c2is, sink)
+            print("[record_iq] format=cs16 (interleaved int16, 4 B/sample)", flush=True)
+        else:
+            sink = blocks.file_sink(gr.sizeof_gr_complex, out_path)
+            sink.set_unbuffered(False)
+            self.connect(src, sink)
 
 
 def main() -> int:
@@ -73,14 +85,19 @@ def main() -> int:
     p.add_argument("--rfgain-sel", type=int, default=5)
     p.add_argument("--antenna", default="Antenna A")
     p.add_argument("--sample-rate", type=int, default=ATSC_NATIVE_SAMPLE_RATE)
+    p.add_argument("--format", choices=("cf32", "cs16"), default="cf32",
+                   help="cf32=complex float32 (8 B/sample, default); "
+                        "cs16=interleaved int16 (4 B/sample, half the disk). "
+                        "Decode a cs16 file by naming it .cs16 (tv_replay auto-detects).")
     args = p.parse_args()
 
-    # ~5.7 GB at 90s @ 8 MS/s. Warn if disk-space-iffy.
-    est_bytes = args.seconds * args.sample_rate * 8
-    print(f"[record_iq] estimated output size: {est_bytes/1e9:.1f} GB", flush=True)
+    bytes_per = 4 if args.format == "cs16" else 8
+    est_bytes = args.seconds * args.sample_rate * bytes_per
+    print(f"[record_iq] estimated output size: {est_bytes/1e9:.1f} GB "
+          f"({args.format})", flush=True)
 
     tb = RecordIQ(args.rf, args.out, args.ifgr, args.rfgain_sel,
-                  args.antenna, args.sample_rate)
+                  args.antenna, args.sample_rate, args.format)
     tb.start()
     print(f"[record_iq] recording for {args.seconds}s...", flush=True)
     t0 = time.time()
