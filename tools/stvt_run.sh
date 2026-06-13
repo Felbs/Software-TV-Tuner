@@ -36,16 +36,18 @@ DROUGHT_STRIKES="${DROUGHT_STRIKES:-3}"  # consecutive high samples (~2s apart) 
 DROUGHT_GRACE_LOOPS="${DROUGHT_GRACE_LOOPS:-2}"
 
 # Lean real-time config (good for modest CPUs; harmless on fast ones). x86
-# keeps its own gain (IFGR=59) and does NOT default the Pi's speed env: the
-# fused front-end, int16-NEON equalizer (STVT_EQ_S16, ARM-only), enlarged
-# front-end buffers (STVT_MIN_BUF_BYTES), and the FPLL fold are all "barely-
-# enough-CPU" trades the Pi needed to clear real-time. This box runs the chain
-# at several x real-time, so they're off by default — export any of them to
-# opt in. The FPLL fold C++ IS built and verified bit-identical on this box
-# (cmp-clean A/B on the RF34 capture), but measured here it trades throughput
-# for lower aggregate CPU (~7% slower wall-clock, ~½ a core cheaper) because it
-# serialises dc_blocker+agc into the fpll thread — a win on a CPU-starved Pi /
-# N100, a slight loss on this 6-core Ryzen. STVT_FPLL_FOLD=1 to enable.
+# keeps its own gain (IFGR=59) and does NOT default the rest of the Pi's speed
+# env: the fused front-end (a wash on x86), the int16-NEON equalizer
+# (STVT_EQ_S16, ARM-only, no-op here), and the enlarged front-end buffers
+# (STVT_MIN_BUF_BYTES) are Pi "barely-enough-CPU" trades this box doesn't need.
+#
+# EXCEPTION — the FPLL fold IS on by default here. It's the one Pi lever that's
+# a genuine free win on x86: an exact bit-identical replica (cmp-clean A/B on
+# the RF34 capture) that folds dc_blocker+agc into the fpll thread, measured at
+# ~6% less CPU work for live decode (deterministic tv_replay A/B, 2026-06-13).
+# The only cost is ~7% less flat-out throughput headroom, which is irrelevant
+# for real-time live TV. Set STVT_FPLL_FOLD=0 to revert to separate blocks.
+export STVT_FPLL_FOLD="${STVT_FPLL_FOLD:-1}"
 export STVT_RS=stock STVT_VITERBI=hard STVT_EQ=long
 export STVT_SPS="${STVT_SPS:-1.1}" STVT_RRC_SYMS="${STVT_RRC_SYMS:-4}" STVT_TEISCRUB="${STVT_TEISCRUB:-0}"
 export STVT_IFGR="${STVT_IFGR:-59}" STVT_RFGAIN_SEL="${STVT_RFGAIN_SEL:-5}" STVT_ANTENNA="${STVT_ANTENNA:-Antenna A}"
