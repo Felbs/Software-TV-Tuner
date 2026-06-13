@@ -197,6 +197,27 @@ class ReplayTopBlock(gr.top_block):
             chain_blocks += [rxf, fpll, sync, fs_check]
         else:
             chain_blocks += [rxf, fpll, dcr, agc, sync, fs_check]
+
+        # STVT_MIN_BUF (items) / STVT_MIN_BUF_BYTES (bytes-per-edge): enlarge
+        # the front-end output buffers. The Pi 5 needed this (GR's ~32KB
+        # default ran its 4 cores in lockstep at 0.91x); x86 runs several x
+        # real-time with no lockstep, so it is OFF by default (0 = stock).
+        # Output is bit-identical either way; the BYTES form scales per item
+        # size so vector-output blocks (832B items) don't eat GB of RAM.
+        _min_buf = int(os.environ.get("STVT_MIN_BUF", "0"))
+        _min_buf_bytes = int(os.environ.get("STVT_MIN_BUF_BYTES", "0"))
+        if _min_buf or _min_buf_bytes:
+            for blk in chain_blocks:
+                try:
+                    n = _min_buf
+                    if _min_buf_bytes:
+                        isz = blk.output_signature().sizeof_stream_item(0)
+                        n = max(4096, _min_buf_bytes // max(1, isz))
+                    blk.set_min_output_buffer(n)
+                except Exception:
+                    pass
+            LOG.info(f"min_output_buffer: items={_min_buf} bytes={_min_buf_bytes}")
+
         self.connect(*chain_blocks)
 
         for a, b in [(fs_check, equalizer), (equalizer, viterbi),
