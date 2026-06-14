@@ -48,6 +48,16 @@ DROUGHT_GRACE_LOOPS="${DROUGHT_GRACE_LOOPS:-2}"
 # The only cost is ~7% less flat-out throughput headroom, which is irrelevant
 # for real-time live TV. Set STVT_FPLL_FOLD=0 to revert to separate blocks.
 export STVT_FPLL_FOLD="${STVT_FPLL_FOLD:-1}"
+# BLOCK_NCO (commit 3ef9b31): block-wise carrier loop in atsc_fpll_tight — a
+# phasor recurrence + once-per-block loop filter (gain scaled by block len so
+# acquisition is preserved) replaces per-sample sincos/atan2. Measured ~6-8%
+# LESS CPU on top of the fold (deterministic tv_replay A/B), decode bit-identical
+# (null/top_pid unchanged), and live-validated: cold-acquires, full real-time,
+# 0 overflows over a clean soak. NOT bit-exact (recurrence vs sincosf), so the
+# escape hatch matters: STVT_FPLL_BLOCK_NCO=0 reverts to the per-sample loop, and
+# the drought-recovery watchdog below catches any rare regression. The flag is
+# read inside the C++ work(), so it also applies to tv_replay/DVR with no wiring.
+export STVT_FPLL_BLOCK_NCO="${STVT_FPLL_BLOCK_NCO:-1}"
 export STVT_RS=stock STVT_VITERBI=hard STVT_EQ=long
 export STVT_SPS="${STVT_SPS:-1.1}" STVT_RRC_SYMS="${STVT_RRC_SYMS:-4}" STVT_TEISCRUB="${STVT_TEISCRUB:-0}"
 export STVT_IFGR="${STVT_IFGR:-59}" STVT_RFGAIN_SEL="${STVT_RFGAIN_SEL:-5}" STVT_ANTENNA="${STVT_ANTENNA:-Antenna A}"
