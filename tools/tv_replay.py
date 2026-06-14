@@ -190,7 +190,13 @@ class ReplayTopBlock(gr.top_block):
         if resamp is not None:   chain_blocks.append(resamp)
         if notch is not None:    chain_blocks.append(notch)
         if smoother is not None: chain_blocks.append(smoother)
-        chain_blocks += [rxf, fpll, dcr, agc, sync, fs_check]
+        # STVT_FPLL_FOLD=1: atsc_fpll_tight runs the dc_blocker+agc arithmetic
+        # in its own output loop (bit-identical replica), so the separate
+        # blocks are omitted — two fewer threads + buffer crossings.
+        if int(os.environ.get("STVT_FPLL_FOLD", "0")):
+            chain_blocks += [rxf, fpll, sync, fs_check]
+        else:
+            chain_blocks += [rxf, fpll, dcr, agc, sync, fs_check]
         self.connect(*chain_blocks)
 
         for a, b in [(fs_check, equalizer), (equalizer, viterbi),

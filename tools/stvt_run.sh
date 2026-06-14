@@ -28,7 +28,17 @@ MAX_CHAIN_RESTARTS=30
 COOLDOWN=5
 DROUGHT_PIDS=150            # unique-PID count above this = noise drought
 
-# Lean real-time config (good for modest CPUs; harmless on fast ones).
+# Lean real-time config (good for modest CPUs; harmless on fast ones). Windows
+# (Threadripper) keeps its own gain (IFGR=59) and does NOT default the Pi's
+# speed env: the fused front-end, int16-NEON equalizer (STVT_EQ_S16, ARM-only),
+# enlarged front-end buffers (STVT_MIN_BUF_BYTES), and the FPLL fold are all
+# "barely-enough-CPU" trades the Pi needed to clear real-time. This 64-thread
+# box runs the chain at several x real-time, so they're off by default — export
+# any of them to opt in. The FPLL fold C++ is built and verified bit-identical
+# on x86 (cmp-clean A/B on Ubuntu's RF34 capture). It serialises dc_blocker+agc
+# into the fpll thread → ~½ a core cheaper but ~7% slower wall-clock on a
+# 6-core Ryzen. On 64 threads the parallelism loss is meaningless, so it's
+# expected to be a free win here. STVT_FPLL_FOLD=1 to enable.
 export STVT_RS=stock STVT_VITERBI=hard STVT_EQ=long
 export STVT_SPS="${STVT_SPS:-1.1}" STVT_RRC_SYMS="${STVT_RRC_SYMS:-4}" STVT_TEISCRUB="${STVT_TEISCRUB:-0}"
 export STVT_IFGR="${STVT_IFGR:-59}" STVT_RFGAIN_SEL="${STVT_RFGAIN_SEL:-5}" STVT_ANTENNA="${STVT_ANTENNA:-Antenna A}"
