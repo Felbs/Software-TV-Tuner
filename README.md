@@ -1,8 +1,10 @@
 # Software TV Tuner (STVT) — Linux
 
 A free and open source software TV tuner. Watch free over-the-air
-television on an SDR (Software Defined Radio). This is the most
-stable open source software TV decoder on the Internet right now.
+television on an SDR (Software Defined Radio). It's built to run
+unattended for hours on marginal indoor antennas — the watchdogs and
+the equalizer's tracking margin keep a watchable picture up where
+off-the-shelf tuners give up.
 
 A custom GNU Radio fork (`gr-atscplus`) decodes ATSC 1.0 broadcast TV
 into a live MPEG-TS stream. A CLI launcher (`tv_tuner.py`) scans your
@@ -274,16 +276,20 @@ different physical port, edit a few constants in `tools/config.py`.
 
 ### What SDRs work
 
-This project decodes anything **SoapySDR** supports. Tested in-house:
+This project talks to the SDR through **SoapySDR**, so in principle any
+SoapySDR-supported device works. In practice we develop and test against
+the **SDRplay** family — that's the only hardware verified end-to-end. The
+others are SoapySDR-supported and *should* work, but are **untested
+in-house**; the notes below are from their published specs, not our bench.
 
-| SDR | Notes |
-|---|---|
-| **SDRplay RSPdx** | reference setup. 8 MS/s, 14-bit, three antenna ports |
-| **SDRplay RSP1A / RSPduo** | works; one antenna port (RSP1A) or two (RSPduo) |
-| **RTL-SDR (R820T2 dongle)** | works for strong stations only; max sample rate is ~2.4 MS/s, which is below ATSC's full bandwidth so SNR margin shrinks. Fine for nearby transmitters. |
-| **HackRF One** | works; 8 MS/s available; gain naming differs (no IFGR — uses LNA + VGA gain stages) |
-| **Airspy R2 / Mini** | works; 10 MS/s; gain ladder names differ |
-| **BladeRF** | works; expensive but excellent SNR |
+| SDR | Status | Notes |
+|---|---|---|
+| **SDRplay RSPdx** | **reference (tested)** | 8 MS/s, 14-bit, three antenna ports |
+| **SDRplay RSP1A / RSPduo** | same driver | one antenna port (RSP1A) or two (RSPduo); same SoapySDRPlay3 path as the RSPdx |
+| **HackRF One** | untested | 8 MS/s available (enough for ATSC); gain stages are LNA + VGA, no IFGR |
+| **Airspy R2 / Mini** | untested | 10 MS/s; different gain ladder names |
+| **BladeRF** | untested | wide bandwidth + good SNR on paper |
+| **RTL-SDR (R820T2 dongle)** | **not viable** | maxes out ~2.4–2.88 MS/s. ATSC occupies ~5.4 MHz and needs >6 MS/s to sample, so an RTL-SDR physically can't capture a full 6 MHz channel — don't expect ATSC decode regardless of signal strength |
 
 To check what SoapySDR sees on your machine:
 
@@ -703,7 +709,8 @@ tools/
   fix_linux_tuning.sh         Per-boot CPU governor + USB tuning
   patch_soapy_ringbuffer.sh   SoapySDRPlay3 USB ring-buffer enlargement
   tests/                      Unit tests (DVR, EPG, scheduler, signal, …)
-docs/                         Science explainer, capture recipe, session log
+docs/                         Science explainer, capture recipe, CPU-optimization
+                              writeup, drought investigation, Pi + USB-3.0 setup notes
 bootstrap.sh                  Linux setup + build + install
 ```
 
