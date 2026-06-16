@@ -255,6 +255,16 @@ All knobs are env vars read by `tv_live.py` (defaults in parentheses):
 | `STVT_IFGR` | `59` | SDRplay IF gain reduction (20–59 dB) |
 | `STVT_RFGAIN_SEL` | `5` | SDRplay LNA stage selector |
 | `STVT_ANTENNA` | `Antenna A` | SDRplay antenna port |
+| `STVT_FPLL_FOLD` | `0` | Fold the DC-blocker + AGC into the FPLL's output loop (one pass instead of three blocks). Bit-exact; ~6% less CPU. `stvt_run.sh` sets `1`. |
+| `STVT_FPLL_BLOCK_NCO` | `0` | Block-wise carrier loop in the FPLL — generate the NCO mixer by complex recurrence and run the loop filter once per block instead of per sample. Decode-identical; ~6–8% less CPU on top of the fold. `stvt_run.sh` sets `1`. |
+
+> **Performance defaults.** `tools/stvt_run.sh` — the recommended way to watch —
+> enables `STVT_FPLL_FOLD=1` and `STVT_FPLL_BLOCK_NCO=1` by default. Together they
+> cut roughly **12–14% off the live decode CPU** with **no change to picture
+> quality** (the fold is bit-exact; block-NCO is decode-identical to within RS
+> noise). Both were validated by a deterministic A/B, a live soak, and a 10-hour
+> all-channel endurance run — see [`docs/cpu-optimization.md`](docs/cpu-optimization.md).
+> To A/B or revert, set either to `0`.
 
 ## Configure for your SDR + antenna
 
