@@ -27,18 +27,18 @@ watched full sports games, news blocks, and overnight programming
 end-to-end on this stack. If your antenna can lock the carrier, the
 software keeps the picture up.
 
-> **Looking for the Windows build?** That lives on the `main` branch.
+> **Looking for the Windows build?** That lives on the `windows` branch.
 > This README and branch are Linux-only.
 
 ## Install — three steps
 
-Tested on **Ubuntu 22.04 / 24.04** (bare-metal). See the WSL2 note at
-the bottom of this section before you start if you're on Windows.
+Tested on **Ubuntu 22.04 / 24.04** (bare-metal). If you're on Windows, see
+"Don't run under WSL2" below before you start.
 
 ### 1. Clone and bootstrap (~5 minutes)
 
 ```bash
-git clone -b linux-port-stvt-v3 https://github.com/Felbs/Software-TV-Tuner.git
+git clone https://github.com/Felbs/Software-TV-Tuner.git
 cd Software-TV-Tuner
 chmod +x bootstrap.sh && ./bootstrap.sh
 ```
@@ -126,7 +126,7 @@ sure one of `gnome-terminal`, `konsole`, `xfce4-terminal`, or
 Headless environments without a terminal emulator just print the
 streaming output inline.
 
-### WSL2 note
+### Don't run under WSL2
 
 The full receive chain (bootstrap → decoder build → SDR enumeration →
 scan → equalizer lock) runs cleanly under WSL2 Ubuntu via the
