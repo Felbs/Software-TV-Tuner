@@ -112,7 +112,7 @@ launch(){
       -flags low_delay -probesize 3M -analyzeduration 3M -err_detect ignore_err \
       -f mpegts -i - -map 0:p:$PROG:0 -map 0:p:$PROG:1? -map 0:p:$PROG:2? -map 0:p:$PROG:3? \
       -c copy -flush_packets 1 -f mpegts - | \
-    mpv - --vo=${STVT_MPV_VO:-gpu} --hwdec=no --cache=yes --cache-secs=30 --demuxer-max-bytes=200MiB \
+    mpv - --vo=${STVT_MPV_VO:-gpu} --hwdec=${STVT_MPV_HWDEC:-no} --cache=yes --cache-secs=30 --demuxer-max-bytes=200MiB \
       --demuxer-readahead-secs=20 --cache-pause=no --cache-pause-initial=no \
       $deint \
       --video-sync=${STVT_MPV_SYNC:-audio} \
