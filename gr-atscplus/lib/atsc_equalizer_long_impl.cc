@@ -71,6 +71,9 @@ atsc_equalizer_long_impl::atsc_equalizer_long_impl()
     d_taps_lkg.resize(NTAPS, 0.0f);
     d_lkg_valid = false;
 
+    d_fb_taps.resize(NFB, 0.0f);   // DFE feedback filter starts at zero (no echo cancel)
+    d_dec_seg.resize(gr::dtv::ATSC_DATA_SEGMENT_LENGTH + NFB, 0.0f);  // DFE decision buffer
+
     const int alignment_multiple = volk_get_alignment() / sizeof(float);
     set_alignment(std::max(1, alignment_multiple));
 }
@@ -208,6 +211,135 @@ void atsc_equalizer_long_impl::filterN_dd(const float* input_samples,
             for (int k = 0; k < NTAPS; k++) d_taps[k] = 0.0f;
             d_taps[NPRETAPS] = 1.0f;
         }
+        for (int j = 0; j < nsamples; j++)
+            output_samples[j] = input_samples[j + NPRETAPS];
+    }
+}
+
+// Compile the DFE hot loop for AVX2+FMA on x86 so the fused dot/update loops
+// use 256-bit vectors and fused multiply-add (the global build is only -O3 =
+// SSE2). Guarded so non-x86 targets (e.g. the Raspberry Pi / ARM) keep the
+// portable default codegen. All of the user's x86 boxes (Zen1 1600X, Zen2
+// Threadripper) have AVX2+FMA.
+#if defined(__x86_64__) || defined(__i386__)
+__attribute__((target("avx2,fma")))
+#endif
+void atsc_equalizer_long_impl::filterN_dfe(const float* input_samples,
+                                           float* output_samples,
+                                           int nsamples)
+{
+    // DECISION-FEEDBACK EQUALIZER. y = (feedforward FIR over input) − (feedback
+    // FIR over past hard decisions). The feedback term estimates post-cursor ISI
+    // from already-decided, noise-free symbols, so it cancels multipath echoes
+    // WITHOUT the noise enhancement a purely linear equalizer suffers when it
+    // inverts a deep notch. This is the structural advantage a TV's demod has.
+    // Both filters adapt by confidence-gated NLMS (same guards as filterN_dd);
+    // the supervised FS-LMS anchor (adaptN) still runs each field sync. Cost is
+    // O(NTAPS + NFB) per symbol — real-time, unlike RLS's O(NTAPS^2).
+    static const float DFE_MU = []() -> float {
+        if (const char* p = std::getenv("STVT_EQ_DFE_MU")) {
+            char* e = nullptr; double v = std::strtod(p, &e);
+            if (e != p) return (float)v;
+        }
+        return 5e-3f;   // normalized step
+    }();
+    static const float DFE_GATE = []() -> float {
+        if (const char* p = std::getenv("STVT_EQ_DFE_GATE")) {
+            char* e = nullptr; double v = std::strtod(p, &e);
+            if (e != p) return (float)v;
+        }
+        return 1.5f;    // adapt only on confident decisions
+    }();
+    // Runtime cost knobs (swept to find the real-time sweet spot, then frozen):
+    //   NFB    — feedback taps (post-cursor span). Fewer = cheaper filtering.
+    //   STRIDE — adapt every STRIDE-th symbol (filter still runs every symbol);
+    //            μ is scaled ×STRIDE to keep the average adaptation rate.
+    //   ADAPT_FF — also adapt the feedforward taps here (1), or leave them to the
+    //            FS-LMS anchor and only adapt feedback (0, much cheaper).
+    static const int DFE_NFB = []() -> int {
+        if (const char* p = std::getenv("STVT_EQ_DFE_NFB")) { int v = std::atoi(p); if (v > 0) return v; }
+        return 64;
+    }();
+    static const int DFE_STRIDE = []() -> int {
+        if (const char* p = std::getenv("STVT_EQ_DFE_STRIDE")) { int v = std::atoi(p); if (v > 0) return v; }
+        return 1;
+    }();
+    static const bool DFE_ADAPT_FF = []() -> bool {
+        if (const char* p = std::getenv("STVT_EQ_DFE_FF")) return std::atoi(p) != 0;
+        return true;
+    }();
+    const int nfb = (DFE_NFB < NFB) ? DFE_NFB : NFB;   // clamp to allocated buffer
+    const float DFE_EPS = 1.0f;  // NLMS regularizer
+
+    // Reset the decision-history prefix each data segment (see header note).
+    std::memset(&d_dec_seg[0], 0, nfb * sizeof(float));
+
+    float* __restrict ff = &d_taps[0];
+    float* __restrict fb = &d_fb_taps[0];
+    int actr = 0;
+    for (int j = 0; j < nsamples; j++) {
+        const float* __restrict x  = &input_samples[j];
+        // Feedback window for symbol j = contiguous slice holding d[j-nfb..j-1];
+        // fb[nfb-1] pairs with the most-recent decision d[j-1].
+        const float* __restrict dh = &d_dec_seg[j];
+
+        // Dots via volk (its FP reductions are SIMD; hand loops would not
+        // auto-vectorize a sum without -ffast-math).
+        float y_ff = 0.0f, y_fb = 0.0f;
+        volk_32f_x2_dot_prod_32f(&y_ff, x, ff, NTAPS);
+        volk_32f_x2_dot_prod_32f(&y_fb, dh, fb, nfb);
+        float y = y_ff - y_fb;
+        output_samples[j] = y;
+
+        // 8-VSB slicer (levels ±1,±3,±5,±7).
+        float decision;
+        if      (y >=  6.0f) decision =  7.0f;
+        else if (y >=  4.0f) decision =  5.0f;
+        else if (y >=  2.0f) decision =  3.0f;
+        else if (y >=  0.0f) decision =  1.0f;
+        else if (y >= -2.0f) decision = -1.0f;
+        else if (y >= -4.0f) decision = -3.0f;
+        else if (y >= -6.0f) decision = -5.0f;
+        else                 decision = -7.0f;
+        d_dec_seg[j + nfb] = decision;   // append (no shift)
+
+        // Adapt every STRIDE-th confident symbol.
+        if (++actr < DFE_STRIDE) continue;
+        actr = 0;
+        float e = decision - y;
+        if (std::fabs(e) <= DFE_GATE) {
+            // NLMS power normaliser (volk-vectorised dots).
+            float xn2 = 0.0f, dn2 = 0.0f;
+            volk_32f_x2_dot_prod_32f(&dn2, dh, dh, nfb);
+            if (DFE_ADAPT_FF) volk_32f_x2_dot_prod_32f(&xn2, x, x, NTAPS);
+            float mu_eff = (float)DFE_STRIDE * DFE_MU / (DFE_EPS + xn2 + dn2);
+            float scale = mu_eff * e;
+            if (std::isfinite(scale)) {
+                // Fused in-place FMA updates — one pass each, no temp buffers.
+                // These elementwise maps DO auto-vectorize at -O3, now with
+                // AVX2+FMA (256-bit, single-instruction multiply-add).
+                if (DFE_ADAPT_FF)
+                    for (int k = 0; k < NTAPS; k++) ff[k] += scale * x[k];  // w += μ·e·x
+                for (int k = 0; k < nfb; k++)   fb[k] -= scale * dh[k];     // b -= μ·e·dec
+            }
+        }
+    }
+
+    // Divergence backstop (mirror filterN_dd): if either filter blows up,
+    // restore the last-known-good feedforward taps (or a delta), zero the
+    // feedback filter, and emit pass-through for this segment.
+    double tap_e = 0.0, fb_e = 0.0;
+    for (int k = 0; k < NTAPS; k++) tap_e += (double)d_taps[k] * (double)d_taps[k];
+    for (int k = 0; k < NFB;   k++) fb_e  += (double)d_fb_taps[k] * (double)d_fb_taps[k];
+    if (!std::isfinite(tap_e) || tap_e > 50.0 * 50.0 ||
+        !std::isfinite(fb_e)  || fb_e  > 50.0 * 50.0) {
+        if (d_lkg_valid) {
+            for (int k = 0; k < NTAPS; k++) d_taps[k] = d_taps_lkg[k];
+        } else {
+            for (int k = 0; k < NTAPS; k++) d_taps[k] = 0.0f;
+            d_taps[NPRETAPS] = 1.0f;
+        }
+        std::memset(&d_fb_taps[0], 0, NFB * sizeof(float));
         for (int j = 0; j < nsamples; j++)
             output_samples[j] = input_samples[j + NPRETAPS];
     }
@@ -724,9 +856,16 @@ int atsc_equalizer_long_impl::general_work(int noutput_items,
                 adaptN(data_mem, training_sequence1, data_mem2, KNOWN_FIELD_SYNC_LENGTH);
             }
         } else {
-            // Continuous decision-directed tracking on data segments (no-op
-            // passive filter when STVT_EQ_DD_MU is unset/0).
-            filterN_dd(data_mem, data_mem2, ATSC_DATA_SEGMENT_LENGTH);
+            // Data segment. DFE (STVT_EQ_DFE=1) adds the feedback filter;
+            // otherwise the continuous DD tracker (no-op passive filter when
+            // STVT_EQ_DD_MU is unset/0).
+            static const bool DFE_ENABLED = []() {
+                const char* p = std::getenv("STVT_EQ_DFE"); return p && std::atoi(p) != 0;
+            }();
+            if (DFE_ENABLED)
+                filterN_dfe(data_mem, data_mem2, ATSC_DATA_SEGMENT_LENGTH);
+            else
+                filterN_dd(data_mem, data_mem2, ATSC_DATA_SEGMENT_LENGTH);
 
             memcpy(&out[output_produced * ATSC_DATA_SEGMENT_LENGTH],
                    data_mem2,
