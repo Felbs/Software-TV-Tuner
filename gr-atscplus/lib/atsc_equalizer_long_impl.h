@@ -31,6 +31,12 @@ private:
 #endif
     static constexpr int NPRETAPS = (int)(NTAPS * 0.2);
 
+    // Decision-feedback equalizer: number of feedback taps over past hard
+    // decisions. Cancels post-cursor multipath echoes using already-decided
+    // (noise-free) symbols — the lever a TV's demod has and our linear LMS
+    // lacks. O(NFB) per symbol, so it holds real-time (unlike RLS's O(NTAPS^2)).
+    static constexpr int NFB = 128;
+
     static constexpr int KNOWN_FIELD_SYNC_LENGTH = 4 + 511 + 3 * 63;
 
     float training_sequence1[KNOWN_FIELD_SYNC_LENGTH];
@@ -49,6 +55,15 @@ private:
     // field-sync-only design, WITHOUT CMA's wrong-modulus convergence: DD
     // minimizes the same symbol-error objective as the FS-LMS anchor.
     void filterN_dd(const float* input_samples, float* output_samples, int nsamples);
+    // 2026-06-19 Decision-feedback equalizer (STVT_EQ_DFE=1). Adds a feedback
+    // FIR over past hard decisions to the existing feedforward FIR, cancelling
+    // post-cursor ISI without the noise enhancement a linear equalizer suffers.
+    // Both filters adapt by confidence-gated NLMS on data segments (the FS-LMS
+    // anchor in adaptN still pulls the feedforward taps to ground truth). The
+    // decision history resets per data segment so cross-field-sync staleness
+    // can't feed the loop. Targets the +16-23pt headroom that only RLS reached,
+    // at real-time cost. Tunables: STVT_EQ_DFE_MU, STVT_EQ_DFE_GATE.
+    void filterN_dfe(const float* input_samples, float* output_samples, int nsamples);
     // 2026-05-30 RLS (Recursive Least Squares) field-sync adaptation. Optional
     // (STVT_EQ_RLS=1). Converges the equalizer far faster + tracks better than
     // LMS each field sync — the classic fix for "LMS too slow → drift". Runs
@@ -62,6 +77,11 @@ private:
                     int nsamples);
 
     std::vector<float> d_taps;
+    std::vector<float> d_fb_taps;    // DFE feedback taps over past decisions
+    // DFE decision buffer: NFB zeros of history followed by one full segment of
+    // decisions. Symbol j's feedback window is the contiguous slice [j, j+NFB),
+    // so no per-symbol shift is needed (the memmove was the throughput killer).
+    std::vector<float> d_dec_seg;
     std::vector<double> d_rls_P;   // NTAPS*NTAPS inverse-correlation matrix (RLS)
     bool   d_rls_inited = false;
     // Last-known-good snapshot: saved when taps look healthy (low energy,
