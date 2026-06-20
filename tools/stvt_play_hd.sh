@@ -107,15 +107,43 @@ launch(){
   # and the session's own audio (pulse/pipewire — no Pi ALSA-direct HDMI).
   # Keep the ported knobs: --video-sync (STVT_MPV_SYNC), --mute (STVT_MPV_MUTE),
   # the SD-aware $deint/$fit, and the program-relative audio map.
+  # Audio-pop protection lives HERE in the player (which has CPU headroom under
+  # GPU decode), NOT in the chain (TEISCRUB stalls the CPU-bound DSP pipeline ->
+  # drops below real-time -> player starves). Two cheap layers:
+  #   ffmpeg +discardcorrupt — drop transport packets flagged corrupt before the
+  #     AC-3/MPEG decoders ever see them (the corrupt frames = the loud pops).
+  #   mpv  --af=alimiter      — hard brick-wall limiter so any pop that still
+  #     slips through is clamped, never full-scale. STVT_AUDIO_LIMIT=0 disables.
+  local aflimit="--af=alimiter=limit=0.9:level=disabled"
+  [ "${STVT_AUDIO_LIMIT:-1}" = "0" ] && aflimit=""
+  # Video error CONCEALMENT — what a TV does that we didn't: when a macroblock
+  # arrives corrupt, interpolate it (guess motion vectors + deblock) from the
+  # previous frame / neighbours instead of rendering garbage blocks. The signal
+  # fades ~6% sometimes; this hides that loss the way a TV hides it. Applies to
+  # the software decoder; harmless (ignored) under GPU hwdec. STVT_MPV_EC=0 off.
+  local ec="--vd-lavc-o=error_concealment=3 --vd-lavc-framedrop=none"
+  [ "${STVT_MPV_EC:-1}" = "0" ] && ec=""
+  # SMOOTH profile (STVT_MPV_SMOOTH=1, default on): the chain decodes ~95% of a
+  # fading signal, so packets drop intermittently. Low-latency flags make the
+  # player SKIP at every gap. Instead: regenerate continuous timestamps
+  # (+genpts+igndts) so discarded/lost packets don't leave timestamp holes,
+  # drop the low-latency flags, and let video play smoothly over audio gaps
+  # (video-sync=desync) — trading a few seconds of latency for no skipping.
+  local ff_fflags="nobuffer+flush_packets+discardcorrupt" ff_lowdelay="-flags low_delay"
+  local vsync="${STVT_MPV_SYNC:-audio}"
+  if [ "${STVT_MPV_SMOOTH:-1}" != "0" ]; then
+    ff_fflags="+genpts+igndts+discardcorrupt+flush_packets"; ff_lowdelay=""
+    vsync="desync"
+  fi
   setsid bash -c "tail -c $bytes -F '$F' | \
-    ffmpeg -hide_banner -loglevel warning -fflags nobuffer+flush_packets \
-      -flags low_delay -probesize 3M -analyzeduration 3M -err_detect ignore_err \
+    ffmpeg -hide_banner -loglevel warning -fflags $ff_fflags \
+      $ff_lowdelay -probesize 5M -analyzeduration 5M -err_detect ignore_err \
       -f mpegts -i - -map 0:p:$PROG:0 -map 0:p:$PROG:1? -map 0:p:$PROG:2? -map 0:p:$PROG:3? \
       -c copy -flush_packets 1 -f mpegts - | \
-    mpv - --vo=${STVT_MPV_VO:-gpu} --hwdec=${STVT_MPV_HWDEC:-no} --cache=yes --cache-secs=30 --demuxer-max-bytes=200MiB \
-      --demuxer-readahead-secs=20 --cache-pause=no --cache-pause-initial=no \
-      $deint \
-      --video-sync=${STVT_MPV_SYNC:-audio} \
+    mpv - --vo=${STVT_MPV_VO:-gpu} --hwdec=${STVT_MPV_HWDEC:-no} --cache=yes --cache-secs=${STVT_CACHE_SECS:-8} --demuxer-max-bytes=128MiB \
+      --demuxer-readahead-secs=${STVT_CACHE_SECS:-8} --cache-pause=no --cache-pause-initial=no \
+      $deint $aflimit $ec \
+      --video-sync=$vsync \
       --alang=${STVT_ALANG:-eng,en} \
       $fit \
       --mute=${STVT_MPV_MUTE:-no} \
