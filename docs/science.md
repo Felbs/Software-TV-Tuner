@@ -630,6 +630,106 @@ A few common patterns we've seen in this project:
 | 50%+ RS-clean but VLC won't play HD | Need 80%+ for HD. Try a stronger station or better antenna |
 | 100% RS-clean but VLC shows scrambled | RS decoded, but byte alignment between deinterleaver and RS frame is wrong. Check PN63 polarity |
 
+## 12.5 MER — the dial between "locked" and "decoding"
+
+For most of this project's life, we had exactly two signal-quality
+readings: the FPLL's pilot-lock telemetry (`mean|x|` — is the
+*carrier* locked?) and the MPEG-2 sequence-header count in the output
+TS (did *video* actually decode?). Between those two lies a cliff:
+8-VSB's trellis + Reed-Solomon FEC means a channel decodes essentially
+perfectly above ~15.2 dB of SNR and produces essentially *nothing*
+below it (the industry calls this the "threshold of visibility").
+A pilot can lock beautifully at an SNR where the wideband data has no
+chance — the pilot is a narrowband tone, robust in exactly the way the
+6 MHz of data isn't. So "it locks but won't decode" was a black box:
+we couldn't see whether a failing antenna was 1 dB short or 10.
+
+The dial was hiding in the equalizer the whole time. Every ATSC data
+field starts with a **field sync** segment whose contents are fixed
+and known (PN511/PN63 training sequences at ±5 levels). The LMS
+equalizer already computes the RMS error between what it received and
+that known training pattern (`fs_err_rms`) — that error *is* the
+**Modulation Error Ratio**, the same metric broadcast engineers read
+off a $5,000 signal analyzer:
+
+```
+MER(dB) ≈ 20 · log10( 5.0 / fs_err_rms )
+```
+
+Enable it with `STVT_EQ_TELEM=1` (zero overhead when off) and the
+chain prints a continuous, field-sync-rate MER estimate. Its value:
+
+- **It's continuous where decode is binary.** Gain calibration and
+  antenna aiming become hill-climbs on a gradient ("13.4 dB, need
+  15.2, keep going") instead of guess-and-check against a cliff.
+- **It diagnoses by shape.** MER flat as gain rises → the antenna is
+  SNR/aperture-limited; no electronics will fix it. MER falls as gain
+  rises → front-end overload. MER healthy but zero TS → the problem
+  is plumbing (USB throughput, dead stream), not RF. MER oscillating
+  ±2 dB on a timescale of seconds → multipath fading.
+- **It's the honest aim signal.** In-band power and even spectral
+  flatness both peak on multipath reflections that don't decode; the
+  equalizer's own training error is the only cheap metric that tracks
+  what the FEC actually experiences.
+
+### The universal calibration algorithm
+
+`adaptive-tv/` uses the MER dial to make one code path work on any
+antenna. Order matters — each stage rules out a failure class the
+later stages would misdiagnose:
+
+1. **Plumbing probe** — stream at 2/6/8 MS/s and count overflows.
+   A long/passive USB extension can carry 2 MS/s but starve at the
+   6–8 MS/s ATSC needs, which masquerades perfectly as "antenna
+   suddenly stopped decoding" (strong carriers, clean pilot, zero
+   data, uniformly on every channel).
+2. **Interferer census** — coarse spectrum sweep; a big wideband
+   antenna can deliver the FM band 10 dB louder than the wanted UHF
+   channel, saturating the front end. Cure is hardware notches +
+   *less* RF gain, never more.
+3. **Port + carrier scan** — in-band shelf (central 6 MHz vs guard
+   bands) per antenna port per RF channel. Any active device (mast
+   amp, LNA) must be powered before this scan means anything.
+4. **MER gain calibration** — sweep the (RF gain × IF gain) grid,
+   score each cell by MER, not by lock and not by output-file growth
+   (garbage grows at full rate too). The optimum moves every time
+   anything in the RF path changes — amp in/out, LNA, even cable
+   swaps — so calibrate per-configuration, never hardcode.
+5. **Channel survey by MER** — multipath is channel-specific;
+   a mux 6 MHz away can be 5 dB better at the same antenna position.
+6. **Recovery-config shootout** — for signals riding the cliff edge,
+   A/B the erasure-mode Reed-Solomon budget and the equalizer's
+   tracking options (gear-shift LMS, quality-triggered tap resets),
+   scored by an ffmpeg null-decode judge (fps + concealment-error
+   rate), because MER stops discriminating once you're above cliff.
+7. **Verdict** — if the best MER is still short of 15.2 dB, report
+   *how far* short and why (aperture / overload / multipath /
+   plumbing). A 4-dB-short antenna is a hardware problem with a
+   number attached, not a software mystery.
+
+### Field results that shaped the algorithm (June–July 2026)
+
+- **An amplified antenna's own amp usually beats an external LNA.**
+  The antenna-branded amp is TV-band-filtered; a wideband LNA
+  amplifies FM + cellular + everything, and the intermod products
+  land in-band. Measured on one directional antenna: its own amp
+  MER 15.8 (decodes), wideband LNA alone 6.5, both stacked 13.5
+  with the SDR's gain floored — the stack overloads unfixably.
+- **Bias-tee LNAs fail silent.** An unpowered LNA is a ~10 dB
+  attenuator that still passes enough signal to *look* connected.
+  Powering it raised the noise floor +22 dB — instantly visible.
+  Know which port your SDR feeds DC on (RSPdx: Antenna B only),
+  and that inline filters block DC if placed on the power path.
+- **Amplification is not SNR.** A passive indoor panel with a
+  genuinely powered 22 dB LNA measured MER 10.1 — the LNA moved
+  signal and noise up together. The missing 5 dB is antenna
+  aperture; only a bigger/better-sited antenna adds it.
+- **The gain knob is two knobs.** On SDRplay hardware, RF gain
+  (`rfgain_sel`, front-end LNA stages) and IF gain (`IFGR`,
+  inverted: higher = less) trade off against intermod. The same
+  MER can hide at several settings; only the grid search finds the
+  cell that also has headroom against fades.
+
 ## 13. Further reading
 
 - **ATSC A/53** — the actual standard:
