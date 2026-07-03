@@ -26,6 +26,7 @@ RE_SCORE = re.compile(r"score=(\d+).*?fps=([\d.]+) v_err=([\d.]+)/s a_err=([\d.]
 # candidates: name -> extra env on top of the calibrated base
 CANDIDATES = [
     ("baseline (RS=stock, LMS)", {}),
+    ("erasure RS 7",             {"STVT_RS": "erasure", "STVT_RS_ERASURES": "7"}),
     ("erasure RS 20",            {"STVT_RS": "erasure", "STVT_RS_ERASURES": "20"}),
     ("erasure + gear-LMS",       {"STVT_RS": "erasure", "STVT_RS_ERASURES": "20",
                                   "STVT_EQ_GEAR_LMS": "1"}),

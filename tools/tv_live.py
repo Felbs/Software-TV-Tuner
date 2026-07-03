@@ -237,6 +237,16 @@ class LiveTVTopBlock(gr.top_block):
             src.set_gain_mode(0, bool(_sdr_agc))
         except Exception:
             pass
+        # STVT_AGC_SETPOINT (dBFS, default driver -30): the one calibrated
+        # invariant in AGC mode. -30 levels ATSC thin (in_rms ~50, error-prone);
+        # raising toward -20 restores headroom while the servo still rides drift.
+        if _sdr_agc and os.environ.get("STVT_AGC_SETPOINT"):
+            try:
+                src.write_setting("agc_setpoint",
+                                  os.environ["STVT_AGC_SETPOINT"])
+                LOG.info(f"agc_setpoint={os.environ['STVT_AGC_SETPOINT']}")
+            except Exception:
+                pass
         try:
             src.set_gain(0, "IFGR", float(_ifgr))
         except Exception:
