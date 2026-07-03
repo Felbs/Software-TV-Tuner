@@ -17,6 +17,13 @@ background. By the end you should understand, in some depth:
   correction than convolutional codes
 - Why "the gain knob" matters more than any of the above
 
+…and in **Part Two**, the questions only live experiments could
+answer: why tune TV in software at all (the honest silicon-vs-code
+scorecard), the seven laws the adaptive era was paid to learn —
+metrics that lie, optimizers that cheat, configs that die at sunset
+— and how one codebase learned to tune any antenna and tell the
+truth about it.
+
 It's structured roughly in the order the signal travels: starting at
 the transmitter, ending at your TV's screen.
 
@@ -124,12 +131,20 @@ ADC's lowest few bits and quantization noise dominates.
 For the SDRplay RSPdx, two gain knobs matter:
 
 - **`rfgain_sel`**: enables/disables stages of the front-end LNA.
-  Higher values = fewer LNA stages enabled = less RF gain. For ATSC
-  on a strong station, you want **fewer LNA stages on**, not more.
-  `rfgain_sel=5` (only 2 LNA stages on) is the empirical sweet spot.
-- **`IFGR`** (IF Gain Reduction): post-mixer attenuation in dB. Set
-  to 59 dB so the AGC-controlled IF stage isn't slamming peaks into
-  clipping.
+  Higher values = fewer LNA stages enabled = less RF gain.
+- **`IFGR`** (IF Gain Reduction): post-mixer attenuation in dB
+  (inverted: bigger number = quieter).
+
+An early version of this document declared one magic setting "the
+empirical sweet spot." That aged badly, and how it aged is one of the
+project's best lessons: **there is no universal gain setting.** The
+optimum depends on the antenna, the amplifier, the cable, the channel
+— and, we eventually proved, the *time of day* (a setting calibrated
+at noon became overload garbage at sunset). The real answers live in
+Part Two below: measure a live quality signal (MER), grid-search the
+two knobs against it per-setup, and hand level-tracking to the
+radio's hardware AGC so drift is absorbed in silicon instead of
+chased in software.
 
 Wrong values look like reasonable settings but produce 100% TEI=1 →
 "the decoder is broken". Always check the raw IQ histogram first
@@ -767,6 +782,141 @@ later stages would misdiagnose:
   the bare wire already clears the cliff, every amplifier you add
   is pure risk. Amps earn their keep on long coax runs and fringe
   signals, not on the desk.
+
+---
+
+# Part Two — the adaptive era, or: what happens when the tuner
+# starts measuring itself
+
+Part One explained how a television signal becomes a picture. Part
+Two is about a harder question that took this project weeks of live
+experiments to answer: **how do you make one codebase tune ANY
+antenna** — a rooftop directional, a $40 flat panel, a ham-radio
+discone that was never meant for TV — and tell you the truth when it
+can't?
+
+## 14. Why do this in software at all?
+
+A hardware ATSC tuner chip costs a few dollars, draws milliwatts,
+locks in a fraction of a second, and has done so reliably since the
+Bush administration. Our software chain needs a desktop CPU to do the
+same job. So why bother?
+
+**What the chip does better** (the disadvantages of code):
+
+- **Speed and efficiency.** Fixed silicon demodulates in hardware
+  pipelines; we burn a CPU core doing math a $3 ASIC does for free.
+  A channel change takes it 100 ms; our chain relocks, refilters,
+  and relaunches a player in ~30 s.
+- **Real-time is unforgiving.** The broadcast never waits. Every
+  buffer, disk flush, and scheduler hiccup between the antenna and
+  the screen is a chance to drop samples — failure modes a chip
+  physically cannot have. Entire days of this project were spent on
+  problems (A/V clock runaway, pipe stalls, giant-file chokes) that
+  exist only because software is in the loop.
+- **Everything is your problem.** Clock sync between the station and
+  your sound card, caption renderer state, player recovery — the
+  chip's TV set solved these in 2005; you get to solve them again.
+
+**What code does that silicon never will** (the advantages):
+
+- **Visibility.** A chip reports "lock: yes/no." Our chain exposes
+  the equalizer's training error (a live broadcast-grade MER meter),
+  per-packet continuity forensics, the raw spectrum as a waterfall,
+  every intermediate signal. When reception fails, the chip shrugs;
+  the code tells you *which physical thing to fix, in decibels*.
+- **Adaptability.** The chip's designers froze their assumptions.
+  Ours are parameters: Reed-Solomon budgets, equalizer step sizes,
+  filter widths, sync policies — all tunable per antenna, per
+  channel, per *failure class*, even optimizable overnight by a
+  machine (an 834-trial live campaign found configurations no human
+  had tried).
+- **The floor keeps moving.** A software chain improves after
+  shipping. This one gained a signal-quality dial, an impulse-noise
+  diagnosis, a self-verifying player, and an adaptive channel-hopper
+  in a single week — on the same hardware.
+- **You learn the actual physics.** Every struggle above is a lesson
+  in how television really works. A chip hides the entire journey.
+
+The honest summary: **hardware is the better television; software is
+the better instrument.** This project exists because the instrument
+can eventually make ANY antenna into a television — which the chip,
+married to its assumptions, cannot.
+
+## 15. The laws the live experiments taught us
+
+Each of these was paid for with a failed evening and is now enforced
+by code:
+
+1. **Calibrate per setup, then keep calibrating.** The gain optimum
+   moved when we changed antennas, when we added an amplifier — and
+   when the sun set. A config that scored perfect at noon was garbage
+   at dusk, three times in one day. *No stored configuration survives
+   the sky.* Fix: measure MER live, grid-search per setup, and give
+   level-tracking to the radio's hardware AGC (microsecond silicon
+   servo) so only *regime* choices stay in software.
+
+2. **A metric without a liveness check will eventually lie to you.**
+   Our proudest "zero errors!" result turned out to be a stream of
+   100 % null packets — nothing to err because nothing was there. An
+   optimizer once "won" by making the chain emit silence. Every
+   quality number must be conditioned on proof that real content
+   exists (video headers per second), or its zero is meaningless.
+
+3. **Offline optimization overfits; live is the only judge.** A
+   Bayesian search over frozen signal recordings found a config 56 %
+   better than our hand tuning — which scored *zero* on live RF,
+   because a frozen recording rewards slowing the equalizer down and
+   a breathing sky punishes it. Replay screens candidates; only live
+   scoring ships them.
+
+4. **Failures come in classes, and each class has its own cure.**
+   Aperture-limited (MER flat vs gain — buy a better antenna),
+   overload (MER falls as gain rises — attenuate), plumbing (healthy
+   MER, no data — check USB), multipath (MER oscillates — aim), and
+   the sneakiest: **missing packets** (perfect error counters, holes
+   in the continuity counters — impulse noise snapping sync so
+   packets are never emitted at all; no error corrector can fix a
+   packet that doesn't exist).
+
+5. **Amplifiers are a loan, not a gift.** Across every antenna
+   tested, bare wire matched or beat every amplifier and LNA once
+   the software could calibrate honestly — because amplification
+   raises signal and noise together, and adds intermod risk on top.
+   Amps earn their keep only on long cable runs and fringe signals.
+
+6. **The player is part of the physics.** A live stream cannot be
+   paused, cannot wait, and drifts against your sound card's clock
+   (measured: +3.4 s/min of A/V runaway on a pipe that couldn't
+   seek). The cure was architectural: play from a growing *file*,
+   which can seek, so the player can always hop back to the live
+   edge — resetting sync and caption state in one motion.
+
+7. **One tuner is a vow of honesty.** A single SDR can watch one
+   channel, or sweep a waterfall, or record — never two at once.
+   Every feature must negotiate for the radio, and the UI should say
+   so plainly instead of pretending (our guide badges every station:
+   tuneable, weak, or out-of-reach *on the current antenna*).
+
+## 16. Things the reader can now explain at parties
+
+- All of a market's stations usually ride a handful of transmitters:
+  we receive **42 stations from 6 towers**, because unrelated
+  broadcasters share multiplexes (Telemundo lives inside NBC's
+  6 MHz). Subchannels don't own frequency slices — they share the
+  whole channel *by taking turns, packet by packet, thousands of
+  times a second*.
+- Closed captions ride inside the video stream with per-byte parity
+  and decode to English — which makes them a free, always-on
+  ground-truth probe: if the captions read clean, the whole chain is
+  clean. (This tuner literally reads its own television to grade
+  itself.)
+- VHF and UHF are different worlds: wavelength changes what an
+  antenna can catch, evening tropospheric inversions can add the
+  decibels a marginal channel is missing (prime windows: calm summer
+  nights, 4–8 AM), and a scanner may lock a channel that the
+  playback chain can't yet hold — an open mystery in this repo as of
+  this writing.
 
 ## 13. Further reading
 
