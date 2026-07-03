@@ -20,7 +20,8 @@ TV_LIVE = r"Z:\src\magic-tv-decoder\tools\tv_live.py"
 PLAYER = str(Path(__file__).resolve().parent / "play_marginal.py")
 LIVE = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live\live.ts")
 IPC = r"\\.\pipe\mpv-tvtuna-super"
-ROTATE_BYTES = 1_000_000_000
+ROTATE_BYTES = 6_000_000_000    # ~40 min at full mux rate; a rotation costs
+                                # a ~40 s blackout so don't do it every 7 min
 
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
