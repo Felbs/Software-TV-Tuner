@@ -187,6 +187,7 @@ gain ranges).
 | Pilot locks, zero data, gain doesn't help | signal below the 15.2 dB data cliff — antenna/aperture problem, measure with `mer_meter.py` |
 | Active antenna/LNA reads dead | it isn't powered. Bias-tee LNAs: right port (`--biast`, RSPdx = Antenna B), no DC-blocking filter between SDR and LNA, check orientation (IN = antenna side) |
 | Glitchy picture on strong signal | multipath. Try other channels (`ch_scan.py` + `mer_gain_cal.py` per channel), aim with `mer_meter.py --tone`, reposition antenna higher/outside |
+| Periodic glitches (every few s) despite clean MER and zero RS errors | impulse noise snapping sync — whole mux slices are never emitted (check continuity-counter gaps, not error counters). Fix: `STVT_NB=1 STVT_NB_THRESHOLD=2.0` (impulse blanker; 2.0 ≈ just above 8-VSB's crest factor — going below ~1.9 blanks the signal itself) |
 | SDR dead after hours of restarts / hot attic | thermal or firmware wedge: cool it / replug. Never mount the SDR box in a hot attic — run coax up, not USB |
 
 ## The science

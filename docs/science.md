@@ -743,6 +743,19 @@ later stages would misdiagnose:
   field sync proves it's 8-VSB. The strongest "carrier" on one
   scan (+28 dB!) was a phantom — some other service or intermod
   product. Classify by MER-at-any-gain, never by shelf alone.
+- **Glitches with a perfect transport stream: the missing-packet class.**
+  A stream can show flawless MER and *zero* Reed-Solomon failures and
+  still glitch every few seconds — because impulse noise doesn't corrupt
+  packets, it snaps the sync chain, and during the fraction-of-a-second
+  dropout whole slices of the mux are simply *never emitted*. No error
+  counter sees them (there is nothing to count); only the MPEG
+  continuity counters betray the gaps, striking every program's PID at
+  the same instants. The cure is upstream of all error correction: an
+  amplitude-domain impulse blanker. 8-VSB's crest sits near 2× RMS, so
+  blanking above threshold 2.0 removes only the impulses riding above
+  the signal's own peaks — measured here taking 26 delivery gaps/min to
+  zero — while 1.8 amputates the modulation itself. When a "glitchy"
+  signal has clean RF numbers, audit continuity, not error flags.
 - **A good antenna needs no electronics at this location.** The
   same attic antenna measured MER 19.5 bare, 19.5 with its own
   amp, and 19.3 through a powered wideband LNA — but scored
