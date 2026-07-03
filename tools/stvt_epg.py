@@ -110,12 +110,24 @@ def load_epg() -> tuple[list[dict], int | None]:
                     "desc":       e.get("description") or "",
                 })
             events.sort(key=lambda x: x["start_unix"])
+            # Adaptive-era tuneability: the guide can KNOW about stations the
+            # current antenna cannot receive (EIT is cross-carried between
+            # broadcasters). Badge each row from the scan's lock results so
+            # the grid never implies an untunable station is watchable.
+            if c.get("lock"):
+                tune = "+"          # locked = tuneable on this antenna
+            elif c.get("hot") or (c.get("pilot_snr_db") or 0) >= 20:
+                tune = "~"          # carrier seen, never locked = marginal
+            else:
+                tune = "x"          # guide data only — out of reach
             out.append({
                 "rf":       c["rf"],
                 "program":  pnum,
                 "virtual":  str(virtual),
                 "callsign": short,
                 "network":  network_hint,
+                "tune":     tune,
+                "snr_db":   c.get("pilot_snr_db"),
                 "events":   events,
             })
 
@@ -245,11 +257,13 @@ def render_grid(channels: list[dict], rf_filter: int | None,
                 cell = c(cell, DIM)
             styled.append(cell)
 
-        ch_label = f"{ch['virtual']:<5} {truncate(ch['callsign'], 6):<6}"
+        ch_label = f"{ch.get('tune', ' ')} {ch['virtual']:<5} {truncate(ch['callsign'], 6):<6}"
         lines.append(f"{ch_label} | " + "".join(styled))
 
     lines.append("")
     lines.append(c("  green = on now    » = show continues from prior slot", DIM))
+    lines.append(c("  + = tuneable on this antenna    ~ = weak carrier (may not decode)"
+                   "    x = guide data only, out of reach", DIM))
     return "\n".join(lines) + "\n"
 
 
