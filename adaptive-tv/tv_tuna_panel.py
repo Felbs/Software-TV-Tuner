@@ -295,7 +295,9 @@ document.getElementById('tabG').className=t==='G'?'on':'';
 document.getElementById('tabN').className=t==='N'?'on':'';}
 function toast(m){const el=document.getElementById('toast');el.textContent=m;el.style.display='block';
 setTimeout(()=>el.style.display='none',6000)}
-async function tune(rf,prog,virt,name){toast('tuning '+virt+' '+name+' — ~30s to picture');
+async function tune(rf,prog,virt,name){
+if(rf<14){toast('⚠ '+virt+' '+name+' rides RF'+rf+' — VHF. The scanner locks it but the play chain needs a VHF gain recipe we have not cracked yet (tomorrow\\'s research). Pick a UHF station (4.x, 5.x, 14.x, 20.x, 44.x, 66.x, 68.x).');return}
+toast('tuning '+virt+' '+name+' — ~30s to picture');
 await fetch('/api/tune',{method:'POST',body:JSON.stringify({rf,prog,virt,name})})}
 async function stopTv(){await fetch('/api/stop',{method:'POST'});toast('TV stopped — tuner idle, waterfall resumes')}
 async function rec(virt,title){toast('scheduling '+title+' …');

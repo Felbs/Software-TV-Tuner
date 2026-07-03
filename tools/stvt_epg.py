@@ -114,7 +114,10 @@ def load_epg() -> tuple[list[dict], int | None]:
             # current antenna cannot receive (EIT is cross-carried between
             # broadcasters). Badge each row from the scan's lock results so
             # the grid never implies an untunable station is watchable.
-            if c.get("lock"):
+            if c.get("lock") and c["rf"] < 14:
+                tune = "~"          # scanner locks VHF but the play chain
+                                    # has no proven VHF recipe yet
+            elif c.get("lock"):
                 tune = "+"          # locked = tuneable on this antenna
             elif c.get("hot") or (c.get("pilot_snr_db") or 0) >= 20:
                 tune = "~"          # carrier seen, never locked = marginal
