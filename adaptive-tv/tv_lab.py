@@ -36,7 +36,7 @@ def kill_players():
     subprocess.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True)
     subprocess.run(["powershell", "-NoProfile", "-Command",
                     "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
-                    "Where-Object { $_.CommandLine -match 'play_marginal' } | "
+                    "Where-Object { $_.CommandLine -match 'play_marginal|tv_watch' } | "
                     "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
                     "-ErrorAction SilentlyContinue }"], capture_output=True)
 
