@@ -65,7 +65,9 @@ def main():
         "--vd-lavc-o=error_concealment=3,err_detect=ignore_err",
         "--sub-create-cc-track=yes",
         f"--title=TV Tuna — program {prog}",
-    ])
+    ] + (["--vd-lavc-show-all=yes", "--vd-lavc-skipframe=none",
+          "--framedrop=no"]
+         if "marginal" in sys.argv[2:] else []))
     log(f"mpv up, waiting for tracks (program {prog})")
     # track selection by program id
     deadline = time.time() + 30
