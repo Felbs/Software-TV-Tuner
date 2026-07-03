@@ -214,6 +214,16 @@ def cmd_add_show(args) -> int:
                       f"{e['title']}", file=sys.stderr)
         return 1
     target = matches[0]  # next instance
+    # Adaptive-era tuneability guard: the guide can list stations whose EIT
+    # was cross-carried by another broadcaster but whose own mux this antenna
+    # has never locked — recording those tapes static.
+    chan, _ = find_channel(scan, args.virtual)
+    if chan is not None and not chan.get("lock"):
+        print(f"[schedule] WARNING: {args.virtual} rides RF{chan.get('rf')} "
+              f"which did NOT lock in the last scan — this antenna likely "
+              f"cannot decode it and the recording would be empty. "
+              f"Scheduling anyway (re-scan or change antennas to fix).",
+              file=sys.stderr)
     result, entry, conflicts = schedule_event(target, mux=False)
     if result == "duplicate":
         print(f"[schedule] already scheduled: {entry['id']}")
