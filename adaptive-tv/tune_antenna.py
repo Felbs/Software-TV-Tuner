@@ -50,6 +50,9 @@ CARRIER_SHELF = 5.0       # sweep shelf dB to count as a carrier
 PHANTOM_SHELF = 10.0      # big shelf + zero syncs anywhere = not ATSC
 IMPULSE_RAILS = 8         # avg rails at/above this while MER>cliff = impulse
 GOOD_SCORE = 60           # judge score that ends the search happy
+QUIET_VERR = 15.0         # v_err/s at/below this = visibly glitch-free; a
+                          # score of 100 with 25 v_err/s still shows the
+                          # occasional artifact burst, so keep hunting
 
 # cliff-edge recovery configs worth A/B-ing when margin is thin
 RESCUE_CONFIGS = [
@@ -267,21 +270,24 @@ def main():
                                  {}, args.biast)
         print(f"    RF{s['rf']} @ {g['rfgain']}:{g['ifgr']} [baseline]  "
               f"score {score}  fps {fps:.1f}  v_err {verr:.1f}/s")
-        if score < GOOD_SCORE and g["mer"] - CLIFF_DB < 2.0:
+        # rescue configs when the score is low OR the picture is technically
+        # full-rate but still bursty (erasure RS eats impulse bursts)
+        if score < GOOD_SCORE or verr > QUIET_VERR:
             for cfg_name, cfg in RESCUE_CONFIGS:
                 s2, f2, v2 = judge(s["rf"], args.antenna, g["rfgain"], g["ifgr"],
                                    cfg, args.biast)
                 print(f"    RF{s['rf']} @ {g['rfgain']}:{g['ifgr']} [{cfg_name}]  "
                       f"score {s2}  fps {f2:.1f}  v_err {v2:.1f}/s")
-                if s2 > score:
+                if (s2, -v2) > (score, -verr):
                     score, fps, verr, best_cfg = s2, f2, v2, cfg_name
-                if score >= GOOD_SCORE: break
+                if score >= GOOD_SCORE and verr <= QUIET_VERR: break
         s["judge"] = {"score": score, "fps": fps, "v_err": verr,
                       "config": best_cfg, "gain": g}
-        if winner is None or score > winner["judge"]["score"]:
+        if winner is None or (score, -verr) > (winner["judge"]["score"],
+                                               -winner["judge"]["v_err"]):
             winner = s
-        if score >= GOOD_SCORE:
-            winner = s
+        # stop early only on a QUIET win; a bursty 100 keeps the search alive
+        if score >= GOOD_SCORE and verr <= QUIET_VERR:
             break
 
     # 5 — verdict + profile
