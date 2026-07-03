@@ -60,9 +60,12 @@ def survey():
 
 
 def start_player(prog, env):
+    # file-native player (tv_watch): seekable, self-resyncing. Benched
+    # 2026-07-03 vs the pipe: A/V drift +0.009 s/min vs +3.355 s/min.
     logf = open(Path(os.environ["TEMP"]) / "tv_hunter_player.log", "w")
-    return subprocess.Popen([PY, "-u", PLAYER, str(prog), "--tail-mb", "15",
-                             "--strong", "--cc", "--cache-secs", "12"],
+    return subprocess.Popen([PY, "-u",
+                             str(Path(__file__).resolve().parent / "tv_watch.py"),
+                             str(prog)],
                             env=env, stdout=logf, stderr=subprocess.STDOUT)
 
 
