@@ -37,6 +37,8 @@ BASE = {"STVT_EQ": "long", "STVT_VITERBI": "soft", "STVT_SPS": "1.1",
         "STVT_EQ_LKG_RMS": "1.0", "STVT_RFNOTCH": "1",
         "STVT_IFGR": "45", "STVT_RFGAIN_SEL": "3",
         "STVT_RS": "erasure", "STVT_RS_ERASURES": "20"}
+# gain/RS are per-antenna — overridden by CLI args (never trust the defaults;
+# the sweet spot moves with every RF path change)
 
 FPLL_RE = re.compile(r"mean\|x\|=([\d.]+).*?max\|x\|=([\d.]+)\s+in_rms=([\d.]+)")
 OVF_RE = re.compile(r"overflow|OsO|dropped|\bsObO\b|timed out", re.I)
@@ -76,9 +78,18 @@ def main():
     ap.add_argument("--program", type=int, default=3)
     ap.add_argument("--minutes", type=float, default=4.0)
     ap.add_argument("--window", type=int, default=12)
+    ap.add_argument("--ifgr", type=int, default=None)
+    ap.add_argument("--rfgain", type=int, default=None)
+    ap.add_argument("--rs", default=None, help="stock|erasure (default: erasure)")
     args = ap.parse_args()
+    if args.ifgr is not None: BASE["STVT_IFGR"] = str(args.ifgr)
+    if args.rfgain is not None: BASE["STVT_RFGAIN_SEL"] = str(args.rfgain)
+    if args.rs == "stock":
+        BASE["STVT_RS"] = "stock"; BASE.pop("STVT_RS_ERASURES", None)
 
-    print(f"[stress] starting chain RF{args.rf}/{args.antenna} (erasure-RS winner config)...")
+    print(f"[stress] starting chain RF{args.rf}/{args.antenna} "
+          f"(IFGR={BASE['STVT_IFGR']} rfgain={BASE['STVT_RFGAIN_SEL']} "
+          f"RS={BASE['STVT_RS']})...")
     proc, logf = start_chain(args.rf, args.antenna)
     # converge
     t0 = time.time()

@@ -729,6 +729,28 @@ later stages would misdiagnose:
   inverted: higher = less) trade off against intermod. The same
   MER can hide at several settings; only the grid search finds the
   cell that also has headroom against fades.
+- **High MER + persistent errors = impulse noise.** A channel can
+  average 19 dB MER (well above cliff) and still glitch, because
+  MER is measured at field syncs while microsecond impulse bursts
+  corrupt packets between them. The tell: repeated full-scale
+  amplitude transients ("rails") in the FPLL telemetry at every
+  gain setting. Prime suspect: your own PC — USB 3.0 signalling
+  radiates broadband hash centered near 500 MHz, so RF channels
+  around there suffer while channels 60+ MHz away are pristine.
+  The fix is channel choice and antenna placement, not gain.
+- **A huge shelf that never field-syncs is not a TV channel.**
+  In-band power says *something* is transmitting; only the ATSC
+  field sync proves it's 8-VSB. The strongest "carrier" on one
+  scan (+28 dB!) was a phantom — some other service or intermod
+  product. Classify by MER-at-any-gain, never by shelf alone.
+- **A good antenna needs no electronics at this location.** The
+  same attic antenna measured MER 19.5 bare, 19.5 with its own
+  amp, and 19.3 through a powered wideband LNA — but scored
+  100/100 quality bare and only 26 through the LNA (extra impulse
+  susceptibility + scan blindness from the raised floor). When
+  the bare wire already clears the cliff, every amplifier you add
+  is pure risk. Amps earn their keep on long coax runs and fringe
+  signals, not on the desk.
 
 ## 13. Further reading
 

@@ -115,6 +115,11 @@ couldn't see... until now. These tools read the decoder's own
 equalizer error as a live **MER meter** and calibrate around it:
 
 ```powershell
+# THE one command: sweep -> classify every carrier -> calibrate gain ->
+# judge real decoded quality -> honest verdict + saved antenna profile
+python adaptive-tv\tune_antenna.py --name my-antenna
+python adaptive-tv\tune_antenna.py --antenna "Antenna B" --biast   # LNA port
+
 # Live MER dashboard on one channel: are we above the 15.2 dB cliff?
 python adaptive-tv\mer_meter.py --rf 31
 
@@ -146,7 +151,14 @@ SNR-limited, rising ⇒ gain-starved, falling ⇒ overload),
 **Read the verdicts honestly.** If calibration tops out at MER 10 dB,
 that antenna is 5 dB short at that location and no software setting
 will fix it — the tools tell you whether the wall is aperture,
-overload, multipath, or plumbing, so you fix the right thing.
+overload, multipath, impulse noise, or plumbing, so you fix the right
+thing. `tune_antenna.py` classifies every carrier automatically:
+**CLEAN** (decodes), **IMPULSE** (good MER but bursty interference —
+often the PC itself; move the antenna away from electronics),
+**BELOW-CLIFF** (honest dB deficit), **PHANTOM** (a strong shelf that
+never field-syncs is not ATSC — don't chase it). Hot amplified/LNA
+chains that overload the whole normal gain range are rescued
+automatically by extending the search deep into attenuation.
 
 ## What SDRs work
 
