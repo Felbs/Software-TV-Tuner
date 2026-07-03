@@ -160,6 +160,12 @@ def suggest(trial, channels):
     if q: o["STVT_EQ_QUALITY_BAD_RMS"] = q
     o["STVT_FPLL_ALPHA"] = trial.suggest_categorical("fpll_alpha",
                                                      [0.001, 0.002])
+    # impulse noise blanker — the glitch killer (2026-07-03: 26 delivery
+    # gaps/min -> 0.00 at th=2.0). Knee is sharp: <2.0 blanks the signal.
+    nb = trial.suggest_categorical("nb_threshold", [0, 2.0, 2.1, 2.2])
+    if nb:
+        o["STVT_NB"] = 1
+        o["STVT_NB_THRESHOLD"] = nb
     return o
 
 
