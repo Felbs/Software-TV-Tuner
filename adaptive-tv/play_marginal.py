@@ -72,6 +72,10 @@ def main():
     ap.add_argument("--cache-secs", type=float, default=8.0,
                     help="player cache depth in seconds (default 8)")
     ap.add_argument("--alang", default="eng", help="preferred audio language (default eng)")
+    ap.add_argument("--cc", action="store_true",
+                    help="show closed captions (CEA-608 ride inside the video "
+                         "stream and survive the -c copy remux; mpv just never "
+                         "creates/selects the track by default)")
     args = ap.parse_args()
 
     ts_path = Path(args.ts)
@@ -102,7 +106,11 @@ def main():
     # dimensions 0x0" + mpv exit. The strong-vs-marginal difference is ONLY the
     # mpv show-all anti-freeze hacks (which cause "frozen green" on a clean
     # signal), not packet dropping.
-    discard = ""
+    # --cc: drop corrupt/pre-keyframe frames in the remux so the CEA-608
+    # decoder never ingests mid-sequence caption bytes (the "stuck gibberish
+    # caption on startup" bug — 608 doubles control bytes; joining mid-pair
+    # scrambles alignment and the garbage sticks until the next erase).
+    discard = "+discardcorrupt" if args.cc else ""
     ff_cmd = [FFMPEG_EXE, "-hide_banner", "-loglevel", "error",
               "-fflags", f"{discard}+genpts+igndts+nobuffer",
               "-err_detect", "ignore_err",
@@ -137,6 +145,9 @@ def main():
                         "--vd-lavc-o=err_detect=ignore_err"])
     if not args.no_smooth:
         mpv_cmd.append("--video-sync=desync")
+    if args.cc:
+        # single-program remux -> the auto-created CC track is sub track 1
+        mpv_cmd.extend(["--sub-create-cc-track=yes", "--sid=1"])
 
     print(f"[play] LIVE 3-stage pipe: tail -> ffmpeg(-map 0:p:{args.program}) -> mpv")
     print(f"[play] hwdec={'on' if use_hwdec else 'off'}  ec={'off' if args.no_ec else 'on'}  "
