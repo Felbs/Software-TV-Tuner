@@ -750,12 +750,15 @@ later stages would misdiagnose:
   dropout whole slices of the mux are simply *never emitted*. No error
   counter sees them (there is nothing to count); only the MPEG
   continuity counters betray the gaps, striking every program's PID at
-  the same instants. The cure is upstream of all error correction: an
-  amplitude-domain impulse blanker. 8-VSB's crest sits near 2× RMS, so
-  blanking above threshold 2.0 removes only the impulses riding above
-  the signal's own peaks — measured here taking 26 delivery gaps/min to
-  zero — while 1.8 amputates the modulation itself. When a "glitchy"
-  signal has clean RF numbers, audit continuity, not error flags.
+  the same instants. An amplitude-domain impulse blanker helps modestly
+  (threshold 2.2–3.0 trimmed the gap rate ~15–30% here), but at ≤2.0 it
+  clips 8-VSB's own modulation and the chain emits a full-rate stream
+  of pure null padding — which scores *perfect* on any gap or error
+  metric, because an empty stream has nothing to be discontinuous. We
+  briefly celebrated exactly that mirage. Two lessons: when a "glitchy"
+  signal has clean RF numbers, audit continuity, not error flags — and
+  every quality metric needs a liveness denominator (confirm real video
+  packets exist) before its zero means anything.
 - **A good antenna needs no electronics at this location.** The
   same attic antenna measured MER 19.5 bare, 19.5 with its own
   amp, and 19.3 through a powered wideband LNA — but scored
