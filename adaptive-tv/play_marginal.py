@@ -145,8 +145,18 @@ def main():
                         "--vd-lavc-o=err_detect=ignore_err"])
     if not args.no_smooth:
         mpv_cmd.append("--video-sync=desync")
+    # IPC pipe: lets a supervisor verify real playback (time-pos advancing)
+    # and lets the CC cleaner reset the caption renderer after startup.
+    # STVT_PLAY_IPC overrides the name so external tools can find it.
+    cc_pipe = os.environ.get("STVT_PLAY_IPC") or \
+        (rf"\\.\pipe\mpv-tvtuna-{os.getpid()}" if args.cc else None)
+    if cc_pipe:
+        mpv_cmd.append(f"--input-ipc-server={cc_pipe}")
     if args.cc:
-        # single-program remux -> the auto-created CC track is sub track 1
+        # single-program remux -> the auto-created CC track is sub track 1.
+        # Joining a live 608 stream mid-caption paints partial garbage that
+        # can stick on unused rows, so an IPC helper auto-cycles the track
+        # once after startup (same fix as manually toggling CC off/on).
         mpv_cmd.extend(["--sub-create-cc-track=yes", "--sid=1"])
 
     print(f"[play] LIVE 3-stage pipe: tail -> ffmpeg(-map 0:p:{args.program}) -> mpv")
@@ -157,6 +167,21 @@ def main():
     ff  = subprocess.Popen(ff_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     mpv = subprocess.Popen(mpv_cmd, stdin=ff.stdout)
     ff.stdout.close()   # mpv owns the read end
+
+    if cc_pipe and args.cc:
+        def cc_cleaner():
+            # let the caption decoder align on real data, then reset the
+            # renderer (drops any startup garbage; harmless if none)
+            time.sleep(14)
+            for cmd_line in (b'{"command":["set_property","sid","no"]}\n',
+                             b'{"command":["set_property","sid",1]}\n'):
+                try:
+                    with open(cc_pipe, "wb") as pipe:
+                        pipe.write(cmd_line)
+                    time.sleep(0.5)
+                except OSError:
+                    return   # mpv gone or pipe unavailable; captions still work
+        threading.Thread(target=cc_cleaner, daemon=True).start()
 
     stop_flag = threading.Event()
     def tail_worker():
