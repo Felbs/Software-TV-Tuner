@@ -62,7 +62,7 @@ class Extractor:
             [FFMPEG, "-hide_banner", "-loglevel", "error",
              "-fflags", "+genpts+igndts+nobuffer+discardcorrupt",
              "-err_detect", "ignore_err",
-             "-analyzeduration", "3000000", "-probesize", "5000000",
+             "-analyzeduration", "10000000", "-probesize", "20000000",
              "-f", "mpegts", "-i", "-",
              "-map", f"0:p:{self.prog}", "-c", "copy",
              "-max_interleave_delta", "0",
