@@ -774,6 +774,30 @@ later stages would misdiagnose:
   signal has clean RF numbers, audit continuity, not error flags — and
   every quality metric needs a liveness denominator (confirm real video
   packets exist) before its zero means anything.
+- **USB cables are part of the radio — and they fail two different
+  ways.** The SDR ships its IQ samples over USB at 32 MB/s, and a
+  marginal cable breaks television while every RF number stays
+  perfect. Failure one, *starvation*: a long passive extension caps
+  the link so hard the radio delivers 2 MS/s when asked for 8 —
+  strong carriers, clean pilot, zero data, on every channel at once.
+  Failure two is sneakier, *leakage*: a cable that passes a 3-second
+  throughput probe at ~96% of the asked rate but drops USB
+  micro-bursts every couple of seconds. Each drop is too short to
+  unlock the phase loop — MER reads a healthy 19 dB — but each one
+  snaps the sync chain and punches a visible glitch. Measured
+  back-to-back on the same antenna, channel, and hour: short cable
+  0–3 stream gaps/min, long cable 27–33. The probe lesson: measuring
+  delivered *volume* is not enough, because a few percent "overhead"
+  can actually be the drops — the gap rate during real decode is the
+  only honest continuity meter. The practical law: put the shortest
+  possible USB 3.0 cable straight into a rear-panel port and never
+  touch it again; when the antenna needs to move, extend the *analog*
+  side with 75 Ω coax, which carries RF happily across a house. One
+  more replug gotcha: the first radio session after any hot-swap
+  tends to come up wedged (API init failure, or opens-but-delivers-
+  nothing) and the second session works — restart the vendor API
+  service after replugging and don't diagnose anything from the
+  first attempt.
 - **A good antenna needs no electronics at this location.** The
   same attic antenna measured MER 19.5 bare, 19.5 with its own
   amp, and 19.3 through a powered wideband LNA — but scored
