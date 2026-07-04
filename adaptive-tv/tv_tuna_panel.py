@@ -17,7 +17,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 TOOLS = Path(r"Z:\src\magic-tv-decoder\tools")
 sys.path.insert(0, str(TOOLS)); sys.path.insert(0, str(HERE))
-from stvt_epg import load_epg
+from stvt_epg import load_epg, SCAN_PATH
 from tv_lab import ts_metrics
 
 PY = r"C:\Users\user\radioconda\python.exe"
@@ -25,15 +25,85 @@ LIVE = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live\live.ts")
 CHAIN_LOG = HERE / "lab" / "panel_chain.log"
 PORT = 8642
 
+# per-RF (rfgain_sel, IFGR) — reseed after ANY antenna/path change
+# (AGC servos the IF gain live; rfgain_sel is the regime that matters).
+# Current values = Philips SDV3824B (validated 2026-07-03).
 GAINS = {36: (3, 40), 34: (2, 32), 15: (1, 32)}
 DEFAULT_GAIN = (3, 40)
 RE_FS = re.compile(r"fs_err_rms=([\d.]+)")
 RE_FPLL = re.compile(r"mean\|x\|=([\d.]+).*?max\|x\|=([\d.]+)\s+in_rms=([\d.]+)")
 
 STATE = {"rf": None, "prog": None, "virtual": None, "name": None,
-         "tuning": False, "env": {}}
+         "tuning": False, "env": {}, "stage": "", "stage_pct": 0}
 LOCK = threading.Lock()
 GEN = [0]
+
+# ── channel scan (SCAN button) ─────────────────────────────────────
+SCAN = {"running": False, "line": "", "pct": 0, "t0": None}
+
+def run_scan():
+    if SCAN["running"]:
+        return
+    SCAN.update({"running": True, "line": "stopping TV, starting scan…",
+                 "pct": 2, "t0": time.time()})
+    def locks_in(path):
+        try:
+            d = json.loads(Path(path).read_text(encoding="utf-8"))
+            return sum(1 for c in d.get("channels", []) if c.get("lock"))
+        except (OSError, json.JSONDecodeError):
+            return 0
+    prev = SCAN_PATH.with_name("scan_prev.json")
+    try:
+        if SCAN_PATH.exists():
+            prev.write_text(SCAN_PATH.read_text(encoding="utf-8"),
+                            encoding="utf-8")
+        stop_tv()
+        time.sleep(3)
+        env = base_env(36)
+        p = subprocess.Popen([PY, "-u", str(TOOLS / "tv_tuner.py"), "--scan"],
+                             env=env, stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             text=True, encoding="utf-8", errors="replace")
+        try:
+            p.stdin.write("1\n"); p.stdin.flush()
+        except OSError:
+            pass
+        total, done = 0, 0
+        for raw in p.stdout:
+            line = raw.strip()
+            if not line:
+                continue
+            SCAN["line"] = line[:160]
+            if "phase 1" in line:
+                SCAN["pct"] = 8
+            m = re.search(r"full lock test on (\d+)", line)
+            if m:
+                total = int(m.group(1)); SCAN["pct"] = 30
+            if total and line.startswith("RF "):
+                done += 1
+                SCAN["pct"] = 30 + int(62 * min(done, total) / total)
+            if "saved to" in line:
+                SCAN["pct"] = 97
+        p.wait(timeout=120)
+        # A dud scan (antenna mid-aim, radio wedged) must never clobber a
+        # good channel map: if the fresh scan locked nothing and the prior
+        # one had locks, restore the prior and stash the dud for study.
+        dur = int(time.time() - SCAN["t0"]) if SCAN["t0"] else 0
+        if prev.exists() and locks_in(SCAN_PATH) == 0 and locks_in(prev) > 0:
+            SCAN_PATH.with_name("scan_dud.json").write_text(
+                SCAN_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+            SCAN_PATH.write_text(prev.read_text(encoding="utf-8"),
+                                 encoding="utf-8")
+            SCAN.update({"pct": 100, "t0": None,
+                         "line": f"scan ({dur}s) found NO locks — kept the "
+                                 "previous good channel map (dud saved aside)"})
+        else:
+            SCAN.update({"pct": 100, "t0": None,
+                         "line": f"scan complete in {dur}s — guide refreshed"})
+    except Exception as e:
+        SCAN["line"] = f"scan failed: {e}"
+    finally:
+        SCAN["running"] = False
 
 # ── waterfall sweeper ──────────────────────────────────────────────
 WF = {"rows": [], "freqs": None, "status": "starting", "row_id": 0}
@@ -70,7 +140,12 @@ def sweeper():
         freqs += list((h + (np.arange(keep) - keep / 2) * (8e6 / FFT)) / 1e6)
     with WF_LOCK: WF["freqs"] = [round(x, 2) for x in freqs]
     while True:
-        if STATE["rf"] is not None or STATE["tuning"] or chain_running():
+        if SCAN["running"]:
+            with WF_LOCK:
+                WF["status"] = "channel scan in progress — sweep paused"
+            time.sleep(5); continue
+        if STATE["rf"] is not None or STATE["tuning"] or METER["rf"] is not None \
+                or chain_running():
             with WF_LOCK:
                 WF["status"] = ("tuner busy watching " +
                                 str(STATE.get("virtual") or "TV") +
@@ -100,7 +175,8 @@ def sweeper():
                 except OSError:
                     return False
             while not (STATE["rf"] is not None or STATE["tuning"]
-                       or external_wants_sdr()):
+                       or METER["rf"] is not None
+                       or SCAN["running"] or external_wants_sdr()):
                 row = []
                 t_row = time.strftime("%H:%M:%S")
                 for h in hops:
@@ -135,6 +211,31 @@ def sweeper():
             except Exception: pass
         time.sleep(1)
 
+# ── signal-finder meter (chain only, no player) ────────────────────
+METER = {"rf": None}
+
+def meter_start(rf):
+    with LOCK:
+        GEN[0] += 1
+        my_gen = GEN[0]
+        METER["rf"] = None
+        kill_tv(); time.sleep(2)
+        if GEN[0] != my_gen:
+            return
+        env = base_env(rf)
+        logf = open(CHAIN_LOG, "w")
+        subprocess.Popen([PY, "-u", str(TOOLS / "tv_live.py"), "--rf", str(rf)],
+                         env=env, stdout=logf, stderr=subprocess.STDOUT)
+        STATE.update({"env": {k.replace("STVT_", ""): v for k, v in env.items()
+                              if k.startswith("STVT_")}})
+        METER["rf"] = rf
+
+def meter_stop():
+    with LOCK:
+        GEN[0] += 1
+        METER["rf"] = None
+        kill_tv()
+
 # ── tuning / recording actions ─────────────────────────────────────
 def base_env(rf):
     rfsel, ifgr = GAINS.get(rf, DEFAULT_GAIN)
@@ -142,7 +243,13 @@ def base_env(rf):
     env["PATH"] = (r"C:\Program Files\SDRplay\API\x64;C:\ffmpeg\bin;"
                    + env.get("PATH", ""))
     env.update({"STVT_ANTENNA": "Antenna A", "STVT_IFGR": str(ifgr),
-                "STVT_RFGAIN_SEL": str(rfsel), "STVT_EQ": "long",
+                "STVT_RFGAIN_SEL": str(rfsel),
+                # hardware AGC servo: IF gain follows the antenna in
+                # real time (setpoint -20 dBFS, validated 2026-07-02),
+                # so aiming/moving the antenna no longer invalidates
+                # the gain calibration; IFGR above is just the seed.
+                "STVT_SDR_AGC": "1", "STVT_AGC_SETPOINT": "-20",
+                "STVT_EQ": "long",
                 "STVT_VITERBI": "soft", "STVT_RFNOTCH": "1",
                 "STVT_DABNOTCH": "1", "STVT_RS": "stock", "STVT_SPS": "1.1",
                 "STVT_RRC_SYMS": "8", "STVT_TEISCRUB": "1",
@@ -159,11 +266,16 @@ def kill_tv():
     subprocess.run(["taskkill", "/F", "/IM", "mpv.exe"], capture_output=True)
     subprocess.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True)
 
+def set_stage(pct, msg):
+    STATE.update({"stage": msg, "stage_pct": pct})
+
 def tune(rf, prog, virtual, name):
     with LOCK:
         GEN[0] += 1
         my_gen = GEN[0]
+        METER["rf"] = None
         STATE.update({"tuning": True})
+        set_stage(4, "clearing the tuner — stopping old chain and player")
         kill_tv(); time.sleep(2)
         if GEN[0] != my_gen:
             return
@@ -171,13 +283,120 @@ def tune(rf, prog, virtual, name):
         logf = open(CHAIN_LOG, "w")
         subprocess.Popen([PY, "-u", str(TOOLS / "tv_live.py"), "--rf", str(rf)],
                          env=env, stdout=logf, stderr=subprocess.STDOUT)
+        def logtxt():
+            try: return CHAIN_LOG.read_text(errors="ignore")[-30000:]
+            except OSError: return ""
         def player():
-            time.sleep(26)
-            if GEN[0] != my_gen:
-                return
-            subprocess.Popen([PY, "-u", str(HERE / "tv_watch.py"), str(prog)],
+            # Milestone-gated startup: each stage is proven from telemetry,
+            # not guessed from a timer, so the bar reflects reality and a
+            # dead radio is called out instead of spinning forever.
+            t0 = time.time()
+            set_stage(12, "opening the radio — SoapySDR → SDRplay handshake")
+            while time.time() - t0 < 45:
+                if GEN[0] != my_gen: return
+                t = logtxt()
+                if ("sdrplay_api_Fail" in t or "Init() failed" in t
+                        or "no available RSP" in t
+                        or "Traceback (most recent call last)" in t):
+                    set_stage(0, "RADIO FAILED — the decode chain died on "
+                                 "startup. Replug the SDR or restart the "
+                                 "SDRplay API service, then click the "
+                                 "station again.")
+                    STATE.update({"tuning": False, "rf": None, "prog": None,
+                                  "virtual": None, "name": None, "env": {}})
+                    return
+                if "Using format" in t:
+                    break
+                time.sleep(1.2)
+            set_stage(30, "radio streaming — FPLL hunting the ATSC pilot")
+            while time.time() - t0 < 70:
+                if GEN[0] != my_gen: return
+                if RE_FPLL.search(logtxt()):
+                    break
+                time.sleep(1.2)
+            # Cliff-edge autodetect: sample MER for ~12 s after lock. A
+            # marginal signal gets one automatic chain restart with the
+            # recovery recipe (erasure FEC + equalizer tap guard — the
+            # config-shootout champion for signals riding the cliff).
+            set_stage(45, "phase locked — measuring decode margin")
+            t_m = time.time()
+            while time.time() - t_m < 12:
+                if GEN[0] != my_gen: return
+                time.sleep(2)
+            errs = [float(mm.group(1))
+                    for mm in RE_FS.finditer(logtxt())][-40:]
+            mers = [20 * math.log10(5.0 / e) for e in errs if e > 0]
+            mer_now = sum(mers) / len(mers) if mers else 0.0
+            cliff_mode = bool(mers) and mer_now < 16.5
+            if cliff_mode:
+                set_stage(52, f"MER {mer_now:.1f} dB — engaging cliff-edge "
+                              "recovery (erasure FEC + tap guard)")
+                env.update({"STVT_RS": "erasure", "STVT_RS_ERASURES": "20",
+                            "STVT_EQ_QUALITY_BAD_RMS": "8"})
+                if GEN[0] != my_gen: return
+                kill_tv(); time.sleep(2)
+                if GEN[0] != my_gen: return
+                logf2 = open(CHAIN_LOG, "w")
+                subprocess.Popen([PY, "-u", str(TOOLS / "tv_live.py"),
+                                  "--rf", str(rf)],
+                                 env=env, stdout=logf2,
+                                 stderr=subprocess.STDOUT)
+                STATE.update({"env": {k.replace("STVT_", ""): v
+                                      for k, v in env.items()
+                                      if k.startswith("STVT_")}})
+                t_r = time.time()
+                while time.time() - t_r < 60:
+                    if GEN[0] != my_gen: return
+                    if RE_FPLL.search(logtxt()):
+                        break
+                    time.sleep(1.5)
+            t0 = time.time()          # fresh budget for the stream gates
+            set_stage(60, "equalizer converging — buffering the "
+                          "transport stream")
+            # Gate on GROWTH since this chain started, not absolute size —
+            # the previous tune's leftover live.ts is big and freshly
+            # written, which used to pass this gate instantly (false 75%).
+            try:
+                base_sz = LIVE.stat().st_size
+            except OSError:
+                base_sz = 0
+            while time.time() - t0 < 110:
+                if GEN[0] != my_gen: return
+                try:
+                    stt = LIVE.stat()
+                    if stt.st_size < base_sz:
+                        base_sz = stt.st_size      # chain truncated/rotated
+                    if (stt.st_size - base_sz > 6_000_000
+                            and time.time() - stt.st_mtime < 5):
+                        break
+                except OSError:
+                    pass
+                time.sleep(1.5)
+            if GEN[0] != my_gen: return
+            set_stage(75, f"stream proven — extracting program {prog}, "
+                          "launching player"
+                          + (" (forced-video mode)" if cliff_mode else ""))
+            watch_args = [PY, "-u", str(HERE / "tv_watch.py"), str(prog)]
+            if cliff_mode:
+                watch_args.append("marginal")   # show-all/no-skip forced video
+            subprocess.Popen(watch_args,
                              env=env, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL)
+            player_up = False
+            while time.time() - t0 < 150:
+                if GEN[0] != my_gen: return
+                r = subprocess.run(["tasklist", "/FI", "IMAGENAME eq mpv.exe"],
+                                   capture_output=True, text=True)
+                if "mpv.exe" in (r.stdout or ""):
+                    player_up = True
+                    break
+                time.sleep(2)
+            if player_up:
+                set_stage(100, "")
+            else:
+                set_stage(0, "PLAYER never appeared — the signal is likely "
+                             "below decode. Aim with 🎯 SIGNAL FINDER, then "
+                             "tune again.")
             STATE.update({"tuning": False})
         threading.Thread(target=player, daemon=True).start()
         knobs = {k.replace("STVT_", ""): v for k, v in env.items()
@@ -188,15 +407,45 @@ def tune(rf, prog, virtual, name):
 def stop_tv():
     with LOCK:
         GEN[0] += 1
+        METER["rf"] = None      # scan/stop must also release a running meter
         kill_tv()
         STATE.update({"rf": None, "prog": None, "virtual": None,
-                      "name": None, "tuning": False, "env": {}})
+                      "name": None, "tuning": False, "env": {},
+                      "stage": "", "stage_pct": 0})
 
 def record(virtual, title):
     p = subprocess.run([PY, str(TOOLS / "stvt_schedule.py"), "add-show",
                         virtual, title], capture_output=True, text=True,
                        timeout=60)
     return (p.stdout + p.stderr).strip()[-500:]
+
+# ── flight recorder: every watching/metering second becomes data ───
+# One JSONL row every 10 s while the chain runs. Over days this builds
+# the per-channel, per-gain, per-time-of-day picture that manual
+# calibration campaigns approximate in one evening.
+FLIGHT = HERE / "lab" / "flight_recorder.jsonl"
+
+def flight_recorder():
+    while True:
+        time.sleep(10)
+        try:
+            if STATE["rf"] is not None:
+                mode, rf = "watch", STATE["rf"]
+            elif METER["rf"] is not None:
+                mode, rf = "meter", METER["rf"]
+            else:
+                continue
+            knobs = {k: v for k, v in (STATE.get("env") or {}).items()
+                     if k in ("IFGR", "RFGAIN_SEL", "SDR_AGC",
+                              "AGC_SETPOINT", "ANTENNA")}
+            rec = {"iso": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                   "mode": mode, "rf": rf, "prog": STATE["prog"],
+                   "knobs": knobs}
+            rec.update(live_math())
+            with open(FLIGHT, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec) + "\n")
+        except Exception:
+            pass
 
 def live_math():
     out = {}
@@ -206,7 +455,10 @@ def live_math():
         if errs:
             mers = [20 * math.log10(5.0 / e) for e in errs if e > 0]
             if mers:
-                out["mer_db"] = round(sum(mers) / len(mers), 2)
+                # median, not mean: convergence transients right after a
+                # (re)tune dragged the mean down and read as false alarm
+                srt = sorted(mers)
+                out["mer_db"] = round(srt[len(srt) // 2], 2)
                 out["mer_last"] = round(mers[-1], 2)
         fp = RE_FPLL.findall(text)
         if fp:
@@ -245,6 +497,12 @@ button{cursor:pointer;border:0;border-radius:6px;padding:3px 9px;font-size:11px}
 .show{color:#c7d5e8}.cont{color:#5f7591}.now{outline:1px solid #2f79d4;border-radius:4px}
 #toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#152238;
 border:1px solid #2f79d4;border-radius:8px;padding:10px 16px;display:none;max-width:70%;white-space:pre-wrap;font-size:12px;z-index:9}
+.pbar{height:9px;background:#101c30;border-radius:5px;margin-top:7px;overflow:hidden;border:1px solid #1a2c48}
+.pbar div{height:100%;background:linear-gradient(90deg,#1e5fae,#67d18a);transition:width .9s;border-radius:5px}
+.scanbtn{float:right;background:#1a4a3a;color:#8fe0b0;border:1px solid #2a6a52;
+padding:7px 16px;border-radius:8px;cursor:pointer;font-size:13px}
+.scanbtn:hover{background:#226349}.scanbtn:disabled{opacity:.4;cursor:default}
+.failbanner{color:#e77;font-weight:600}
 .cards{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
 .card{background:#0d1626;border:1px solid #26436b;border-radius:10px;padding:8px 12px;min-width:96px}
 .card .k{color:#7f96b3;font-size:10px;text-transform:uppercase;letter-spacing:.5px}
@@ -260,7 +518,9 @@ canvas{width:100%;image-rendering:pixelated;display:block;border-radius:4px}
 <h1>TV Tuna 🐟 <span style="font-weight:400;color:#7f96b3">control panel</span></h1>
 <div class="sub">one tuner &middot; six towers &middot; every knob measured, nothing guessed</div>
 <div class="tabs"><button id="tabG" class="on" onclick="showTab('G')">GUIDE</button>
-<button id="tabN" onclick="showTab('N')">STATS FOR NERDS</button></div>
+<button id="tabN" onclick="showTab('N')">STATS FOR NERDS</button>
+<button id="tabF" onclick="showTab('F')">🎯 SIGNAL FINDER</button>
+<button id="scanBtn" class="scanbtn" onclick="startScan()">📡 SCAN CHANNELS</button></div>
 <div id="status">loading…</div>
 <div id="pageG"><div id="grid">loading guide…</div></div>
 <div id="pageN" style="display:none">
@@ -286,13 +546,39 @@ canvas{width:100%;image-rendering:pixelated;display:block;border-radius:4px}
   <b>in_rms</b> is signal level after the front end, <b>max|x|</b> near 1.57 means clipping,
   <b>gaps/min</b> counts stream holes the eye would see as glitches.</div>
 </div>
+<div id="pageF" style="display:none">
+  <div style="max-width:900px;margin:0 auto;text-align:center">
+    <div id="fchans" style="margin-bottom:14px;color:#7f96b3;font-size:12px">loading channels…</div>
+    <div id="fbig" style="font-size:110px;font-weight:800;line-height:1;margin:10px 0;color:#5f7591">—</div>
+    <div id="fpeak" style="color:#e7c96a;font-size:14px;margin-bottom:4px">&nbsp;</div>
+    <div id="fsub" style="color:#7f96b3;font-size:13px;margin-bottom:10px">pick a channel to start metering</div>
+    <div style="background:#101c30;border-radius:8px;height:26px;position:relative;margin:0 30px 6px">
+      <div id="fbar" style="height:100%;width:0%;border-radius:8px;transition:width .7s,background .7s"></div>
+      <div style="position:absolute;top:-4px;bottom:-4px;width:2px;background:#e7c96a;left:calc((15.2 - 8)/14*100%)"></div>
+      <div style="position:absolute;top:30px;left:calc((15.2 - 8)/14*100% - 30px);color:#e7c96a;font-size:10px">cliff 15.2</div>
+    </div>
+    <div style="color:#5f7591;font-size:10px;margin:14px 30px 12px;display:flex;justify-content:space-between"><span>8 dB</span><span>22 dB</span></div>
+    <button id="ftone" class="tune" style="font-size:14px;padding:8px 20px" onclick="toggleTone()">🔊 tone: OFF</button>
+    <button id="fchirp" class="tune" style="font-size:14px;padding:8px 20px;background:#1a4a3a" onclick="toggleChirp()">🔔 record chirp: ON</button>
+    <button class="stop" style="font-size:14px;padding:8px 20px" onclick="stopMeter()">stop metering</button>
+    <div class="edu" style="text-align:left;margin-top:18px"><b>How to aim an antenna with this:</b>
+    pick the channel you care about, turn the tone on, then move / rotate / extend
+    the antenna <b>slowly</b> (multipath cells are inches wide) and listen:
+    <b>higher pitch = more decode margin</b>. The number is MER — the equalizer's own
+    measurement of how clean the 8-VSB constellation is. Below the yellow cliff line
+    television does not exist; above ~17 dB you have comfortable margin. Red→green
+    tracks the same scale. Park the antenna where the pitch peaks, wait 5 seconds to
+    confirm it holds (signals breathe), then go watch TV. Remember each channel has
+    its own sweet spot — aim on the one you'll watch.</div>
+  </div>
+</div>
 <div id="toast"></div>
 <script>
 let TAB='G';
-function showTab(t){TAB=t;document.getElementById('pageG').style.display=t==='G'?'':'none';
-document.getElementById('pageN').style.display=t==='N'?'':'none';
-document.getElementById('tabG').className=t==='G'?'on':'';
-document.getElementById('tabN').className=t==='N'?'on':'';}
+function showTab(t){TAB=t;
+for(const p of ['G','N','F']){
+document.getElementById('page'+p).style.display=t===p?'':'none';
+document.getElementById('tab'+p).className=t===p?'on':'';}}
 function toast(m){const el=document.getElementById('toast');el.textContent=m;el.style.display='block';
 setTimeout(()=>el.style.display='none',6000)}
 async function tune(rf,prog,virt,name){
@@ -302,28 +588,121 @@ await fetch('/api/tune',{method:'POST',body:JSON.stringify({rf,prog,virt,name})}
 async function stopTv(){await fetch('/api/stop',{method:'POST'});toast('TV stopped — tuner idle, waterfall resumes')}
 async function rec(virt,title){toast('scheduling '+title+' …');
 const r=await fetch('/api/record',{method:'POST',body:JSON.stringify({virt,title})});toast(await r.text())}
+function pbar(p){return `<div class="pbar"><div style="width:${p||0}%"></div></div>`}
+async function startScan(){
+toast('📡 channel scan starting — TV stops, takes ~3-6 min, guide refreshes itself when done');
+await fetch('/api/scan',{method:'POST'})}
+let BUSY=false, WAS_SCANNING=false;
 async function refreshStatus(){try{const s=await (await fetch('/api/status')).json();
+const scanning=s.scan&&s.scan.running;
+BUSY=s.tuning||scanning;
+document.getElementById('scanBtn').disabled=BUSY;
 let h;
-if(s.tuning) h='⏳ <b>tuning '+(s.virtual||'')+' '+(s.name||'')+'…</b> chain locking + player launch ≈ 30 s';
-else if(s.tuned) h=`watching <b>${s.virtual} ${s.name||''}</b> (RF${s.rf} p${s.prog})`+
- ` · <b>${s.hdrs_s??'—'}</b> hdrs/s · <b>${s.gaps_min??'—'}</b> gaps/min · ${s.real_pct??'—'}% real`+
- ` <button class="stop" onclick="stopTv()">stop TV</button>`;
-else h='tuner idle — waterfall live on NERD tab · click a station to tune';
+if(scanning){WAS_SCANNING=true;
+ const m=Math.floor(s.scan.elapsed/60),sec=(''+s.scan.elapsed%60).padStart(2,'0');
+ h=`📡 <b>scanning for channels…</b> ${m}:${sec} · <span style="color:#7f96b3">${s.scan.line||''}</span>`+pbar(s.scan.pct);}
+else{
+ if(WAS_SCANNING){WAS_SCANNING=false;loadGrid();toast('📡 scan complete — guide refreshed')}
+ if(s.tuning) h='⏳ <b>tuning '+(s.virtual||'')+' '+(s.name||'')+'</b> — '+(s.stage||'starting…')+pbar(s.stage_pct);
+ else if(s.tuned&&s.stage&&s.stage.startsWith('PLAYER')) h='🔴 <span class="failbanner">'+s.stage+'</span>'+
+  ` <button class="stop" onclick="stopTv()">stop</button>`;
+ else if(s.tuned){h=`watching <b>${s.virtual} ${s.name||''}</b> (RF${s.rf} p${s.prog})`+
+  ` · <b>${s.hdrs_s??'—'}</b> hdrs/s · <b>${s.gaps_min??'—'}</b> gaps/min · ${s.real_pct??'—'}% real`+
+  ` <button class="stop" onclick="stopTv()">stop TV</button>`;
+  if(s.hdrs_s===0&&(s.real_pct||0)<5) h+=' <span style="color:#e7c96a">⚠ locked but nothing decoding — signal is under the cliff, aim with 🎯</span>';}
+ else if(s.stage&&s.stage.startsWith('RADIO FAILED')) h='🔴 <span class="failbanner">'+s.stage+'</span>';
+ else h='tuner idle — waterfall live on NERD tab · click a station to tune · 📡 SCAN refreshes the guide';}
 document.getElementById('status').innerHTML=h;}catch(e){}}
 async function loadGrid(){const g=await (await fetch('/api/grid')).json();
 let h='<table><tr><th>station</th>';g.slots.forEach(s=>h+='<th>'+s+'</th>');h+='<th></th></tr>';
-g.rows.forEach(r=>{const bc=r.tune==='+'?'b-plus':(r.tune==='~'?'b-tilde':'b-x');
-const s=r.snr||0;const bars=s>=55?'▂▄▆█':s>=48?'▂▄▆':s>=40?'▂▄':s>0?'▂':'';
-const scol=s>=55?'#67d18a':s>=48?'#a8d167':s>=40?'#e7c96a':'#e77';
+let lastRf=null;
+g.rows.forEach(r=>{
+if(r.rf!==lastRf){lastRf=r.rf;
+const s=r.snr||0,pct=Math.max(0,Math.min(100,Math.round((s-20)/35*100)));
+const col=pct>=70?'#67d18a':(pct>=45?'#e7c96a':'#e77');
+const blocks='█'.repeat(Math.round(pct/10))+'░'.repeat(10-Math.round(pct/10));
+h+=`<tr><td colspan="${g.slots.length+2}" style="background:#0d1626;border-top:2px solid #26436b;padding:7px 6px">`+
+`📡 <b>tower RF${r.rf}</b> &nbsp;<span style="color:${col};font-family:monospace">${blocks}</span> `+
+`<span style="color:${col};font-weight:700">${pct}%</span>`+
+`<span style="color:#5f7591;font-size:11px"> · pilot ${s?s.toFixed(0):'—'} dB over the noise floor`+
+(s?` = <b>${Math.round(Math.pow(10,s/10)).toLocaleString()}×</b> the static`:'')+
+(r.rms!=null&&g.floor!=null?` · level ${r.rms.toFixed(1)} dBFS / floor ${g.floor.toFixed(1)} dBFS`:'')+
+` · one transmitter shared by every station below</span></td></tr>`}
+const bc=r.tune==='+'?'b-plus':(r.tune==='~'?'b-tilde':'b-x');
 h+=`<tr><td class="ch"><span class="badge ${bc}">${r.tune}</span>`+
-`<button class="tune" onclick='tune(${r.rf},${r.prog},"${r.virtual}","${r.callsign}")'>${r.virtual}</button> ${r.callsign} `+
-`<span style="color:${scol};letter-spacing:1px" title="pilot SNR">${bars}</span>`+
-`<span style="color:#5f7591;font-size:10px"> ${s?s+'dB':''}</span></td>`;
+`<button class="tune" onclick='tune(${r.rf},${r.prog},"${r.virtual}","${r.callsign}")'>${r.virtual}</button> ${r.callsign}</td>`;
 r.cells.forEach((c,i)=>{h+=`<td class="${i===0?'now':''}">`+(c.cont?`<span class="cont">&raquo; ${c.title}</span>`
 :(c.title?`<span class="show">${c.title}</span>`:'<span class="cont">—</span>'))+'</td>'});
 const nowT=(r.cells[0]&&r.cells[0].title)||'';
 h+=`<td>${nowT?`<button class="rec" onclick='rec("${r.virtual}",${JSON.stringify(nowT)})'>REC</button>`:''}</td></tr>`});
-h+='</table>';document.getElementById('grid').innerHTML=h}
+h+='</table>';
+h+='<div class="edu" style="margin-top:10px"><b>Reading the tower meters:</b> every ATSC transmitter sends a '+
+'constant marker tone (the <b>pilot</b>) beside its data. We measure how far it rises above the radio static '+
+'(the <b>noise floor</b>) in decibels — a power ratio, where every +10 dB means 10× the power '+
+'(so 30 dB = 1,000×, 48 dB = 63,000×). The % maps that onto what it takes to watch TV: '+
+'<span style="color:#e77">25 dB — carrier barely detectable</span> · '+
+'<span style="color:#e7c96a">35 dB — lock sometimes possible</span> · '+
+'<span style="color:#67d18a">45 dB+ — solid television</span>. '+
+'Note the pilot only proves the tower is <i>reaching</i> us — whether the data survives the trip is what '+
+'MER measures (🎯 SIGNAL FINDER / NERD tab). Absolute levels are in <b>dBFS</b> — decibels below the '+
+'receiver\\'s full-scale ceiling (0 dBFS = the loudest sound the converter can hear; −60 is quiet static). '+
+'Diagnostic gold: if the <b>floor itself</b> rises from one scan to the next, the noise came to <i>you</i> '+
+'(new interference, a powered amp, USB hash) — the towers didn\\'t get weaker.</div>';
+document.getElementById('grid').innerHTML=h;buildFinderChans()}
+// ── signal finder: eyes (big number, red→green) + ears (tone pitch) ──
+let METER_RF=null, AC=null, OSC=null, GN=null, TONE=false;
+async function buildFinderChans(){try{
+const cars=await (await fetch('/api/carriers')).json();
+if(!cars.length){document.getElementById('fchans').textContent='no scan data — run 📡 SCAN CHANNELS first';return}
+let h='<b>aim on any carrier</b> (strongest first): ';
+cars.slice(0,16).forEach(c=>{
+const col=c.lock?'#67d18a':(c.snr>=35?'#e7c96a':'#5f7591');
+h+=`<button class="tune" style="margin:2px;border:1px solid ${col}" onclick="startMeter(${c.rf})">RF${c.rf}${c.cs?' '+c.cs:''} · ${c.snr}dB${c.lock?' ✓':''}</button>`});
+h+='<div style="margin-top:6px;color:#5f7591">✓ green = locked in last scan · yellow = strong carrier worth hunting · grey = faint · VHF (RF 13 and below) can be metered — a good aim there helps us crack the VHF recipe</div>';
+document.getElementById('fchans').innerHTML=h}catch(e){}}
+let PEAK=null, CHIRP=true;
+function toggleChirp(){CHIRP=!CHIRP;
+document.getElementById('fchirp').textContent='🔔 record chirp: '+(CHIRP?'ON':'OFF')}
+function chirp(){if(!AC)return;const o=AC.createOscillator(),g=AC.createGain();
+o.type='sine';o.connect(g);g.connect(AC.destination);
+o.frequency.setValueAtTime(880,AC.currentTime);
+o.frequency.setValueAtTime(1320,AC.currentTime+0.07);
+g.gain.setValueAtTime(0.25,AC.currentTime);
+g.gain.exponentialRampToValueAtTime(0.001,AC.currentTime+0.22);
+o.start();o.stop(AC.currentTime+0.25)}
+async function startMeter(rf){METER_RF=rf;PEAK=null;
+document.getElementById('fpeak').innerHTML='&nbsp;';
+if(!AC)AC=new (window.AudioContext||window.webkitAudioContext)();
+document.getElementById('fsub').textContent='starting chain on RF'+rf+' — first number in ~15-25 s';
+await fetch('/api/meter',{method:'POST',body:JSON.stringify({rf})})}
+async function stopMeter(){METER_RF=null;toneOff();
+const b=document.getElementById('fbig');b.textContent='—';b.style.color='#5f7591';
+document.getElementById('fsub').textContent='meter stopped';
+await fetch('/api/meter/stop',{method:'POST'})}
+function toneOff(){TONE=false;if(OSC){try{OSC.stop()}catch(e){}OSC=null}
+document.getElementById('ftone').textContent='🔊 tone: OFF'}
+function toggleTone(){if(TONE){toneOff();return}
+TONE=true;if(!AC)AC=new (window.AudioContext||window.webkitAudioContext)();
+OSC=AC.createOscillator();GN=AC.createGain();GN.gain.value=0.12;
+OSC.type='sine';OSC.frequency.value=200;OSC.connect(GN);GN.connect(AC.destination);OSC.start();
+document.getElementById('ftone').textContent='🔊 tone: ON'}
+async function pollMeter(){if(TAB!=='F'||METER_RF===null)return;
+try{const m=await (await fetch('/api/meter')).json();
+if(m.rf===null||m.mer_last===undefined)return;
+const v=m.mer_last, hue=Math.max(0,Math.min(1,(v-8)/12))*120;
+const big=document.getElementById('fbig');big.textContent=v.toFixed(1);
+big.style.color=`hsl(${hue},75%,55%)`;
+if(PEAK===null||v>PEAK+0.05){const beat=PEAK!==null;PEAK=v;
+document.getElementById('fpeak').innerHTML='🏆 session best: <b>'+PEAK.toFixed(2)+' dB</b>'+(PEAK>=15.2?' — over the cliff!':'');
+if(beat&&CHIRP)chirp()}
+document.getElementById('fsub').innerHTML=`RF${m.rf} · MER <b>${v.toFixed(2)} dB</b> · level ${m.in_rms??'—'} · `+
+(v>=15.2?'<span style="color:#67d18a">ABOVE the cliff — TV exists here</span>'
+:'<span style="color:#e77">below the cliff — keep aiming ('+(15.2-v).toFixed(1)+' dB to go)</span>');
+const bar=document.getElementById('fbar');
+bar.style.width=Math.max(0,Math.min(100,(v-8)/14*100))+'%';
+bar.style.background=`hsl(${hue},70%,45%)`;
+if(TONE&&OSC)OSC.frequency.setTargetAtTime(180+Math.max(0,Math.min(1,(v-6)/16))*1320,AC.currentTime,0.08);
+}catch(e){}}
 function card(k,v,u,cls){return `<div class="card"><div class="k">${k}</div>`+
 `<div class="v ${cls||''}">${v}</div><div class="u">${u||''}</div></div>`}
 async function refreshNerd(){if(TAB!=='N')return;
@@ -428,9 +807,12 @@ if(nf0<F0){nf0=F0;nf1=F0+(panF1-panF0)}if(nf1>F1){nf1=F1;nf0=F1-(panF1-panF0)}
 vf0=nf0;vf1=nf1;redraw()});
 window.addEventListener('mouseup',()=>{panning=false;cv.style.cursor='grab'});
 cv.addEventListener('dblclick',()=>{[vf0,vf1]=fullRange();redraw()});
-loadGrid();refreshStatus();
-setInterval(refreshStatus,8000);setInterval(loadGrid,300000);
+loadGrid();
+(async function statusLoop(){await refreshStatus();
+setTimeout(statusLoop,BUSY?1800:8000)})();
+setInterval(loadGrid,300000);
 setInterval(refreshNerd,3000);setInterval(refreshWf,1200);
+setInterval(pollMeter,1000);
 </script></body></html>"""
 
 RF_MHZ = {rf: 473 + (rf - 14) * 6 + 3 for rf in range(14, 37)}  # center MHz
@@ -453,6 +835,15 @@ def chan_map():
 
 def grid_json():
     channels, _ = load_epg()
+    floor = None
+    rms_by_rf = {}
+    try:
+        d = json.loads(SCAN_PATH.read_text(encoding="utf-8"))
+        floor = d.get("noise_floor_dbfs")
+        rms_by_rf = {c["rf"]: c.get("rms_dbfs")
+                     for c in d.get("channels", [])}
+    except (OSError, json.JSONDecodeError):
+        pass
     now = time.time()
     slot0 = int(now // 1800) * 1800
     slots = [slot0 + i * 1800 for i in range(4)]
@@ -472,8 +863,9 @@ def grid_json():
         rows.append({"rf": ch["rf"], "prog": ch["program"],
                      "virtual": ch["virtual"], "callsign": ch["callsign"],
                      "tune": ch.get("tune", " "), "snr": ch.get("snr_db"),
+                     "rms": rms_by_rf.get(ch["rf"]),
                      "cells": cells})
-    return {"slots": slot_labels, "rows": rows}
+    return {"slots": slot_labels, "rows": rows, "floor": floor}
 
 
 class H(BaseHTTPRequestHandler):
@@ -493,9 +885,33 @@ class H(BaseHTTPRequestHandler):
         elif self.path == "/api/status":
             st = {k: STATE[k] for k in ("rf", "prog", "virtual", "name", "tuning")}
             st["tuned"] = STATE["rf"] is not None and not STATE["tuning"]
+            st["stage"] = STATE.get("stage") or ""
+            st["stage_pct"] = STATE.get("stage_pct") or 0
+            st["scan"] = {"running": SCAN["running"], "line": SCAN["line"],
+                          "pct": SCAN["pct"],
+                          "elapsed": int(time.time() - SCAN["t0"])
+                                     if SCAN["t0"] else 0}
             if st["tuned"]:
                 st.update(live_math())
             self._send(json.dumps(st))
+        elif self.path == "/api/meter":
+            out = {"rf": METER["rf"]}
+            if METER["rf"] is not None:
+                out.update(live_math())
+            self._send(json.dumps(out))
+        elif self.path == "/api/carriers":
+            try:
+                data = json.loads(SCAN_PATH.read_text(encoding="utf-8"))
+                cars = [{"rf": c["rf"],
+                         "snr": round(c.get("pilot_snr_db") or 0, 1),
+                         "lock": bool(c.get("lock")),
+                         "cs": c.get("callsign") or ""}
+                        for c in data.get("channels", [])
+                        if not c.get("not_detected")]
+                cars.sort(key=lambda x: -x["snr"])
+                self._send(json.dumps(cars))
+            except (OSError, json.JSONDecodeError, KeyError):
+                self._send("[]")
         elif self.path == "/api/nerd":
             self._send(json.dumps({"rf": STATE["rf"], "prog": STATE["prog"],
                                    "knobs": STATE.get("env") or {},
@@ -528,6 +944,16 @@ class H(BaseHTTPRequestHandler):
         elif self.path == "/api/stop":
             threading.Thread(target=stop_tv, daemon=True).start()
             self._send('"stopped"')
+        elif self.path == "/api/scan":
+            threading.Thread(target=run_scan, daemon=True).start()
+            self._send('"scanning"')
+        elif self.path == "/api/meter":
+            threading.Thread(target=meter_start, args=(req["rf"],),
+                             daemon=True).start()
+            self._send('"metering"')
+        elif self.path == "/api/meter/stop":
+            threading.Thread(target=meter_stop, daemon=True).start()
+            self._send('"meter stopped"')
         elif self.path == "/api/record":
             out = record(req["virt"], req["title"])
             self._send(out or "scheduled", "text/plain; charset=utf-8")
@@ -537,5 +963,6 @@ class H(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     threading.Thread(target=sweeper, daemon=True).start()
+    threading.Thread(target=flight_recorder, daemon=True).start()
     print(f"TV Tuna panel: http://localhost:{PORT}", flush=True)
     ThreadingHTTPServer(("127.0.0.1", PORT), H).serve_forever()
