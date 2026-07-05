@@ -60,6 +60,7 @@ def run_scan():
         stop_tv()
         time.sleep(3)
         env = base_env(36)
+        env["STVT_DABNOTCH"] = "0"   # scans must hear VHF-hi (RF7-13)
         p = subprocess.Popen([PY, "-u", str(TOOLS / "tv_tuner.py"), "--scan"],
                              env=env, stdin=subprocess.PIPE,
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -251,7 +252,11 @@ def base_env(rf):
                 "STVT_SDR_AGC": "1", "STVT_AGC_SETPOINT": "-20",
                 "STVT_EQ": "long",
                 "STVT_VITERBI": "soft", "STVT_RFNOTCH": "1",
-                "STVT_DABNOTCH": "1", "STVT_RS": "stock", "STVT_SPS": "1.1",
+                # DAB band III (174-240 MHz) IS the US VHF-hi TV band —
+                # the notch was amputating RF7-13 by ~20 dB (solved
+                # 2026-07-04: in_rms 16.5 -> 170 on RF7 with it off).
+                "STVT_DABNOTCH": "0" if rf < 14 else "1",
+                "STVT_RS": "stock", "STVT_SPS": "1.1",
                 "STVT_RRC_SYMS": "8", "STVT_TEISCRUB": "1",
                 "STVT_EQ_LKG": "1", "STVT_EQ_LKG_RMS": "1.0",
                 "STVT_EQ_TELEM": "1"})
@@ -582,8 +587,7 @@ document.getElementById('tab'+p).className=t===p?'on':'';}}
 function toast(m){const el=document.getElementById('toast');el.textContent=m;el.style.display='block';
 setTimeout(()=>el.style.display='none',6000)}
 async function tune(rf,prog,virt,name){
-if(rf<14){toast('⚠ '+virt+' '+name+' rides RF'+rf+' — VHF. The scanner locks it but the play chain needs a VHF gain recipe we have not cracked yet (tomorrow\\'s research). Pick a UHF station (4.x, 5.x, 14.x, 20.x, 44.x, 66.x, 68.x).');return}
-toast('tuning '+virt+' '+name+' — ~30s to picture');
+toast('tuning '+virt+' '+name+' — ~30s to picture'+(rf<14?' (VHF — DAB-notch fix 2026-07-04)':''));
 await fetch('/api/tune',{method:'POST',body:JSON.stringify({rf,prog,virt,name})})}
 async function stopTv(){await fetch('/api/stop',{method:'POST'});toast('TV stopped — tuner idle, waterfall resumes')}
 async function rec(virt,title){toast('scheduling '+title+' …');
