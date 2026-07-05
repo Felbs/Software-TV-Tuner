@@ -473,6 +473,17 @@ def base_env(rf):
                 "STVT_EQ_CIR": "1"})   # echo X-ray telemetry (H2)
     return env
 
+def kill_watch():
+    """Kill only the player side (tv_watch/mpv/ffmpeg) — the chain keeps
+    decoding. This is what makes same-mux hops instant."""
+    subprocess.run(["powershell", "-NoProfile", "-Command",
+                    "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+                    "Where-Object { $_.CommandLine -match 'tv_watch' } | "
+                    "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
+                    "-ErrorAction SilentlyContinue }"], capture_output=True)
+    subprocess.run(["taskkill", "/F", "/IM", "mpv.exe"], capture_output=True)
+    subprocess.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True)
+
 def kill_tv():
     subprocess.run(["powershell", "-NoProfile", "-Command",
                     "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
@@ -488,6 +499,53 @@ def set_stage(pct, msg):
 def tune(rf, prog, virtual, name):
     BAL["on"] = False
     FLAT["on"] = False
+    # INSTANT SAME-MUX HOP (2026-07-05): stations on one tower share the
+    # same radio signal — if the chain is already decoding this RF, only
+    # the player needs to change. ~8 s instead of ~60.
+    try:
+        chain_fresh = (time.time() - CHAIN_LOG.stat().st_mtime) < 6
+    except OSError:
+        chain_fresh = False
+    if (rf == STATE["rf"] and not STATE["tuning"]
+            and STATE["rf"] is not None and chain_fresh):
+        with LOCK:
+            GEN[0] += 1
+            my_gen = GEN[0]
+            METER["rf"] = None
+            STATE.update({"prog": prog, "virtual": virtual, "name": name,
+                          "tuning": True})
+            set_stage(40, f"same-tower hop → {virtual} (radio already "
+                          "tuned, swapping program only)")
+        def hop():
+            kill_watch()
+            time.sleep(1)
+            if GEN[0] != my_gen:
+                return
+            env = base_env(rf)
+            cm = chain_math()
+            marginal = (cm.get("mer_db") or 99) < 16.5
+            set_stage(70, f"extracting program {prog}"
+                          + (" (forced-video mode)" if marginal else ""))
+            watch_args = [PY, "-u", str(HERE / "tv_watch.py"), str(prog)]
+            if marginal:
+                watch_args.append("marginal")
+            watch_log = open(HERE / "lab" / "panel_watch.log", "w")
+            subprocess.Popen(watch_args, env=env,
+                             stdout=watch_log, stderr=subprocess.STDOUT)
+            t0 = time.time()
+            while time.time() - t0 < 120:
+                if GEN[0] != my_gen:
+                    return
+                r = subprocess.run(["tasklist", "/FI",
+                                    "IMAGENAME eq mpv.exe"],
+                                   capture_output=True, text=True)
+                if "mpv.exe" in (r.stdout or ""):
+                    break
+                time.sleep(1)
+            set_stage(100, "")
+            STATE.update({"tuning": False})
+        threading.Thread(target=hop, daemon=True).start()
+        return
     with LOCK:
         GEN[0] += 1
         my_gen = GEN[0]
