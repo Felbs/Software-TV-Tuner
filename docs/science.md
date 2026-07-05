@@ -798,6 +798,25 @@ later stages would misdiagnose:
   nothing) and the second session works — restart the vendor API
   service after replugging and don't diagnose anything from the
   first attempt.
+- **The filter you forgot about is jamming you: audit every default
+  against the local band plan.** For months, VHF-hi channels (RF 7–13)
+  presented a perfect paradox: the channel scanner locked them and read
+  their program guides, but the play chain starved at every gain
+  setting, on every antenna. Gain recipes, antenna theories, port
+  swaps — nothing moved it. The killer was a single default: the
+  SDR's *DAB notch*, a hardware filter meant to reject Europe's
+  digital-radio band, enabled since forever because it seemed
+  harmless. DAB band III spans 174–240 MHz. American VHF-hi
+  television lives at 174–216 MHz. The "harmless" notch was a ~20 dB
+  bite out of our own TV channels — the scanner only ever locked VHF
+  when its environment happened to omit the notch. The proof took 90
+  seconds once telemetry pointed at it: front-end level 16.5 with the
+  notch, 170 without, and minutes later channel 7 produced the first
+  VHF video in the project's history. Two lessons: a *filter-shaped*
+  symptom (level 10× down, uniform, gain-independent, but only on
+  certain channels) is a filter, not propagation; and any
+  region-specific default in a supposedly universal signal path is a
+  bug waiting for a continent to expose it.
 - **A good antenna needs no electronics at this location.** The
   same attic antenna measured MER 19.5 bare, 19.5 with its own
   amp, and 19.3 through a powered wideband LNA — but scored
