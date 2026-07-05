@@ -17,6 +17,7 @@
 #include "atsc_types.h"
 #include <gnuradio/io_signature.h>
 #include <volk/volk.h>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -390,6 +391,99 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
         d_fs_count = 0;
     }
 
+    // 2026-07-05 IMPULSE-GATED ADAPTATION FREEZE (stop-and-go LMS, research
+    // hypothesis H1). Adaptation only happens on field syncs; when an
+    // impulse burst lands ON the training sequence, the LMS eats a garbage
+    // gradient at full step and the taps take several fields to recover —
+    // and in cliff mode the same corrupt batch can fire a spurious QUALITY
+    // reset. Guard: compute the batch's a-priori error BEFORE updating; if
+    // it exceeds IMPULSE_K × the running EWMA of accepted batches, freeze —
+    // no tap update, no leak, no LKG/gear/quality decisions from poisoned
+    // data. Output is still produced (downstream needs the field sync).
+    // Warmup: never freeze during initial convergence (errors are honestly
+    // large there). Default OFF for A/B integrity (STVT_EQ_IMPULSE_GUARD=1).
+    static const bool IMPULSE_GUARD = []() -> bool {
+        const char* p = std::getenv("STVT_EQ_IMPULSE_GUARD");
+        return p && std::atoi(p) != 0;
+    }();
+    static const float IMPULSE_K = []() -> float {
+        if (const char* p = std::getenv("STVT_EQ_IMPULSE_K")) {
+            char* e = nullptr; double v = std::strtod(p, &e);
+            if (e != p && v > 1.0) return (float)v;
+        }
+        return 2.5f;
+    }();
+    static const int IMPULSE_WARMUP = []() -> int {
+        if (const char* p = std::getenv("STVT_EQ_IMPULSE_WARMUP")) {
+            int v = std::atoi(p);
+            if (v >= 1 && v <= 10000) return v;
+        }
+        return 40;   // ~1 s of field syncs before the guard may engage
+    }();
+    static double imp_ewma = -1.0;
+    static int    imp_warm = 0;
+    static uint64_t imp_freezes = 0;
+
+    if (IMPULSE_GUARD && nsamples > 0) {
+        double pre_sq = 0.0;
+        for (int j = 0; j < nsamples; j++) {
+            float y_pre = 0.0f;
+            volk_32f_x2_dot_prod_32f(&y_pre, &lms_input[j], &d_taps[0], NTAPS);
+            const float e_pre = y_pre - training_pattern[j];
+            pre_sq += (double)e_pre * (double)e_pre;
+        }
+        const double pre_rms = std::sqrt(pre_sq / (double)nsamples);
+        const bool frozen = (imp_warm >= IMPULSE_WARMUP && imp_ewma > 0.0
+                             && pre_rms > (double)IMPULSE_K * imp_ewma);
+        if (frozen) {
+            imp_freezes++;
+            if (imp_freezes <= 5 || (imp_freezes & 0x3F) == 0) {
+                std::fprintf(stderr,
+                             "[atsc_equalizer_long] IMPULSE FREEZE #%llu "
+                             "(batch err %.3f > %.1fx ewma %.3f) — taps held\n",
+                             (unsigned long long)imp_freezes, pre_rms,
+                             (double)IMPULSE_K, imp_ewma);
+            }
+            // produce output from the untouched taps, change nothing else
+            for (int j = 0; j < nsamples; j++) {
+                output_samples[j] = 0;
+                volk_32f_x2_dot_prod_32f(
+                    &output_samples[j], &input_samples[j], &d_taps[0], NTAPS);
+            }
+            return;
+        }
+        imp_ewma = (imp_ewma < 0.0) ? pre_rms
+                                    : 0.95 * imp_ewma + 0.05 * pre_rms;
+        imp_warm++;
+    }
+
+    // 2026-07-05 ROBUST (HUBER) CONFIDENCE-WEIGHTED LMS — hypothesis H1
+    // step 3, the knobless successor to the binary impulse freeze. Every
+    // training sample's gradient contribution is weighted by how trustworthy
+    // its error looks: full strength up to HUBER_K × the running robust
+    // scale (EWMA of the batch MEDIAN |e| — medians shrug off impulses),
+    // clamped beyond it. An impulse corrupting 30 of 832 training symbols
+    // costs those 30 samples their influence — the other 802 still teach at
+    // full speed, unlike the batch freeze which discards everything.
+    // HUBER_K is dimensionless (≈ sigma units, default 3.0) so it transfers
+    // across antennas/channels — the scale itself is what self-calibrates.
+    // Default OFF (STVT_EQ_ROBUST=1 to enable) pending live A/B.
+    static const bool ROBUST = []() -> bool {
+        const char* p = std::getenv("STVT_EQ_ROBUST");
+        return p && std::atoi(p) != 0;
+    }();
+    static const float HUBER_K = []() -> float {
+        if (const char* p = std::getenv("STVT_EQ_HUBER_K")) {
+            char* e = nullptr; double v = std::strtod(p, &e);
+            if (e != p && v > 0.5) return (float)v;
+        }
+        return 3.0f;
+    }();
+    static double rob_scale = -1.0;   // EWMA of batch median |e|
+    static uint64_t rob_clamped = 0;  // samples clamped, lifetime
+    float abs_e_buf[1024];
+    const bool rob_active = ROBUST && nsamples > 0 && nsamples <= 1024;
+
     // Accumulate RMS error during this adapt batch for LKG quality assessment.
     double err_sq_sum = 0.0;
 
@@ -412,10 +506,29 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
             volk_32f_x2_dot_prod_32f(&y_avg, &lms_input[j], &d_taps[0], NTAPS);
         }
         float e = y_avg - training_pattern[j];
-        err_sq_sum += (double)e * (double)e;
+        err_sq_sum += (double)e * (double)e;   // raw error: telemetry/quality
+        float e_adapt = e;                     // gradient error: maybe clamped
+        if (rob_active) {
+            abs_e_buf[j] = std::fabs(e);
+            if (rob_scale > 0.0) {
+                const float c = HUBER_K * (float)rob_scale;
+                if (e_adapt >  c) { e_adapt =  c; rob_clamped++; }
+                if (e_adapt < -c) { e_adapt = -c; rob_clamped++; }
+            }
+        }
         float tmp_taps[NTAPS];
-        volk_32f_s32f_multiply_32f(tmp_taps, &lms_input[j], effective_mu * e, NTAPS);
+        volk_32f_s32f_multiply_32f(tmp_taps, &lms_input[j], effective_mu * e_adapt, NTAPS);
         volk_32f_x2_subtract_32f(&d_taps[0], &d_taps[0], tmp_taps, NTAPS);
+    }
+
+    // Robust scale update: batch median of |e| via nth_element, EWMA'd.
+    // The median is what makes this impulse-proof — a burst corrupting a
+    // minority of samples barely moves it, so the clamp level stays honest.
+    if (rob_active) {
+        float* mid = abs_e_buf + nsamples / 2;
+        std::nth_element(abs_e_buf, mid, abs_e_buf + nsamples);
+        const double med = (double)*mid;
+        rob_scale = (rob_scale < 0.0) ? med : 0.95 * rob_scale + 0.05 * med;
     }
 
     float keep = 1.0f - LEAK;
@@ -451,9 +564,85 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
             double t = std::chrono::duration<double>(
                            std::chrono::steady_clock::now() - telem_t0).count();
             std::fprintf(stderr,
-                "[eq-long t=%6.2fs] fs=%llu fs_err_rms=%.4f |taps|=%.3f mu=%g\n",
+                "[eq-long t=%6.2fs] fs=%llu fs_err_rms=%.4f |taps|=%.3f mu=%g "
+                "frz=%llu hub=%.3f clmp=%llu\n",
                 t, (unsigned long long)telem_fs, batch_err_rms,
-                std::sqrt(tap_e), effective_mu);
+                std::sqrt(tap_e), effective_mu,
+                (unsigned long long)imp_freezes,
+                rob_scale > 0.0 ? rob_scale : 0.0,
+                (unsigned long long)rob_clamped);
+        }
+    }
+
+    // 2026-07-05 CIR TELEMETRY — the "echo X-ray" (research hypothesis H2).
+    // Correlating the received field sync against the known PN511 training
+    // sequence yields the channel impulse response directly: every echo's
+    // delay and strength, ~5×/s. Powers the panel's echo viewer (aim by
+    // killing reflections instead of chasing a scalar MER) and, later,
+    // analytic tap seeding. One symbol ≈ 92.9 ns ≈ 28 m of path difference.
+    // STVT_EQ_CIR=1 to enable; ~230k MACs per emission — negligible.
+    static const bool CIR_ENABLED = []() {
+        const char* p = std::getenv("STVT_EQ_CIR");
+        return p && std::atoi(p) != 0;
+    }();
+    // Coherent averaging (2026-07-05, v2): the field sync is symbol-locked,
+    // so real echoes correlate with the SAME sign every sync while noise and
+    // data-crosstalk flip randomly — summing signed correlations over
+    // CIR_AVG syncs sinks the noise floor by √N (16 syncs ≈ −12 dB), which
+    // is what lets the −34 dB threshold below stay honest.
+    if (CIR_ENABLED && nsamples == KNOWN_FIELD_SYNC_LENGTH) {
+        static const int CIR_AVG = []() -> int {
+            if (const char* p = std::getenv("STVT_EQ_CIR_AVG")) {
+                int v = std::atoi(p);
+                if (v >= 1 && v <= 128) return v;
+            }
+            return 16;
+        }();
+        const float* pn = training_pattern + 4;      // the PN511 span
+        const int NDELAY = nsamples + NTAPS - 511;
+        static std::vector<double> cir_acc;
+        static int cir_cnt = 0;
+        if ((int)cir_acc.size() != NDELAY) {
+            cir_acc.assign(NDELAY, 0.0);
+            cir_cnt = 0;
+        }
+        for (int d = 0; d < NDELAY; d++) {
+            float r = 0.0f;
+            volk_32f_x2_dot_prod_32f(&r, &input_samples[d], pn, 511);
+            cir_acc[d] += (double)r;                 // signed — coherent
+        }
+        cir_cnt++;
+        if (cir_cnt >= CIR_AVG) {
+            double peak = 0.0;
+            int dpeak = 0;
+            for (int d = 0; d < NDELAY; d++) {
+                const double m = std::fabs(cir_acc[d]);
+                if (m > peak) { peak = m; dpeak = d; }
+            }
+            if (peak > 0.0) {
+                static auto cir_t0 = std::chrono::steady_clock::now();
+                double t = std::chrono::duration<double>(
+                               std::chrono::steady_clock::now() - cir_t0).count();
+                char line[1600];
+                int len = std::snprintf(line, sizeof(line), "[cir t=%.2f] ", t);
+                int emitted = 0;
+                // averaged floor ≈ −27 dB − 20·log10(√CIR_AVG); with the
+                // default 16 that's ≈ −39 dB, so −34 dB bins are real.
+                const double thresh = 0.02 * peak;
+                for (int d = 0; d < NDELAY && emitted < 32; d++) {
+                    const double m = std::fabs(cir_acc[d]);
+                    if (m < thresh) continue;
+                    if (d != dpeak && std::abs(d - dpeak) <= 2) continue;
+                    const double db = 20.0 * std::log10(m / peak);
+                    len += std::snprintf(line + len, sizeof(line) - len,
+                                         "%d:%.1f,", d - dpeak, db);
+                    emitted++;
+                    if (len > (int)sizeof(line) - 32) break;
+                }
+                std::fprintf(stderr, "%s\n", line);
+            }
+            std::fill(cir_acc.begin(), cir_acc.end(), 0.0);
+            cir_cnt = 0;
         }
     }
 
