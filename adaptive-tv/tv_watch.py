@@ -62,12 +62,59 @@ class Extractor:
         self.stop = threading.Event()
         self.ff = None
 
+    def _english_first_maps(self):
+        """Order the program's streams video, ENGLISH audio, other audio,
+        subs — mpegts copy can shed language tags, so downstream players
+        default to track #1; make track #1 English at the source
+        (2026-07-05: NBC solo was defaulting to the Spanish SAP)."""
+        try:
+            pr = subprocess.run(
+                ["ffprobe", "-v", "error", "-print_format", "json",
+                 "-probesize", "20000000", "-analyzeduration", "10000000",
+                 "-show_programs", str(LIVE)],
+                capture_output=True, text=True, timeout=30)
+            progs = json.loads(pr.stdout or "{}").get("programs", [])
+            mine = next((p for p in progs
+                         if p.get("program_id") == self.prog), None)
+            if not mine:
+                return None
+            # Map by PID ("id" field), NEVER by index: the probe indexes
+            # the whole file, but the extractor demuxes a tail through a
+            # pipe where indexes renumber by discovery order — index maps
+            # once stitched True Crimes video to Telemundo audio. PIDs
+            # live in the packets themselves; same in every context.
+            vids, auds, subs = [], [], []
+            for s in mine.get("streams", []):
+                pid_s, ct = s.get("id"), s.get("codec_type")
+                if not pid_s:
+                    return None       # no PIDs = can't map safely
+                pid = int(str(pid_s), 16) if str(pid_s).startswith("0x") \
+                    else int(pid_s)
+                lang = ((s.get("tags") or {}).get("language") or "").lower()
+                if ct == "video":
+                    vids.append(pid)
+                elif ct == "audio":
+                    auds.append((0 if lang.startswith("en") else 1, pid))
+                elif ct == "subtitle":
+                    subs.append(pid)
+            if not vids or not auds:
+                return None
+            auds.sort()
+            maps = []
+            for pid in vids[:1] + [a[1] for a in auds] + subs:
+                maps += ["-map", f"0:i:{pid}"]
+            return maps
+        except Exception:
+            return None
+
     def start(self):
         if SOLO.exists():
             try: SOLO.unlink()
             except OSError: pass
-        maps = (["-map", f"0:p:{self.prog}"] if self.mode == "full"
-                else ["-map", f"0:p:{self.prog}:v:0", "-an"])
+        if self.mode == "full":
+            maps = self._english_first_maps() or ["-map", f"0:p:{self.prog}"]
+        else:
+            maps = ["-map", f"0:p:{self.prog}:v:0", "-an"]
         self.ff = subprocess.Popen(
             [FFMPEG, "-hide_banner", "-loglevel", "error",
              "-fflags", "+genpts+igndts+nobuffer+discardcorrupt",
@@ -266,7 +313,29 @@ def main():
         log(f"mux tracks by PMT: vid={vid} aid={aud} sid={sub} "
             f"(wanted v={want_v} a={a_want} s={want_s})")
     else:
-        ipc(["set_property", "sid", 1])   # the only CC track = this program's
+        # CC: loaded but HIDDEN — off by default, and one click of the OSC
+        # sub button (or 'v') shows it instantly. Force-selecting it
+        # visible at startup made the toggle need a full off/on cycle.
+        ipc(["set_property", "sid", 1])
+        ipc(["set_property", "sub-visibility", "no"])
+        # AUDIO RULE (2026-07-05): English is the default; other languages
+        # are optional translations behind the # key. Trust language TAGS
+        # first (mpv --alang already does when they exist); only when the
+        # stream is untagged fall back to track 1 — which the extractor's
+        # English-first mapping made English whenever the PMT was readable.
+        # Never blind-force aid over a tagged English track (that's how a
+        # Spanish default snuck onto NBC).
+        tracks = ipc(["get_property", "track-list"], req=5) or []
+        auds = [t for t in tracks if t.get("type") == "audio"]
+        eng = next((t["id"] for t in auds
+                    if str(t.get("lang", "")).lower().startswith("en")), None)
+        tagged = any(t.get("lang") for t in auds)
+        if eng is not None:
+            ipc(["set_property", "aid", eng])
+        elif not tagged and auds:
+            ipc(["set_property", "aid", auds[0]["id"]])
+        # else: tags exist but none English — genuinely foreign-language
+        # channel, leave the broadcaster's default alone
         if video_only:
             ipc(["show-text",
                  "VIDEO-ONLY: this signal is too marginal for audio", 8000])
@@ -298,7 +367,8 @@ def main():
             stall = 0
         if time.time() - last_cc > 480:
             cur = ipc(["get_property", "sid"], req=5)
-            if cur:
+            vis = ipc(["get_property", "sub-visibility"], req=5)
+            if cur and vis:      # only cycle when captions are showing
                 ipc(["set_property", "sid", "no"]); time.sleep(0.4)
                 ipc(["set_property", "sid", cur])
             last_cc = time.time()
