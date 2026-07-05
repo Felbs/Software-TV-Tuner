@@ -116,7 +116,9 @@ def judge(rf, antenna, rfsel, ifgr, extra=None, biast=False, program=1,
     env.update({
         "STVT_ANTENNA": antenna, "STVT_IFGR": str(ifgr),
         "STVT_RFGAIN_SEL": str(rfsel), "STVT_EQ": "long",
-        "STVT_VITERBI": "soft", "STVT_RFNOTCH": "1", "STVT_DABNOTCH": "1",
+        "STVT_VITERBI": "soft", "STVT_RFNOTCH": "1",
+        # DAB band III = US VHF-hi; never notch RF7-13 (2026-07-04 law)
+        "STVT_DABNOTCH": "0" if rf < 14 else "1",
         "STVT_RS": "stock", "STVT_SPS": "1.1", "STVT_RRC_SYMS": "8",
         "STVT_TEISCRUB": "1", "STVT_EQ_LKG": "1", "STVT_EQ_LKG_RMS": "1.0",
         "STVT_EQ_TELEM": "1",

@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import signal
 import socket
 import sys
@@ -682,6 +683,21 @@ def main():
 
     LOG.info(f"Live TV starting — RF {args.rf}, TCP port {ATSC_LIVE_TCP_PORT}")
     LOG.info(f"Writing TS to {out}")
+
+    # WARM START (2026-07-05): if a tap-cache directory is configured,
+    # compose the per-channel+antenna cache file path for the equalizer
+    # (which reads STVT_EQ_TAP_CACHE_FILE at construction). Keyed by both
+    # because taps are a fingerprint of the full RF path.
+    cache_dir = os.environ.get("STVT_EQ_TAP_CACHE")
+    if cache_dir:
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            ant = re.sub(r"\W+", "", os.environ.get("STVT_ANTENNA", "A"))
+            os.environ["STVT_EQ_TAP_CACHE_FILE"] = os.path.join(
+                cache_dir, f"taps_{ant}_rf{args.rf}.bin")
+            LOG.info(f"tap cache: {os.environ['STVT_EQ_TAP_CACHE_FILE']}")
+        except OSError as e:
+            LOG.info(f"tap cache disabled ({e})")
 
     tb = LiveTVTopBlock(args.rf, out, soapy_args=args.soapy_args,
                         stream_args=args.stream_args)

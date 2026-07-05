@@ -77,16 +77,20 @@ void atsc_fs_checker_inst_impl::reset()
     d_fs_accepted = 0;
     d_fs_rejected_early = 0;
     d_fs_rejected_late = 0;
+    d_coast_run = 0;
+    d_coast_total = 0;
+    d_clean_fs_streak = 0;
 }
 
 atsc_fs_checker_inst_impl::~atsc_fs_checker_inst_impl()
 {
     std::fprintf(stderr,
                  "[fs_check] accepted=%llu rejected_early=%llu rejected_late=%llu "
-                 "validate=%s tol=[%d,%d]\n",
+                 "coasted=%llu validate=%s tol=[%d,%d]\n",
                  (unsigned long long)d_fs_accepted,
                  (unsigned long long)d_fs_rejected_early,
                  (unsigned long long)d_fs_rejected_late,
+                 (unsigned long long)d_coast_total,
                  d_fs_validate_enabled ? "ON" : "OFF",
                  d_fs_tol_low, d_fs_tol_high);
 }
@@ -133,6 +137,36 @@ int atsc_fs_checker_inst_impl::general_work(int noutput_items,
             if (v >= 0) return v;
         }
         return 939;   // 3 fields; a single missed FS self-corrects by ~626
+    }();
+
+    // ── SYNC FLYWHEEL (2026-07-05, Strike 1) ───────────────────────────────
+    // Proven by the 3-way trial: midday glitches are NOT an equalizer
+    // disease — impulses corrupt the field-sync marker past the PN error
+    // limit, the gate runs 313 segments without an accepted FS, declares
+    // FIELD-LOSS and HALTS ALL OUTPUT until the next accepted sync. One
+    // microsecond of impulse costs a full field (~24 ms) minimum. But the
+    // transmitter's clock never flinched: if the FS is missed, we know
+    // EXACTLY where it should have been — synthesize it, alternate the
+    // field parity, keep emitting. Bounded by FS_COAST consecutive fields
+    // so a true signal loss still halts honestly (liveness law). 0 = off.
+    static const int FS_COAST = []() -> int {
+        if (const char* p = std::getenv("ATSCPLUS_FS_COAST")) {
+            int v = std::atoi(p);
+            if (v >= 0 && v <= 100) return v;
+        }
+        return 0;
+    }();
+    // v2 WARMUP GATE (trial 1 lesson: 8 coasts in the first 10 s were on
+    // pre-lock startup garbage and poisoned downstream alignment for the
+    // whole run). The flywheel may only engage after the link has proven
+    // real, consecutive, on-schedule field syncs — i.e. it protects an
+    // ESTABLISHED rhythm, never invents one.
+    static const int FS_COAST_WARMUP = []() -> int {
+        if (const char* p = std::getenv("ATSCPLUS_FS_COAST_WARMUP")) {
+            int v = std::atoi(p);
+            if (v >= 1 && v <= 10000) return v;
+        }
+        return 80;   // ~2 s of consecutive clean 313-spaced syncs
     }();
 
     int output_produced = 0;
@@ -207,7 +241,14 @@ int atsc_fs_checker_inst_impl::general_work(int noutput_items,
                     d_segment_num = -1;
                     d_fs_accepted++;
                     d_fs_locked = true;
+                    // warmup bookkeeping: only an exactly-on-schedule sync
+                    // extends the clean streak; anything else restarts it
+                    if (gap == ATSC_SEGMENTS_PER_DATA_FIELD)
+                        d_clean_fs_streak++;
+                    else
+                        d_clean_fs_streak = 0;
                     d_segs_since_accepted_fs = 0;
+                    d_coast_run = 0;   // real sync seen — flywheel rearms
                 }
             }
         }
@@ -226,15 +267,40 @@ int atsc_fs_checker_inst_impl::general_work(int noutput_items,
 
             d_segment_num++;
             if (d_segment_num > (ATSC_SEGMENTS_PER_DATA_FIELD - 1)) {
-                // Ran a full 313-segment field without accepting a new field
-                // sync → alignment lost; output halts until the next accepted
-                // FS. Frequent here during a drought = framing never re-locks.
-                if (FS_TELEM)
-                    std::fprintf(stderr,
-                        "[fs_telem t=%8.2fs] FIELD-LOSS (313 segs, no new FS accepted)\n",
-                        fs_now());
-                d_field_num = 0;
-                d_segment_num = 0;
+                if (FS_COAST > 0 && d_coast_run < FS_COAST
+                        && d_clean_fs_streak >= FS_COAST_WARMUP) {
+                    // FLYWHEEL: the field sync belongs exactly HERE — the
+                    // detector missed it (impulse-chewed PN), but timing
+                    // didn't move. Synthesize it: alternate field parity,
+                    // restart the segment count, and emit this segment AS
+                    // the sync segment (it IS the real FS segment when
+                    // timing held; the equalizer trains on it as usual).
+                    d_coast_run++;
+                    d_coast_total++;
+                    d_field_num = (d_field_num == 1) ? 2 : 1;
+                    d_segment_num = -1;
+                    if (FS_TELEM)
+                        std::fprintf(stderr,
+                            "[fs_telem t=%8.2fs] COAST #%d (synthetic FS, "
+                            "field=%d, lifetime=%llu)\n",
+                            fs_now(), d_coast_run, d_field_num,
+                            (unsigned long long)d_coast_total);
+                    plinfo pli_fs;
+                    pli_fs.set_regular_seg((d_field_num == 2), d_segment_num);
+                    d_segment_num++;
+                    out_pl[output_produced++] = pli_fs;
+                } else {
+                    // Ran a full field without a real FS and the coast
+                    // budget is spent → genuine alignment loss; halt output
+                    // until the next accepted FS (honest silence).
+                    if (FS_TELEM)
+                        std::fprintf(stderr,
+                            "[fs_telem t=%8.2fs] FIELD-LOSS (313 segs, no new FS "
+                            "accepted%s)\n", fs_now(),
+                            FS_COAST > 0 ? ", coast budget spent" : "");
+                    d_field_num = 0;
+                    d_segment_num = 0;
+                }
             } else {
                 out_pl[output_produced++] = pli_out;
             }

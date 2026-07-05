@@ -470,7 +470,10 @@ def base_env(rf):
                 "STVT_RRC_SYMS": "8", "STVT_TEISCRUB": "1",
                 "STVT_EQ_LKG": "1", "STVT_EQ_LKG_RMS": "1.0",
                 "STVT_EQ_TELEM": "1",
-                "STVT_EQ_CIR": "1"})   # echo X-ray telemetry (H2)
+                "STVT_EQ_CIR": "1",    # echo X-ray telemetry (H2)
+                # warm-start tap cache (lever #3): per-channel LKG taps
+                # persisted to disk; tune-in seeds from last good state
+                "STVT_EQ_TAP_CACHE": str(HERE / "lab" / "tapcache")})
     return env
 
 def kill_watch():
