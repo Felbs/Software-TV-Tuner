@@ -37,7 +37,7 @@ def mer_db(err):
     return 20.0 * math.log10(TRAIN_RMS / err) if err > 0 else 40.0
 
 
-def env_for(antenna, ifgr, rfsel, biast=False):
+def env_for(antenna, ifgr, rfsel, biast=False, rf=99):
     e = os.environ.copy()
     e["PATH"] = SDRPLAY_DLL + os.pathsep + e.get("PATH", "")
     if biast:
@@ -45,7 +45,10 @@ def env_for(antenna, ifgr, rfsel, biast=False):
     e.update({
         "STVT_ANTENNA": antenna, "STVT_IFGR": str(ifgr),
         "STVT_RFGAIN_SEL": str(rfsel), "STVT_EQ": "long",
-        "STVT_VITERBI": "soft", "STVT_RFNOTCH": "1", "STVT_DABNOTCH": "1",
+        "STVT_VITERBI": "soft", "STVT_RFNOTCH": "1",
+        # DAB band III = US VHF-hi; the notch must never touch RF7-13
+        # (2026-07-04 discovery — this hardcoded "1" blinded VHF cals)
+        "STVT_DABNOTCH": "0" if rf < 14 else "1",
         "STVT_RS": "stock", "STVT_SPS": "1.1", "STVT_RRC_SYMS": "8",
         "STVT_TEISCRUB": "1", "STVT_EQ_LKG": "1", "STVT_EQ_LKG_RMS": "1.0",
         "STVT_EQ_TELEM": "1",
@@ -65,7 +68,7 @@ def run_cell(rf, antenna, ifgr, rfsel, secs, biast=False):
         except OSError: pass
     with open(LOG, "w") as lf:
         ch = subprocess.Popen([PY, "-u", str(TV_LIVE), "--rf", str(rf)],
-                              env=env_for(antenna, ifgr, rfsel, biast),
+                              env=env_for(antenna, ifgr, rfsel, biast, rf=rf),
                               stdout=lf, stderr=subprocess.STDOUT)
         time.sleep(secs)
         ch.terminate()

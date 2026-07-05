@@ -27,8 +27,9 @@ PORT = 8642
 
 # per-RF (rfgain_sel, IFGR) — reseed after ANY antenna/path change
 # (AGC servos the IF gain live; rfgain_sel is the regime that matters).
-# Current values = Philips SDV3824B (validated 2026-07-03).
-GAINS = {36: (3, 40), 34: (2, 32), 15: (1, 32)}
+# UHF values = Philips (2026-07-03); RF7 = first-ever VHF cal
+# (2026-07-05, rabbit ears @ flatness-aimed position, MER 15.2 at cliff).
+GAINS = {36: (3, 40), 34: (2, 32), 15: (1, 32), 7: (5, 32)}
 DEFAULT_GAIN = (3, 40)
 RE_FS = re.compile(r"fs_err_rms=([\d.]+)")
 RE_FPLL = re.compile(r"mean\|x\|=([\d.]+).*?max\|x\|=([\d.]+)\s+in_rms=([\d.]+)")
@@ -280,7 +281,14 @@ def balance_loop():
     win = np.hanning(FFT).astype(np.float32)
     sdr = None
     try:
-        sdr = SoapySDR.Device("driver=sdrplay")
+        for attempt in range(6):        # sweeper may take ~2s to yield
+            try:
+                sdr = SoapySDR.Device("driver=sdrplay")
+                break
+            except Exception:
+                if not BAL["on"] or attempt == 5:
+                    raise
+                time.sleep(2)
         sdr.setSampleRate(SOAPY_SDR_RX, 0, 2_000_000)
         try: sdr.setGainMode(SOAPY_SDR_RX, 0, False)
         except Exception: pass
@@ -359,7 +367,14 @@ def flat_loop(rf):
     win = np.hanning(FFT).astype(np.float32)
     sdr = None
     try:
-        sdr = SoapySDR.Device("driver=sdrplay")
+        for attempt in range(6):        # sweeper may take ~2s to yield
+            try:
+                sdr = SoapySDR.Device("driver=sdrplay")
+                break
+            except Exception:
+                if not FLAT["on"] or attempt == 5:
+                    raise
+                time.sleep(2)
         sdr.setSampleRate(SOAPY_SDR_RX, 0, 8_000_000)
         sdr.setFrequency(SOAPY_SDR_RX, 0, center)
         sdr.setAntenna(SOAPY_SDR_RX, 0, "Antenna A")
@@ -582,9 +597,10 @@ def tune(rf, prog, virtual, name):
             watch_args = [PY, "-u", str(HERE / "tv_watch.py"), str(prog)]
             if cliff_mode:
                 watch_args.append("marginal")   # show-all/no-skip forced video
+            watch_log = open(HERE / "lab" / "panel_watch.log", "w")
             subprocess.Popen(watch_args,
-                             env=env, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL)
+                             env=env, stdout=watch_log,
+                             stderr=subprocess.STDOUT)
             player_up = False
             while time.time() - t0 < 150:
                 if GEN[0] != my_gen: return
