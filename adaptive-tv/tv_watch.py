@@ -48,9 +48,17 @@ def log(m): print(f"[{time.strftime('%H:%M:%S')}] {m}", flush=True)
 
 
 class Extractor:
-    """tail(live.ts) -> ffmpeg -map 0:p:PROG -c copy -> live_solo.ts"""
-    def __init__(self, prog):
+    """tail(live.ts) -> ffmpeg -map 0:p:PROG -c copy -> live_solo.ts
+
+    Cliff-edge fallback (2026-07-05, learned on RF7): when a stream rides
+    the cliff, damaged AC-3 headers make copy-mode ffmpeg refuse to write
+    ANYTHING ('sample rate not set') — audio wreckage blanks the video
+    too. Mode ladder: full program -> video-only (silent TV beats a
+    black screen). tv_watch's monitor loop restarts a dead extractor,
+    so each restart tries the ladder afresh as the stream matures."""
+    def __init__(self, prog, mode="full"):
         self.prog = prog
+        self.mode = mode          # "full" or "video"
         self.stop = threading.Event()
         self.ff = None
 
@@ -58,13 +66,16 @@ class Extractor:
         if SOLO.exists():
             try: SOLO.unlink()
             except OSError: pass
+        maps = (["-map", f"0:p:{self.prog}"] if self.mode == "full"
+                else ["-map", f"0:p:{self.prog}:v:0", "-an"])
         self.ff = subprocess.Popen(
             [FFMPEG, "-hide_banner", "-loglevel", "error",
              "-fflags", "+genpts+igndts+nobuffer+discardcorrupt",
              "-err_detect", "ignore_err",
              "-analyzeduration", "10000000", "-probesize", "20000000",
-             "-f", "mpegts", "-i", "-",
-             "-map", f"0:p:{self.prog}", "-c", "copy",
+             "-f", "mpegts", "-i", "-"]
+            + maps +
+            ["-c", "copy",
              "-max_interleave_delta", "0",
              "-f", "mpegts", "-y", str(SOLO)],
             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
@@ -123,16 +134,30 @@ def main():
         time.sleep(2)
 
     ex = None
+    video_only = False
     if not muxmode:
-        ex = Extractor(prog)
-        ex.start()
-        t0 = time.time()
-        while (not SOLO.exists() or SOLO.stat().st_size < 3_000_000):
-            time.sleep(1)
-            if time.time() - t0 > 45:
-                log("extractor produced nothing in 45s — falling back to mux mode")
-                ex.kill(); ex = None; muxmode = True
+        # extraction ladder: full program -> video-only -> mux fallback
+        for mode in ("full", "video"):
+            ex = Extractor(prog, mode=mode)
+            ex.start()
+            t0 = time.time()
+            ok = False
+            while time.time() - t0 < 45:
+                time.sleep(1)
+                if SOLO.exists() and SOLO.stat().st_size > 3_000_000:
+                    ok = True
+                    break
+            if ok:
+                video_only = (mode == "video")
+                if video_only:
+                    log("audio too damaged for extraction — VIDEO-ONLY mode "
+                        "(silent TV beats a black screen)")
                 break
+            log(f"extractor mode '{mode}' produced nothing in 45s")
+            ex.kill(); ex = None
+        if ex is None:
+            log("all extraction modes failed — falling back to mux mode")
+            muxmode = True
     target = LIVE if muxmode else SOLO
     log(f"playing {'MUX' if muxmode else f'SOLO program {prog}'} file: {target.name}")
 
@@ -166,32 +191,44 @@ def main():
         # to the requested program, then select mpv tracks by ff-index —
         # exact identity, not heuristics.
         want_v, want_a, want_s = None, [], []
-        try:
-            pr = subprocess.run(
-                ["ffprobe", "-v", "error", "-print_format", "json",
-                 "-probesize", "20000000", "-analyzeduration", "10000000",
-                 "-show_programs", str(LIVE)],
-                capture_output=True, text=True, timeout=45)
-            progs = json.loads(pr.stdout or "{}").get("programs", [])
-            mine = next((p for p in progs
-                         if p.get("program_id") == prog), None)
-            if mine:
-                for s in mine.get("streams", []):
-                    idx, ct = s.get("index"), s.get("codec_type")
-                    lang = (s.get("tags") or {}).get("language", "")
-                    if ct == "video" and want_v is None:
-                        want_v = idx
-                    elif ct == "audio":
-                        want_a.append((idx, lang))
-                    elif ct == "subtitle":
-                        want_s.append(idx)
-                # english-first audio preference
-                want_a.sort(key=lambda x: 0 if x[1].startswith("en") else 1)
-            else:
-                log(f"PMT has no program {prog} — signal too weak to "
-                    f"prove the subchannel; refusing to guess")
-        except Exception as e:
-            log(f"PMT probe failed: {e}")
+        # Retry the probe as the stream matures: a judgment made on a
+        # young/thin stream is not a verdict (2026-07-05: PMT check said
+        # "no program" at t+30s, provable at t+3min once data thickened).
+        for probe_try in range(3):
+            try:
+                pr = subprocess.run(
+                    ["ffprobe", "-v", "error", "-print_format", "json",
+                     "-probesize", "20000000", "-analyzeduration", "10000000",
+                     "-show_programs", str(LIVE)],
+                    capture_output=True, text=True, timeout=45)
+                progs = json.loads(pr.stdout or "{}").get("programs", [])
+                mine = next((p for p in progs
+                             if p.get("program_id") == prog), None)
+                if mine:
+                    for s in mine.get("streams", []):
+                        idx, ct = s.get("index"), s.get("codec_type")
+                        lang = (s.get("tags") or {}).get("language", "")
+                        if ct == "video" and want_v is None:
+                            want_v = idx
+                        elif ct == "audio":
+                            want_a.append((idx, lang))
+                        elif ct == "subtitle":
+                            want_s.append(idx)
+                    # english-first audio preference
+                    want_a.sort(key=lambda x: 0 if x[1].startswith("en") else 1)
+                    break
+                log(f"PMT probe {probe_try+1}/3: no program {prog} yet — "
+                    f"waiting for the stream to prove it")
+            except Exception as e:
+                log(f"PMT probe failed: {e}")
+            if probe_try < 2:
+                ipc(["show-text",
+                     f"verifying program {prog}… (attempt {probe_try+2}/3)",
+                     15000])
+                time.sleep(20)
+        if want_v is None and not want_a:
+            log(f"PMT never proved program {prog} — refusing to guess "
+                f"another tenant's tracks")
         deadline = time.time() + 30
         prev = -1
         while time.time() < deadline:
@@ -230,6 +267,9 @@ def main():
             f"(wanted v={want_v} a={a_want} s={want_s})")
     else:
         ipc(["set_property", "sid", 1])   # the only CC track = this program's
+        if video_only:
+            ipc(["show-text",
+                 "VIDEO-ONLY: this signal is too marginal for audio", 8000])
     seek_live_solo()
 
     last_pos, stall = None, 0
@@ -239,9 +279,10 @@ def main():
     while mpv.poll() is None:
         time.sleep(5)
         if ex is not None and not ex.alive():
-            log("extractor died — restarting it")
+            log(f"extractor died — restarting it (mode={ex.mode})")
+            mode = ex.mode
             ex.kill()
-            ex = Extractor(prog); ex.start()
+            ex = Extractor(prog, mode=mode); ex.start()
             time.sleep(3)
         pos = ipc(["get_property", "time-pos"], req=5)
         eof = ipc(["get_property", "eof-reached"], req=5)

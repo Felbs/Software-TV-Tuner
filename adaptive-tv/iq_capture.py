@@ -69,10 +69,14 @@ def main():
     buf = np.empty(2 * 65536, np.int16)          # interleaved I,Q
     got = timeouts = shorts = 0
     t0 = time.time()
+    t_first = None      # clock starts at FIRST sample — stream-activation
+                        # latency is not a drop (metric fix 2026-07-05)
     with open(out, "wb") as f:
         while got < n_want and time.time() - t0 < args.secs * 3 + 10:
             r = sdr.readStream(st, [buf], 65536, timeoutUs=500000)
             if r.ret > 0:
+                if t_first is None:
+                    t_first = time.time()
                 n = min(r.ret, n_want - got)
                 f.write(buf[:2 * n].tobytes())
                 got += n
@@ -83,7 +87,7 @@ def main():
     sdr.deactivateStream(st)
     sdr.closeStream(st)
 
-    elapsed = time.time() - t0
+    elapsed = (time.time() - t_first) if t_first else 1.0
     continuity = got / max(1.0, elapsed * args.rate)
     meta = {"file": out.name, "center_hz": freq, "rate": args.rate,
             "rf": args.rf, "antenna": args.antenna,
