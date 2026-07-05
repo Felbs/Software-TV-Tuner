@@ -160,7 +160,38 @@ def main():
     time.sleep(6)
 
     if muxmode:
-        # mux mode: pick tracks by program id once the list settles
+        # Mux mode must NEVER hand the viewer a different tenant of the
+        # multiplex (2026-07-04: asked for NBC, got TeleXitos). Ask the
+        # stream's own program table (PMT) which stream indexes belong
+        # to the requested program, then select mpv tracks by ff-index —
+        # exact identity, not heuristics.
+        want_v, want_a, want_s = None, [], []
+        try:
+            pr = subprocess.run(
+                ["ffprobe", "-v", "error", "-print_format", "json",
+                 "-probesize", "20000000", "-analyzeduration", "10000000",
+                 "-show_programs", str(LIVE)],
+                capture_output=True, text=True, timeout=45)
+            progs = json.loads(pr.stdout or "{}").get("programs", [])
+            mine = next((p for p in progs
+                         if p.get("program_id") == prog), None)
+            if mine:
+                for s in mine.get("streams", []):
+                    idx, ct = s.get("index"), s.get("codec_type")
+                    lang = (s.get("tags") or {}).get("language", "")
+                    if ct == "video" and want_v is None:
+                        want_v = idx
+                    elif ct == "audio":
+                        want_a.append((idx, lang))
+                    elif ct == "subtitle":
+                        want_s.append(idx)
+                # english-first audio preference
+                want_a.sort(key=lambda x: 0 if x[1].startswith("en") else 1)
+            else:
+                log(f"PMT has no program {prog} — signal too weak to "
+                    f"prove the subchannel; refusing to guess")
+        except Exception as e:
+            log(f"PMT probe failed: {e}")
         deadline = time.time() + 30
         prev = -1
         while time.time() < deadline:
@@ -170,17 +201,33 @@ def main():
             prev = n; time.sleep(2)
         tracks = ipc(["get_property", "track-list"], req=5) or []
         vid = aud = sub = None
+        a_want = [i for i, _ in want_a]
+        aud_pri = len(a_want)
         for t in tracks:
-            if t.get("program-id") == prog:
-                if t.get("type") == "video" and vid is None: vid = t["id"]
-                if t.get("type") == "audio" and (aud is None or
-                                                 str(t.get("lang", "")).startswith("en")):
+            ffi = t.get("ff-index")
+            if t.get("type") == "video" and ffi == want_v:
+                vid = t["id"]
+            if t.get("type") == "audio" and ffi in a_want:
+                if a_want.index(ffi) < aud_pri:
                     aud = t["id"]
-                if t.get("type") == "sub" and sub is None: sub = t["id"]
-        if vid: ipc(["set_property", "vid", vid])
-        if aud: ipc(["set_property", "aid", aud])
-        if sub: ipc(["set_property", "sid", sub])
-        log(f"mux tracks selected vid={vid} aid={aud} sid={sub}")
+                    aud_pri = a_want.index(ffi)
+            if t.get("type") == "sub" and ffi in want_s and sub is None:
+                sub = t["id"]
+        if vid is None and want_v is None:
+            # PMT couldn't vouch for the program: show nothing wrong,
+            # say so on screen instead of impersonating another channel
+            ipc(["show-text",
+                 f"program {prog} not decodable yet — waiting for "
+                 f"signal (wrong-channel guessing disabled)", 8000])
+            ipc(["set_property", "vid", "no"])
+            ipc(["set_property", "aid", "no"])
+        else:
+            if vid: ipc(["set_property", "vid", vid])
+            if aud: ipc(["set_property", "aid", aud])
+            if sub: ipc(["set_property", "sid", sub])
+            ipc(["show-text", f"program {prog} verified via PMT", 4000])
+        log(f"mux tracks by PMT: vid={vid} aid={aud} sid={sub} "
+            f"(wanted v={want_v} a={a_want} s={want_s})")
     else:
         ipc(["set_property", "sid", 1])   # the only CC track = this program's
     seek_live_solo()
