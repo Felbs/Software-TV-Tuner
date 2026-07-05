@@ -142,7 +142,13 @@ def main():
            "--cache=yes", "--demuxer-readahead-secs=5",
            "--hwdec=no", "--video-sync=audio",
            "--alang=eng,en",
-           "--demuxer-lavf-o=err_detect=ignore_err",
+           # broadcast AC-3 dialnorm runs quiet — start hot and let the
+           # user go to 200% with the volume keys if a station needs it
+           "--volume=130", "--volume-max=200",
+           # +discardcorrupt: never hand the 608 caption decoder the
+           # half-frames before the first keyframe (they render as stuck
+           # "HDHDHD…" garbage until the sub track is cycled)
+           "--demuxer-lavf-o=err_detect=ignore_err,fflags=+discardcorrupt",
            "--vd-lavc-o=error_concealment=3,err_detect=ignore_err",
            "--sub-create-cc-track=yes",
            f"--title=TV Tuna — program {prog}" + (" (solo)" if not muxmode else ""),
@@ -180,7 +186,9 @@ def main():
     seek_live_solo()
 
     last_pos, stall = None, 0
-    last_cc = time.time()
+    # first CC cycle ~20 s in (flushes any startup caption garbage that
+    # slipped through), then every 8 min as before
+    last_cc = time.time() - 460
     while mpv.poll() is None:
         time.sleep(5)
         if ex is not None and not ex.alive():

@@ -58,7 +58,7 @@ def run_scan():
             prev.write_text(SCAN_PATH.read_text(encoding="utf-8"),
                             encoding="utf-8")
         stop_tv()
-        time.sleep(3)
+        time.sleep(5)               # give a balance sweep time to release
         env = base_env(36)
         env["STVT_DABNOTCH"] = "0"   # scans must hear VHF-hi (RF7-13)
         p = subprocess.Popen([PY, "-u", str(TOOLS / "tv_tuner.py"), "--scan"],
@@ -141,9 +141,11 @@ def sweeper():
         freqs += list((h + (np.arange(keep) - keep / 2) * (8e6 / FFT)) / 1e6)
     with WF_LOCK: WF["freqs"] = [round(x, 2) for x in freqs]
     while True:
-        if SCAN["running"]:
+        if SCAN["running"] or BAL["on"]:
             with WF_LOCK:
-                WF["status"] = "channel scan in progress — sweep paused"
+                WF["status"] = ("channel scan in progress — sweep paused"
+                                if SCAN["running"] else
+                                "🌐 all-towers aiming in progress — sweep paused")
             time.sleep(5); continue
         if STATE["rf"] is not None or STATE["tuning"] or METER["rf"] is not None \
                 or chain_running():
@@ -176,7 +178,7 @@ def sweeper():
                 except OSError:
                     return False
             while not (STATE["rf"] is not None or STATE["tuning"]
-                       or METER["rf"] is not None
+                       or METER["rf"] is not None or BAL["on"]
                        or SCAN["running"] or external_wants_sdr()):
                 row = []
                 t_row = time.strftime("%H:%M:%S")
@@ -216,6 +218,7 @@ def sweeper():
 METER = {"rf": None}
 
 def meter_start(rf):
+    BAL["on"] = False
     with LOCK:
         GEN[0] += 1
         my_gen = GEN[0]
@@ -236,6 +239,97 @@ def meter_stop():
         GEN[0] += 1
         METER["rf"] = None
         kill_tv()
+
+# ── all-towers balance meter: rapid pilot-power hopper ─────────────
+# Aims for the FAIR spot: the tone follows the WEAKEST tower, so pitch
+# only rises when the position improves for everyone. Pilot SNR proxy
+# (no demod) -> several full sweeps per second across all towers.
+BAL = {"on": False, "scores": {}}
+
+def pilot_hz(rf):
+    lo = (174 + (rf - 7) * 6) if rf < 14 else (470 + (rf - 14) * 6)
+    return (lo + 0.30944) * 1e6
+
+def balance_towers():
+    try:
+        d = json.loads(SCAN_PATH.read_text(encoding="utf-8"))
+        cars = [(c["rf"], c.get("pilot_snr_db") or 0)
+                for c in d.get("channels", [])
+                if not c.get("not_detected")
+                and (c.get("lock") or (c.get("pilot_snr_db") or 0) >= 35)]
+        cars.sort(key=lambda x: -x[1])
+        return [c[0] for c in cars[:6]] or [36, 34, 15, 35]
+    except (OSError, json.JSONDecodeError):
+        return [36, 34, 15, 35]
+
+def balance_loop():
+    import numpy as np
+    try:
+        import SoapySDR
+        SoapySDR.SoapySDR_setLogLevel(SoapySDR.SOAPY_SDR_FATAL)
+        from SoapySDR import SOAPY_SDR_CF32, SOAPY_SDR_RX
+    except Exception:
+        BAL["on"] = False
+        return
+    towers = balance_towers()
+    FFT = 2048
+    win = np.hanning(FFT).astype(np.float32)
+    sdr = None
+    try:
+        sdr = SoapySDR.Device("driver=sdrplay")
+        sdr.setSampleRate(SOAPY_SDR_RX, 0, 2_000_000)
+        try: sdr.setGainMode(SOAPY_SDR_RX, 0, False)
+        except Exception: pass
+        sdr.setGain(SOAPY_SDR_RX, 0, "IFGR", 40.0)
+        try: sdr.writeSetting("rfgain_sel", "3")
+        except Exception: pass
+        sdr.setAntenna(SOAPY_SDR_RX, 0, "Antenna A")
+        st = sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32)
+        sdr.activateStream(st)
+        buf = np.empty(FFT, dtype=np.complex64)
+        while BAL["on"]:
+            if (STATE["rf"] is not None or STATE["tuning"]
+                    or SCAN["running"] or METER["rf"] is not None):
+                break
+            for rf in towers:
+                sdr.setFrequency(SOAPY_SDR_RX, 0, pilot_hz(rf))
+                time.sleep(0.02)
+                acc = np.zeros(FFT)
+                n = 0
+                t0 = time.time()
+                while time.time() - t0 < 0.12:
+                    r = sdr.readStream(st, [buf], FFT, timeoutUs=150000)
+                    if r.ret == FFT:
+                        acc += np.abs(np.fft.fftshift(
+                            np.fft.fft(buf * win)))**2
+                        n += 1
+                if not n:
+                    continue
+                psd = acc / n
+                centre = float(psd[FFT // 2 - 6: FFT // 2 + 6].max())
+                floor = float(np.median(psd))
+                BAL["scores"][rf] = round(
+                    10 * math.log10(centre / (floor + 1e-12)), 1)
+        sdr.deactivateStream(st)
+        sdr.closeStream(st)
+    except Exception:
+        pass
+    finally:
+        try: del sdr
+        except Exception: pass
+        BAL["on"] = False
+
+def balance_start():
+    if BAL["on"]:
+        return
+    with LOCK:
+        GEN[0] += 1
+        METER["rf"] = None
+        kill_tv()
+    BAL["scores"].clear()
+    BAL["on"] = True
+    time.sleep(1)
+    threading.Thread(target=balance_loop, daemon=True).start()
 
 # ── tuning / recording actions ─────────────────────────────────────
 def base_env(rf):
@@ -275,6 +369,7 @@ def set_stage(pct, msg):
     STATE.update({"stage": msg, "stage_pct": pct})
 
 def tune(rf, prog, virtual, name):
+    BAL["on"] = False
     with LOCK:
         GEN[0] += 1
         my_gen = GEN[0]
@@ -410,6 +505,7 @@ def tune(rf, prog, virtual, name):
                       "name": name, "env": knobs})
 
 def stop_tv():
+    BAL["on"] = False           # ...and a running all-towers balance sweep
     with LOCK:
         GEN[0] += 1
         METER["rf"] = None      # scan/stop must also release a running meter
@@ -451,6 +547,28 @@ def flight_recorder():
                 f.write(json.dumps(rec) + "\n")
         except Exception:
             pass
+
+def chain_math():
+    """MER/level from the chain log only — cheap enough for 1 Hz polling
+    (no live.ts reads), which is what aim-while-watching needs."""
+    out = {}
+    try:
+        text = CHAIN_LOG.read_text(errors="ignore")[-40000:]
+        errs = [float(m.group(1)) for m in RE_FS.finditer(text)][-24:]
+        if errs:
+            mers = [20 * math.log10(5.0 / e) for e in errs if e > 0]
+            if mers:
+                srt = sorted(mers)
+                out["mer_db"] = round(srt[len(srt) // 2], 2)
+                out["mer_last"] = round(mers[-1], 2)
+        fp = RE_FPLL.findall(text)
+        if fp:
+            mn, mx, ir = fp[-1]
+            out.update({"mean_x": float(mn), "max_x": float(mx),
+                        "in_rms": float(ir)})
+    except OSError:
+        pass
+    return out
 
 def live_math():
     out = {}
@@ -654,11 +772,17 @@ h+='<div class="edu" style="margin-top:10px"><b>Reading the tower meters:</b> ev
 '(new interference, a powered amp, USB hash) — the towers didn\\'t get weaker.</div>';
 document.getElementById('grid').innerHTML=h;buildFinderChans()}
 // ── signal finder: eyes (big number, red→green) + ears (tone pitch) ──
-let METER_RF=null, AC=null, OSC=null, GN=null, TONE=false;
+let METER_RF=null, AC=null, OSC=null, GN=null, TONE=false, OSCS={}, NULLPOLLS=0;
+async function startBalance(){METER_RF='ALL';PEAK=null;
+document.getElementById('fpeak').innerHTML='&nbsp;';
+if(!AC)AC=new (window.AudioContext||window.webkitAudioContext)();
+const b=document.getElementById('fbig');b.textContent='—';b.style.color='#5f7591';
+document.getElementById('fsub').textContent='🌐 balance mode — sweeping every tower, first chord in ~5 s';
+await fetch('/api/balance',{method:'POST',body:JSON.stringify({on:true})})}
 async function buildFinderChans(){try{
 const cars=await (await fetch('/api/carriers')).json();
 if(!cars.length){document.getElementById('fchans').textContent='no scan data — run 📡 SCAN CHANNELS first';return}
-let h='<b>aim on any carrier</b> (strongest first): ';
+let h=`<button class="tune" style="margin:2px;background:#1a4a3a;border:1px solid #2a6a52;font-weight:700" onclick="startBalance()">🌐 ALL TOWERS (fair spot)</button> · <b>or aim on one carrier</b> (strongest first): `;
 cars.slice(0,16).forEach(c=>{
 const col=c.lock?'#67d18a':(c.snr>=35?'#e7c96a':'#5f7591');
 h+=`<button class="tune" style="margin:2px;border:1px solid ${col}" onclick="startMeter(${c.rf})">RF${c.rf}${c.cs?' '+c.cs:''} · ${c.snr}dB${c.lock?' ✓':''}</button>`});
@@ -682,24 +806,67 @@ await fetch('/api/meter',{method:'POST',body:JSON.stringify({rf})})}
 async function stopMeter(){METER_RF=null;toneOff();
 const b=document.getElementById('fbig');b.textContent='—';b.style.color='#5f7591';
 document.getElementById('fsub').textContent='meter stopped';
+await fetch('/api/balance',{method:'POST',body:JSON.stringify({on:false})});
 await fetch('/api/meter/stop',{method:'POST'})}
 function toneOff(){TONE=false;if(OSC){try{OSC.stop()}catch(e){}OSC=null}
+for(const k in OSCS){try{OSCS[k].o.stop()}catch(e){}}OSCS={};
 document.getElementById('ftone').textContent='🔊 tone: OFF'}
 function toggleTone(){if(TONE){toneOff();return}
 TONE=true;if(!AC)AC=new (window.AudioContext||window.webkitAudioContext)();
+if(METER_RF!=='ALL'){
 OSC=AC.createOscillator();GN=AC.createGain();GN.gain.value=0.12;
-OSC.type='sine';OSC.frequency.value=200;OSC.connect(GN);GN.connect(AC.destination);OSC.start();
+OSC.type='sine';OSC.frequency.value=200;OSC.connect(GN);GN.connect(AC.destination);OSC.start();}
 document.getElementById('ftone').textContent='🔊 tone: ON'}
-async function pollMeter(){if(TAB!=='F'||METER_RF===null)return;
+async function pollMeter(){if(TAB!=='F')return;
 try{const m=await (await fetch('/api/meter')).json();
-if(m.rf===null||m.mer_last===undefined)return;
+if(m.watching)METER_RF=null;
+if(METER_RF===null&&!m.watching)return;
+if(METER_RF==='ALL'){
+if(!m.balance)return;
+const ent=Object.entries(m.balance).map(([rf,v])=>[parseInt(rf),v]);
+if(!ent.length)return;
+const minE=ent.reduce((a,b)=>b[1]<a[1]?b:a);
+const minV=minE[1], hue=Math.max(0,Math.min(1,(minV-15)/30))*120;
+const big=document.getElementById('fbig');big.textContent=minV.toFixed(1);
+big.style.color=`hsl(${hue},75%,55%)`;
+if(PEAK===null||minV>PEAK+0.2){const beat=PEAK!==null;PEAK=minV;
+document.getElementById('fpeak').innerHTML='🏆 best fair-spot score: <b>'+PEAK.toFixed(1)+'</b> (weakest tower)';
+if(beat&&CHIRP)chirp()}
+let bh='';ent.sort((a,b)=>a[0]-b[0]);
+for(const [rf,v] of ent){const hpct=Math.max(4,Math.min(100,(v-10)/40*100));
+const hu=Math.max(0,Math.min(1,(v-15)/30))*120;
+bh+=`<div style="display:inline-block;width:62px;margin:0 5px;text-align:center">`+
+`<div style="height:90px;display:flex;align-items:flex-end;justify-content:center">`+
+`<div style="width:34px;height:${hpct}%;background:hsl(${hu},70%,50%);border-radius:4px 4px 0 0;transition:height .4s"></div></div>`+
+`<div style="color:#9fb4d0;font-size:11px">RF${rf}</div>`+
+`<div style="color:hsl(${hu},70%,60%);font-weight:700;font-size:12px">${v.toFixed(0)}</div></div>`}
+document.getElementById('fsub').innerHTML='weakest tower: <b>RF'+minE[0]+'</b> — each tower sings its own note; '+
+'<b>one clean unison note = the fair spot</b>, a low drone = someone starving'+
+'<div style="margin-top:8px">'+bh+'</div>';
+const bar=document.getElementById('fbar');
+bar.style.width=Math.max(0,Math.min(100,(minV-10)/40*100))+'%';
+bar.style.background=`hsl(${hue},70%,45%)`;
+if(TONE){const n=ent.length;
+for(const [rf,v] of ent){
+if(!OSCS[rf]){const o=AC.createOscillator(),g=AC.createGain();
+g.gain.value=0.11/Math.max(1,n);o.type='sine';o.connect(g);g.connect(AC.destination);o.start();OSCS[rf]={o,g}}
+OSCS[rf].o.frequency.setTargetAtTime(180+Math.max(0,Math.min(1,(v-10)/40))*1320,AC.currentTime,0.1)}}
+return}
+if(m.rf===null){NULLPOLLS++;
+if(NULLPOLLS>4){if(TONE)toneOff();METER_RF=null;
+document.getElementById('fsub').textContent='meter released (tuner took over) — pick a channel to meter again'}
+return}
+NULLPOLLS=0;
+if(m.mer_last===undefined)return;
 const v=m.mer_last, hue=Math.max(0,Math.min(1,(v-8)/12))*120;
 const big=document.getElementById('fbig');big.textContent=v.toFixed(1);
 big.style.color=`hsl(${hue},75%,55%)`;
 if(PEAK===null||v>PEAK+0.05){const beat=PEAK!==null;PEAK=v;
 document.getElementById('fpeak').innerHTML='🏆 session best: <b>'+PEAK.toFixed(2)+' dB</b>'+(PEAK>=15.2?' — over the cliff!':'');
 if(beat&&CHIRP)chirp()}
-document.getElementById('fsub').innerHTML=`RF${m.rf} · MER <b>${v.toFixed(2)} dB</b> · level ${m.in_rms??'—'} · `+
+document.getElementById('fsub').innerHTML=
+(m.watching?`🔴 <b>LIVE — watching ${m.virtual||('RF'+m.rf)}</b> · aim while the picture plays · `:`RF${m.rf} · `)+
+`MER <b>${v.toFixed(2)} dB</b> · level ${m.in_rms??'—'} · `+
 (v>=15.2?'<span style="color:#67d18a">ABOVE the cliff — TV exists here</span>'
 :'<span style="color:#e77">below the cliff — keep aiming ('+(15.2-v).toFixed(1)+' dB to go)</span>');
 const bar=document.getElementById('fbar');
@@ -899,9 +1066,17 @@ class H(BaseHTTPRequestHandler):
                 st.update(live_math())
             self._send(json.dumps(st))
         elif self.path == "/api/meter":
-            out = {"rf": METER["rf"]}
-            if METER["rf"] is not None:
-                out.update(live_math())
+            # aim-while-watching: when no dedicated meter runs but TV is
+            # playing, serve the live chain's telemetry instead — that's
+            # how rabbit ears are really aimed: with the picture on.
+            rf = METER["rf"] if METER["rf"] is not None else STATE["rf"]
+            out = {"rf": rf,
+                   "watching": METER["rf"] is None and STATE["rf"] is not None,
+                   "virtual": STATE["virtual"] if METER["rf"] is None else None}
+            if rf is not None:
+                out.update(chain_math())
+            if BAL["on"] and BAL["scores"]:
+                out["balance"] = BAL["scores"]
             self._send(json.dumps(out))
         elif self.path == "/api/carriers":
             try:
@@ -956,8 +1131,16 @@ class H(BaseHTTPRequestHandler):
                              daemon=True).start()
             self._send('"metering"')
         elif self.path == "/api/meter/stop":
+            BAL["on"] = False
             threading.Thread(target=meter_stop, daemon=True).start()
             self._send('"meter stopped"')
+        elif self.path == "/api/balance":
+            if req.get("on"):
+                threading.Thread(target=balance_start, daemon=True).start()
+                self._send('"balance on"')
+            else:
+                BAL["on"] = False
+                self._send('"balance off"')
         elif self.path == "/api/record":
             out = record(req["virt"], req["title"])
             self._send(out or "scheduled", "text/plain; charset=utf-8")
