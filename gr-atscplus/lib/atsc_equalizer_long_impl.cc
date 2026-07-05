@@ -72,6 +72,42 @@ atsc_equalizer_long_impl::atsc_equalizer_long_impl()
     d_taps_lkg.resize(NTAPS, 0.0f);
     d_lkg_valid = false;
 
+    // 2026-07-05 WARM START (research lever #3): seed the taps from the
+    // previous session's vetted LKG snapshot for this channel+antenna.
+    // The cache holds only quality-gated tap states, so the worst case is
+    // "slightly stale but sane" — LMS adapts from there far faster than
+    // from a delta. STVT_EQ_TAP_CACHE_FILE is composed by tv_live.py
+    // (dir + antenna + rf); absent = exactly the legacy cold start.
+    if (const char* p = std::getenv("STVT_EQ_TAP_CACHE_FILE")) {
+        std::FILE* f = std::fopen(p, "rb");
+        if (f) {
+            uint32_t magic = 0, n = 0;
+            if (std::fread(&magic, 4, 1, f) == 1 &&
+                std::fread(&n, 4, 1, f) == 1 &&
+                magic == 0x54415043u /* 'TAPC' */ && n == (uint32_t)NTAPS) {
+                std::vector<float> t(NTAPS);
+                if (std::fread(t.data(), sizeof(float), NTAPS, f)
+                        == (size_t)NTAPS) {
+                    double e = 0.0;
+                    bool fin = true;
+                    for (int k = 0; k < NTAPS; k++) {
+                        if (!std::isfinite(t[k])) { fin = false; break; }
+                        e += (double)t[k] * (double)t[k];
+                    }
+                    if (fin && e > 0.01 && e < 50.0 * 50.0) {
+                        d_taps = t;
+                        d_taps_lkg = t;
+                        d_lkg_valid = true;
+                        std::fprintf(stderr,
+                            "[eq-long] WARM START from %s (|taps|=%.3f)\n",
+                            p, std::sqrt(e));
+                    }
+                }
+            }
+            std::fclose(f);
+        }
+    }
+
     const int alignment_multiple = volk_get_alignment() / sizeof(float);
     set_alignment(std::max(1, alignment_multiple));
 }
@@ -543,6 +579,28 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
         if (batch_err_rms < (double)LKG_GOOD_RMS_THRESHOLD) {
             for (int k = 0; k < NTAPS; k++) d_taps_lkg[k] = d_taps[k];
             d_lkg_valid = true;
+        }
+    }
+
+    // WARM-START periodic persist: our chains die by force-kill, so the
+    // cache must be written DURING life, not at exit. Every ~1024 field
+    // syncs (~25 s) with a valid LKG, write it atomically (tmp+rename).
+    static const char* TAP_CACHE_FILE = std::getenv("STVT_EQ_TAP_CACHE_FILE");
+    if (TAP_CACHE_FILE && d_lkg_valid && nsamples > 0) {
+        static uint64_t save_fs = 0;
+        save_fs++;
+        if ((save_fs & 0x3FF) == 0) {
+            std::string tmp = std::string(TAP_CACHE_FILE) + ".tmp";
+            std::FILE* f = std::fopen(tmp.c_str(), "wb");
+            if (f) {
+                const uint32_t magic = 0x54415043u, n = (uint32_t)NTAPS;
+                std::fwrite(&magic, 4, 1, f);
+                std::fwrite(&n, 4, 1, f);
+                std::fwrite(d_taps_lkg.data(), sizeof(float), NTAPS, f);
+                std::fclose(f);
+                std::remove(TAP_CACHE_FILE);
+                std::rename(tmp.c_str(), TAP_CACHE_FILE);
+            }
         }
     }
 

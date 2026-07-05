@@ -46,6 +46,11 @@ private:
     uint64_t d_fs_rejected_late;
     int d_fs_tol_low;
     int d_fs_tol_high;
+    // SYNC FLYWHEEL (2026-07-05, Strike 1): consecutive fields coasted on a
+    // synthesized field sync + lifetime total (A/B metric).
+    int d_coast_run;
+    uint64_t d_coast_total;
+    int d_clean_fs_streak;    // consecutive on-schedule (gap==313) syncs
 
 public:
     atsc_fs_checker_inst_impl();
