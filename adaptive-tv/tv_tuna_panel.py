@@ -32,6 +32,7 @@ GAINS = {36: (3, 40), 34: (2, 32), 15: (1, 32)}
 DEFAULT_GAIN = (3, 40)
 RE_FS = re.compile(r"fs_err_rms=([\d.]+)")
 RE_FPLL = re.compile(r"mean\|x\|=([\d.]+).*?max\|x\|=([\d.]+)\s+in_rms=([\d.]+)")
+RE_CIR = re.compile(r"\[cir t=[\d.]+\] (.+)")
 
 STATE = {"rf": None, "prog": None, "virtual": None, "name": None,
          "tuning": False, "env": {}, "stage": "", "stage_pct": 0}
@@ -141,11 +142,13 @@ def sweeper():
         freqs += list((h + (np.arange(keep) - keep / 2) * (8e6 / FFT)) / 1e6)
     with WF_LOCK: WF["freqs"] = [round(x, 2) for x in freqs]
     while True:
-        if SCAN["running"] or BAL["on"]:
+        if SCAN["running"] or BAL["on"] or FLAT["on"]:
             with WF_LOCK:
                 WF["status"] = ("channel scan in progress — sweep paused"
                                 if SCAN["running"] else
-                                "🌐 all-towers aiming in progress — sweep paused")
+                                ("📏 flatness aiming in progress — sweep paused"
+                                 if FLAT["on"] else
+                                 "🌐 all-towers aiming in progress — sweep paused"))
             time.sleep(5); continue
         if STATE["rf"] is not None or STATE["tuning"] or METER["rf"] is not None \
                 or chain_running():
@@ -178,7 +181,7 @@ def sweeper():
                 except OSError:
                     return False
             while not (STATE["rf"] is not None or STATE["tuning"]
-                       or METER["rf"] is not None or BAL["on"]
+                       or METER["rf"] is not None or BAL["on"] or FLAT["on"]
                        or SCAN["running"] or external_wants_sdr()):
                 row = []
                 t_row = time.strftime("%H:%M:%S")
@@ -219,6 +222,7 @@ METER = {"rf": None}
 
 def meter_start(rf):
     BAL["on"] = False
+    FLAT["on"] = False
     with LOCK:
         GEN[0] += 1
         my_gen = GEN[0]
@@ -322,6 +326,7 @@ def balance_loop():
 def balance_start():
     if BAL["on"]:
         return
+    FLAT["on"] = False
     with LOCK:
         GEN[0] += 1
         METER["rf"] = None
@@ -330,6 +335,102 @@ def balance_start():
     BAL["on"] = True
     time.sleep(1)
     threading.Thread(target=balance_loop, daemon=True).start()
+
+# ── flatness meter: aim-by-ripple for channels that can't lock ─────
+# RF7 taught us (IQ autopsy 2026-07-05): a channel can carry a perfect
+# pilot while 27 dB canyons carve up the data band — no lock, no MER,
+# no echo X-ray possible. But the RIPPLE ITSELF is measurable with no
+# lock at all: FFT the band, measure smoothed max−min across the
+# central 5 MHz. Flatter = decodable. The tone rises as canyons fill.
+FLAT = {"on": False, "rf": None, "ripple": None}
+
+def flat_loop(rf):
+    import numpy as np
+    try:
+        import SoapySDR
+        SoapySDR.SoapySDR_setLogLevel(SoapySDR.SOAPY_SDR_FATAL)
+        from SoapySDR import SOAPY_SDR_CF32, SOAPY_SDR_RX
+    except Exception:
+        FLAT["on"] = False
+        return
+    lo = (174 + (rf - 7) * 6) if rf < 14 else (470 + (rf - 14) * 6)
+    center = (lo + 3.0) * 1e6
+    FFT = 2048
+    win = np.hanning(FFT).astype(np.float32)
+    sdr = None
+    try:
+        sdr = SoapySDR.Device("driver=sdrplay")
+        sdr.setSampleRate(SOAPY_SDR_RX, 0, 8_000_000)
+        sdr.setFrequency(SOAPY_SDR_RX, 0, center)
+        sdr.setAntenna(SOAPY_SDR_RX, 0, "Antenna A")
+        try: sdr.setGainMode(SOAPY_SDR_RX, 0, False)
+        except Exception: pass
+        sdr.setGain(SOAPY_SDR_RX, 0, "IFGR", 40.0)
+        try:
+            sdr.writeSetting("rfgain_sel", "3")
+            if rf < 14:
+                sdr.writeSetting("dabnotch_ctrl", "false")
+        except Exception: pass
+        st = sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32)
+        sdr.activateStream(st)
+        buf = np.empty(FFT, dtype=np.complex64)
+        fax = np.fft.fftshift(np.fft.fftfreq(FFT, 1 / 8e6))
+        inband = np.abs(fax) < 2.5e6
+        smooth = None
+        while FLAT["on"]:
+            if (STATE["rf"] is not None or STATE["tuning"]
+                    or SCAN["running"] or METER["rf"] is not None
+                    or BAL["on"]):
+                break
+            # Instantaneous ripple, autopsy-calibrated: canyons BREATHE, so
+            # time-averaging the spectrum first fills them in and reads ~2×
+            # optimistic (measured live 2026-07-05: 14 dB averaged vs 27 dB
+            # instantaneous on the same channel). Instead: short 8-FFT
+            # snapshots (~2 ms), ripple per snapshot, median across the
+            # window — the number the decoder actually experiences.
+            snap_rips = []
+            t0 = time.time()
+            while time.time() - t0 < 0.25:
+                acc = np.zeros(FFT)
+                n = 0
+                for _ in range(8):
+                    r = sdr.readStream(st, [buf], FFT, timeoutUs=200000)
+                    if r.ret == FFT:
+                        acc += np.abs(np.fft.fftshift(
+                            np.fft.fft(buf * win)))**2
+                        n += 1
+                if not n:
+                    continue
+                p = 10 * np.log10(acc[inband] / n + 1e-20)
+                k = np.convolve(p, np.ones(5) / 5, mode="valid")
+                snap_rips.append(float(k.max() - k.min()))
+            if not snap_rips:
+                continue
+            snap_rips.sort()
+            ripple = snap_rips[len(snap_rips) // 2]
+            smooth = ripple if smooth is None else 0.7 * smooth + 0.3 * ripple
+            FLAT["ripple"] = round(smooth, 1)
+        sdr.deactivateStream(st)
+        sdr.closeStream(st)
+    except Exception:
+        pass
+    finally:
+        try: del sdr
+        except Exception: pass
+        FLAT["on"] = False
+        FLAT["ripple"] = None
+
+def flat_start(rf):
+    BAL["on"] = False
+    with LOCK:
+        GEN[0] += 1
+        METER["rf"] = None
+        kill_tv()
+    FLAT["rf"] = rf
+    FLAT["ripple"] = None
+    FLAT["on"] = True
+    time.sleep(1)
+    threading.Thread(target=flat_loop, args=(rf,), daemon=True).start()
 
 # ── tuning / recording actions ─────────────────────────────────────
 def base_env(rf):
@@ -353,7 +454,8 @@ def base_env(rf):
                 "STVT_RS": "stock", "STVT_SPS": "1.1",
                 "STVT_RRC_SYMS": "8", "STVT_TEISCRUB": "1",
                 "STVT_EQ_LKG": "1", "STVT_EQ_LKG_RMS": "1.0",
-                "STVT_EQ_TELEM": "1"})
+                "STVT_EQ_TELEM": "1",
+                "STVT_EQ_CIR": "1"})   # echo X-ray telemetry (H2)
     return env
 
 def kill_tv():
@@ -370,6 +472,7 @@ def set_stage(pct, msg):
 
 def tune(rf, prog, virtual, name):
     BAL["on"] = False
+    FLAT["on"] = False
     with LOCK:
         GEN[0] += 1
         my_gen = GEN[0]
@@ -506,6 +609,7 @@ def tune(rf, prog, virtual, name):
 
 def stop_tv():
     BAL["on"] = False           # ...and a running all-towers balance sweep
+    FLAT["on"] = False
     with LOCK:
         GEN[0] += 1
         METER["rf"] = None      # scan/stop must also release a running meter
@@ -566,6 +670,18 @@ def chain_math():
             mn, mx, ir = fp[-1]
             out.update({"mean_x": float(mn), "max_x": float(mx),
                         "in_rms": float(ir)})
+        cm = RE_CIR.findall(text)
+        if cm:
+            echoes = []
+            for pair in cm[-1].strip().strip(",").split(","):
+                if ":" in pair:
+                    d, db = pair.split(":")
+                    try:
+                        echoes.append([int(d), float(db)])
+                    except ValueError:
+                        pass
+            if echoes:
+                out["cir"] = echoes
     except OSError:
         pass
     return out
@@ -681,6 +797,11 @@ canvas{width:100%;image-rendering:pixelated;display:block;border-radius:4px}
       <div style="position:absolute;top:30px;left:calc((15.2 - 8)/14*100% - 30px);color:#e7c96a;font-size:10px">cliff 15.2</div>
     </div>
     <div style="color:#5f7591;font-size:10px;margin:14px 30px 12px;display:flex;justify-content:space-between"><span>8 dB</span><span>22 dB</span></div>
+    <div id="fcirwrap" style="background:#05080f;border:1px solid #26436b;border-radius:10px;padding:8px;margin:0 30px 12px">
+      <div style="color:#7f96b3;font-size:11px;text-align:left;margin-bottom:4px">📡 ECHO X-RAY — the channel's impulse response (main path at 0, every other bar is a reflection)</div>
+      <canvas id="fcir" width="1100" height="150" style="width:100%"></canvas>
+      <div style="color:#5f7591;font-size:10px;text-align:left;margin-top:3px">x = delay in µs (1 µs ≈ 300 m of extra path) · bar height = echo strength in dB vs the main path · <span style="color:#67d18a">green = main</span> · <span style="color:#e7c96a">yellow = pre-echo</span> · <span style="color:#e77">red = post-echo</span> — aim to shrink the red and yellow, not just raise the number</div>
+    </div>
     <button id="ftone" class="tune" style="font-size:14px;padding:8px 20px" onclick="toggleTone()">🔊 tone: OFF</button>
     <button id="fchirp" class="tune" style="font-size:14px;padding:8px 20px;background:#1a4a3a" onclick="toggleChirp()">🔔 record chirp: ON</button>
     <button class="stop" style="font-size:14px;padding:8px 20px" onclick="stopMeter()">stop metering</button>
@@ -782,13 +903,20 @@ await fetch('/api/balance',{method:'POST',body:JSON.stringify({on:true})})}
 async function buildFinderChans(){try{
 const cars=await (await fetch('/api/carriers')).json();
 if(!cars.length){document.getElementById('fchans').textContent='no scan data — run 📡 SCAN CHANNELS first';return}
-let h=`<button class="tune" style="margin:2px;background:#1a4a3a;border:1px solid #2a6a52;font-weight:700" onclick="startBalance()">🌐 ALL TOWERS (fair spot)</button> · <b>or aim on one carrier</b> (strongest first): `;
+let h=`<button class="tune" style="margin:2px;background:#1a4a3a;border:1px solid #2a6a52;font-weight:700" onclick="startBalance()">🌐 ALL TOWERS (fair spot)</button> `+
+`<button id="fmodebtn" class="tune" style="margin:2px;background:#3a2a4a;border:1px solid #5a4a7a" onclick="toggleFmode()">mode: 📶 MER</button>`+
+` · <b>or aim on one carrier</b> (strongest first): `;
 cars.slice(0,16).forEach(c=>{
 const col=c.lock?'#67d18a':(c.snr>=35?'#e7c96a':'#5f7591');
 h+=`<button class="tune" style="margin:2px;border:1px solid ${col}" onclick="startMeter(${c.rf})">RF${c.rf}${c.cs?' '+c.cs:''} · ${c.snr}dB${c.lock?' ✓':''}</button>`});
 h+='<div style="margin-top:6px;color:#5f7591">✓ green = locked in last scan · yellow = strong carrier worth hunting · grey = faint · VHF (RF 13 and below) can be metered — a good aim there helps us crack the VHF recipe</div>';
 document.getElementById('fchans').innerHTML=h}catch(e){}}
-let PEAK=null, CHIRP=true;
+let PEAK=null, CHIRP=true, FMODE='MER';
+function toggleFmode(){FMODE=(FMODE==='MER')?'FLAT':'MER';
+const b=document.getElementById('fmodebtn');
+if(b)b.textContent=FMODE==='MER'?'mode: 📶 MER':'mode: 📏 FLATNESS';
+toast(FMODE==='MER'?'MER mode — needs a lock; the decode-margin dial'
+:'FLATNESS mode — no lock needed; measures the band\\'s ripple canyons. Built for RF7-class channels: aim to FILL the canyons (lower dB = better)')}
 function toggleChirp(){CHIRP=!CHIRP;
 document.getElementById('fchirp').textContent='🔔 record chirp: '+(CHIRP?'ON':'OFF')}
 function chirp(){if(!AC)return;const o=AC.createOscillator(),g=AC.createGain();
@@ -798,15 +926,20 @@ o.frequency.setValueAtTime(1320,AC.currentTime+0.07);
 g.gain.setValueAtTime(0.25,AC.currentTime);
 g.gain.exponentialRampToValueAtTime(0.001,AC.currentTime+0.22);
 o.start();o.stop(AC.currentTime+0.25)}
-async function startMeter(rf){METER_RF=rf;PEAK=null;
+async function startMeter(rf){PEAK=null;
 document.getElementById('fpeak').innerHTML='&nbsp;';
 if(!AC)AC=new (window.AudioContext||window.webkitAudioContext)();
+if(FMODE==='FLAT'){METER_RF='FLAT';
+document.getElementById('fsub').textContent='📏 flatness meter starting on RF'+rf+' — first ripple reading in ~5 s';
+await fetch('/api/flat',{method:'POST',body:JSON.stringify({rf})});return}
+METER_RF=rf;
 document.getElementById('fsub').textContent='starting chain on RF'+rf+' — first number in ~15-25 s';
 await fetch('/api/meter',{method:'POST',body:JSON.stringify({rf})})}
 async function stopMeter(){METER_RF=null;toneOff();
 const b=document.getElementById('fbig');b.textContent='—';b.style.color='#5f7591';
 document.getElementById('fsub').textContent='meter stopped';
 await fetch('/api/balance',{method:'POST',body:JSON.stringify({on:false})});
+await fetch('/api/flat',{method:'POST',body:JSON.stringify({})});
 await fetch('/api/meter/stop',{method:'POST'})}
 function toneOff(){TONE=false;if(OSC){try{OSC.stop()}catch(e){}OSC=null}
 for(const k in OSCS){try{OSCS[k].o.stop()}catch(e){}}OSCS={};
@@ -821,6 +954,26 @@ async function pollMeter(){if(TAB!=='F')return;
 try{const m=await (await fetch('/api/meter')).json();
 if(m.watching)METER_RF=null;
 if(METER_RF===null&&!m.watching)return;
+if(METER_RF==='FLAT'){
+if(!m.flat||m.flat.ripple===null||m.flat.ripple===undefined)return;
+const rip=m.flat.ripple;
+// score: lower ripple = better; hue green under ~8 dB, red past ~25
+const good=Math.max(0,Math.min(1,(28-rip)/22)), hue=good*120;
+const big=document.getElementById('fbig');big.textContent=rip.toFixed(1);
+big.style.color=`hsl(${hue},75%,55%)`;
+const score=35-rip;
+if(PEAK===null||score>PEAK+0.3){const beat=PEAK!==null;PEAK=score;
+document.getElementById('fpeak').innerHTML='🏆 flattest so far: <b>'+(35-PEAK).toFixed(1)+' dB ripple</b>';
+if(beat&&CHIRP)chirp()}
+document.getElementById('fsub').innerHTML=`📏 RF${m.flat.rf} band ripple <b>${rip.toFixed(1)} dB</b> — `+
+(rip<8?'<span style="color:#67d18a">flat — a lock is plausible, try MER mode</span>'
+:(rip<15?'<span style="color:#e7c96a">wavy — getting close, keep moving</span>'
+:'<span style="color:#e77">deep canyons — multipath is shredding the data band</span>'));
+const bar=document.getElementById('fbar');
+bar.style.width=Math.max(0,Math.min(100,good*100))+'%';
+bar.style.background=`hsl(${hue},70%,45%)`;
+if(TONE&&OSC)OSC.frequency.setTargetAtTime(180+good*1320,AC.currentTime,0.1);
+return}
 if(METER_RF==='ALL'){
 if(!m.balance)return;
 const ent=Object.entries(m.balance).map(([rf,v])=>[parseInt(rf),v]);
@@ -873,7 +1026,33 @@ const bar=document.getElementById('fbar');
 bar.style.width=Math.max(0,Math.min(100,(v-8)/14*100))+'%';
 bar.style.background=`hsl(${hue},70%,45%)`;
 if(TONE&&OSC)OSC.frequency.setTargetAtTime(180+Math.max(0,Math.min(1,(v-6)/16))*1320,AC.currentTime,0.08);
+if(m.cir)drawCir(m.cir);
 }catch(e){}}
+// ── echo X-ray renderer: channel impulse response as living bars ──
+const SYM_US=0.0929;   // one ATSC symbol in microseconds
+function drawCir(echoes){
+const c=document.getElementById('fcir');if(!c)return;const g=c.getContext('2d');
+const W=c.width,H=c.height,DBFLOOR=-40;
+g.fillStyle='#05080f';g.fillRect(0,0,W,H);
+let lo=-3,hi=6;   // µs view, auto-grow to data
+for(const [d,db] of echoes){const us=d*SYM_US;if(us<lo)lo=us-1;if(us>hi)hi=us+1;}
+const xOf=us=>(us-lo)/(hi-lo)*W;
+// grid: 2 µs ticks + labels
+g.strokeStyle='#101c30';g.fillStyle='#5f7591';g.font='10px monospace';
+for(let u=Math.ceil(lo/2)*2;u<=hi;u+=2){const x=xOf(u);
+g.beginPath();g.moveTo(x,0);g.lineTo(x,H-14);g.stroke();
+g.fillText(u+'µs',x-12,H-3)}
+// dB rings
+for(const db of [-10,-20,-30]){const y=((-db)/(-DBFLOOR))*(H-16);
+g.strokeStyle='rgba(38,67,107,0.5)';g.beginPath();g.moveTo(0,y);g.lineTo(W,y);g.stroke();
+g.fillText(db+'dB',4,y-2)}
+// bars: height maps 0..-30 dB
+for(const [d,db] of echoes){
+const us=d*SYM_US,x=xOf(us);
+const h=Math.max(3,(1-Math.max(DBFLOOR,db)/DBFLOOR)*(H-16));
+g.fillStyle=d===0?'#67d18a':(d<0?'#e7c96a':'#e77');
+g.fillRect(x-2,(H-16)-h,4,h);}
+}
 function card(k,v,u,cls){return `<div class="card"><div class="k">${k}</div>`+
 `<div class="v ${cls||''}">${v}</div><div class="u">${u||''}</div></div>`}
 async function refreshNerd(){if(TAB!=='N')return;
@@ -1077,6 +1256,8 @@ class H(BaseHTTPRequestHandler):
                 out.update(chain_math())
             if BAL["on"] and BAL["scores"]:
                 out["balance"] = BAL["scores"]
+            if FLAT["on"]:
+                out["flat"] = {"rf": FLAT["rf"], "ripple": FLAT["ripple"]}
             self._send(json.dumps(out))
         elif self.path == "/api/carriers":
             try:
@@ -1141,6 +1322,14 @@ class H(BaseHTTPRequestHandler):
             else:
                 BAL["on"] = False
                 self._send('"balance off"')
+        elif self.path == "/api/flat":
+            if req.get("rf"):
+                threading.Thread(target=flat_start, args=(req["rf"],),
+                                 daemon=True).start()
+                self._send('"flatness on"')
+            else:
+                FLAT["on"] = False
+                self._send('"flatness off"')
         elif self.path == "/api/record":
             out = record(req["virt"], req["title"])
             self._send(out or "scheduled", "text/plain; charset=utf-8")
