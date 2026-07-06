@@ -50,6 +50,9 @@ log_event({"event": "night-cube-done", "rc": r.returncode})
 
 # ── phase 2: RF9 ambush ────────────────────────────────────────────
 os.environ["STVT_EQ_TAP_CACHE"] = str(CACHE)
+# DFE v1.1: gauntlet-proven marginal-channel weapon (RF7 sub-cliff:
+# +58 hdr/sample, loss 80%->21%). RF9 at dawn is exactly its regime.
+os.environ["STVT_EQ_DFE"] = "1"
 best = 0
 while now_hm() < AMBUSH_END:
     s = oc.sample(9, "Antenna B", 5, 32, secs=300)

@@ -72,6 +72,9 @@ atsc_equalizer_long_impl::atsc_equalizer_long_impl()
     d_taps_lkg.resize(NTAPS, 0.0f);
     d_lkg_valid = false;
 
+    d_fb.assign(NFB_MAX, 0.0f);        // DFE feedback taps (start silent)
+    d_hist.assign(2 * NFB_MAX, 0.0f);  // decided-symbol ring, double-length
+
     // 2026-07-05 WARM START (research lever #3): seed the taps from the
     // previous session's vetted LKG snapshot for this channel+antenna.
     // The cache holds only quality-gated tap states, so the worst case is
@@ -120,6 +123,15 @@ std::vector<float> atsc_equalizer_long_impl::data() const
 {
     std::vector<float> ret(&data_mem2[0], &data_mem2[ATSC_DATA_SEGMENT_LENGTH - 1]);
     return ret;
+}
+
+void atsc_equalizer_long_impl::dfe_push(float sym, int nfb)
+{
+    // double-length ring: writing each symbol at h and h+nfb keeps the
+    // most recent nfb decisions contiguous at [h+1 .. h+nfb]
+    d_hpos = (d_hpos + 1) % nfb;
+    d_hist[d_hpos] = sym;
+    d_hist[d_hpos + nfb] = sym;
 }
 
 void atsc_equalizer_long_impl::filterN(const float* input_samples,
@@ -187,9 +199,37 @@ void atsc_equalizer_long_impl::filterN_dd(const float* input_samples,
     }();
     static const float DD_EPS = 1.0f;  // NLMS regularizer, ~ noise floor power
 
+    // ── DFE v1 (2026-07-06, docs/DFE_BLUEPRINT.md) ──
+    // STVT_EQ_DFE=1 enables the feedback section: already-decided symbols
+    // are SUBTRACTED (echo cancellation without noise enhancement — the
+    // linear FFE must invert echoes, a DFE just removes them). Data
+    // segments only in v1; general_work refills the decision history with
+    // KNOWN training symbols each field sync (error-propagation flush).
+    static const bool DFE = []() {
+        const char* p = std::getenv("STVT_EQ_DFE");
+        return p && std::atoi(p) != 0;
+    }();
+    static const int NFB = []() -> int {
+        if (const char* p = std::getenv("STVT_EQ_DFE_NFB")) {
+            int v = std::atoi(p);
+            if (v >= 16 && v <= NFB_MAX) return v;
+        }
+        return 192;
+    }();
+    static const float MU_FB = []() -> float {
+        if (const char* p = std::getenv("STVT_EQ_DFE_MU_FB")) {
+            char* e = nullptr; double v = std::strtod(p, &e);
+            if (e != p) return (float)v;
+        }
+        return 2e-3f;
+    }();
+    // decided 8-VSB symbols have fixed power E[d^2]=21 → constant NLMS
+    // normalizer for the feedback update (no per-sample dot needed)
+    const float mu_fb_eff = MU_FB / (1.0f + 21.0f * (float)NFB);
+
     // μ==0 → behave exactly like the legacy passive filter (zero behavior
     // change when the knob is off).
-    if (DD_MU <= 0.0f) {
+    if (DD_MU <= 0.0f && !DFE) {
         filterN(input_samples, output_samples, nsamples);
         return;
     }
@@ -198,6 +238,12 @@ void atsc_equalizer_long_impl::filterN_dd(const float* input_samples,
         const float* x = &input_samples[j];
         float y = 0.0f;
         volk_32f_x2_dot_prod_32f(&y, x, &d_taps[0], NTAPS);
+        const float* hist_w = &d_hist[d_hpos + 1];   // last NFB decisions
+        if (DFE) {
+            float fb = 0.0f;
+            volk_32f_x2_dot_prod_32f(&fb, hist_w, &d_fb[0], NFB);
+            y -= fb;
+        }
         output_samples[j] = y;
 
         // 8-VSB slicer (levels ±1,±3,±5,±7 — same normalization as the FS
@@ -213,7 +259,20 @@ void atsc_equalizer_long_impl::filterN_dd(const float* input_samples,
         else                 decision = -7.0f;
 
         float e = decision - y;             // target − output
-        if (std::fabs(e) > DD_GATE) continue;   // unconfident — don't adapt
+        const bool confident = std::fabs(e) <= DD_GATE;
+        if (DFE && confident && std::isfinite(e)) {
+            // feedback update BEFORE the push — the push mutates the
+            // window's oldest slot (v1 bug: update-after-push fed the
+            // newest decision into the oldest tap's gradient)
+            float tmp_fb[NFB_MAX];
+            volk_32f_s32f_multiply_32f(tmp_fb, hist_w, mu_fb_eff * e, NFB);
+            volk_32f_x2_subtract_32f(&d_fb[0], &d_fb[0], tmp_fb, NFB);
+        }
+        if (DFE)
+            dfe_push(decision, NFB);        // history advances every symbol
+        if (!confident) continue;           // unconfident — don't adapt FFE
+
+        if (DD_MU <= 0.0f) continue;        // DFE-only mode: FFE stays FS-anchored
 
         float xnorm2 = 0.0f;
         volk_32f_x2_dot_prod_32f(&xnorm2, x, x, NTAPS);
@@ -224,6 +283,13 @@ void atsc_equalizer_long_impl::filterN_dd(const float* input_samples,
         float tmp_taps[NTAPS];
         volk_32f_s32f_multiply_32f(tmp_taps, x, scale, NTAPS);
         volk_32f_x2_add_32f(&d_taps[0], &d_taps[0], tmp_taps, NTAPS);
+    }
+
+    // DFE per-field-ish leak: bounds FFE/FBF disagreement growth (v1 runs
+    // the FS anchor WITHOUT feedback awareness — see blueprint; the leak
+    // plus the confidence gate keep any double-cancellation self-limiting)
+    if (DFE) {
+        for (int k = 0; k < NFB; k++) d_fb[k] *= 0.9995f;
     }
 
     // Optional leak (default 0 — see BUGFIX note above). When enabled, bounds
@@ -988,6 +1054,24 @@ int atsc_equalizer_long_impl::general_work(int noutput_items,
                 adaptN(data_mem, training_sequence2, data_mem2, KNOWN_FIELD_SYNC_LENGTH);
             } else {
                 adaptN(data_mem, training_sequence1, data_mem2, KNOWN_FIELD_SYNC_LENGTH);
+            }
+            // DFE v1: flush the decision history with the KNOWN training
+            // symbols — one guaranteed-correct reset per field kills
+            // decision-error propagation for free (blueprint trick #1).
+            static const bool DFE_G = []() {
+                const char* p = std::getenv("STVT_EQ_DFE");
+                return p && std::atoi(p) != 0;
+            }();
+            if (DFE_G) {
+                static const int NFB_G = []() -> int {
+                    if (const char* p = std::getenv("STVT_EQ_DFE_NFB")) {
+                        int v = std::atoi(p);
+                        if (v >= 16 && v <= NFB_MAX) return v;
+                    }
+                    return 192;
+                }();
+                for (int k = 0; k < KNOWN_FIELD_SYNC_LENGTH; k++)
+                    dfe_push(trn[k], NFB_G);
             }
         } else {
             // Continuous decision-directed tracking on data segments (no-op
