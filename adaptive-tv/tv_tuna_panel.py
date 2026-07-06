@@ -45,7 +45,11 @@ def antenna_for(rf):
                   encoding="utf-8") as f:
             ch = json.load(f)["channels"].get(str(rf))
         if ch:
-            return ANT_PORT.get(ch["antenna"], DEFAULT_ANT)
+            # hour-resolved first (ownership flips by hour: rabbit owns
+            # dawn VHF, discone owns daylight RF7), overall as fallback
+            hr = str(time.localtime().tm_hour)
+            ant = ch.get("owner_by_hour", {}).get(hr, ch["antenna"])
+            return ANT_PORT.get(ant, DEFAULT_ANT)
     except (OSError, ValueError, KeyError):
         pass
     return DEFAULT_ANT

@@ -74,6 +74,15 @@ class iq_ring_sink(gr.sync_block):
 
     def _dump(self):
         self._last_dump = time.time()
+        # stale trigger = left over from a previous (dead) chain, aimed
+        # at a different channel/moment — discard, don't dump garbage
+        try:
+            if time.time() - self.trigger.stat().st_mtime > 20:
+                self.trigger.unlink()
+                print("[iq_ring] stale trigger discarded", flush=True)
+                return
+        except OSError:
+            return
         try:
             reason = self.trigger.read_text(errors="ignore").strip()
         except OSError:

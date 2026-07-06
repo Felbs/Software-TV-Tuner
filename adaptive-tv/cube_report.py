@@ -86,9 +86,19 @@ for rf in rfs:
         hours[str(hh)] = {"mer": round(ms[len(ms) // 2], 2),
                           "decodes": sum(1 for _, d in lst if d)}
     best_hr = max(hours, key=lambda h: hours[h]["mer"]) if hours else None
+    # hour-resolved ownership (2026-07-06: discone won RF7 in daylight
+    # after the rabbit ears owned the dawn — ownership flips BY HOUR)
+    by_hour = {}
+    for a in ants:
+        for hh, lst in hourly.get(f"rf{rf}|{a}", {}).items():
+            ms = sorted(m for m, _ in lst)
+            score = (sum(1 for _, d in lst if d), ms[len(ms) // 2])
+            if str(hh) not in by_hour or score > by_hour[str(hh)][0]:
+                by_hour[str(hh)] = (score, a)
     mapobj["channels"][str(rf)] = {
         "antenna": ant, "median_mer": med, "decodes": dec,
-        "best_hour": best_hr, "hours": hours}
+        "best_hour": best_hr, "hours": hours,
+        "owner_by_hour": {h: a for h, (s, a) in sorted(by_hour.items())}}
 mp = path.parent / "cube_map.json"
 mp.write_text(json.dumps(mapobj, indent=1), encoding="utf-8")
 print(f"\nmap exported: {mp}")
