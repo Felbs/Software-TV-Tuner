@@ -98,6 +98,7 @@ def sample(rf, antenna, rfg, ifgr, secs=SAMPLE_SECS):
     mx = 0.0
     off = 0
     rs_last = vit_last = None
+    deaf_fired = False
     while time.time() - t0 < secs and ch.poll() is None:
         time.sleep(1.0)
         try:
@@ -118,6 +119,21 @@ def sample(rf, antenna, rfg, ifgr, secs=SAMPLE_SECS):
         v = RE_VIT.findall(chunk)
         if v:
             vit_last = v[-1]
+        # DEAF trigger (2026-07-06, RF15 @ MER 17.41 with 99.9% RS fail):
+        # pristine symbols + total FEC death = the eq->RS alignment bug
+        # caught alive. Dump the ring NOW, while this chain still runs.
+        if (not deaf_fired and time.time() - t0 > 20 and len(mers) > 30
+                and rs_last and int(rs_last[3]) > 20000
+                and int(rs_last[4]) / max(1, int(rs_last[3])) > 0.98):
+            ms = sorted(mers)
+            if ms[len(ms) // 2] >= 16.0:
+                trig = Path(r"Z:\src\magic-tv-decoder\tools\data"
+                            r"\specimens\TRIGGER")
+                trig.parent.mkdir(parents=True, exist_ok=True)
+                trig.write_text(
+                    f"DEAF rf{rf} {antenna} mer_med={ms[len(ms)//2]:.2f} "
+                    f"rs5_bad={rs_last[4]}/{rs_last[3]}")
+                deaf_fired = True
     ch.terminate()
     try:
         ch.wait(timeout=6)

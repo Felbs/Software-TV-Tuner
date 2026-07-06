@@ -1,10 +1,10 @@
 {
- "generated": "11:42:54",
+ "generated": "16:46:40",
  "channels": {
   "7": {
    "antenna": "discone",
-   "median_mer": 14.79,
-   "decodes": 11,
+   "median_mer": 14.98,
+   "decodes": 27,
    "best_hour": "10",
    "hours": {
     "0": {
@@ -48,8 +48,28 @@
      "decodes": 3
     },
     "11": {
-     "mer": 15.14,
-     "decodes": 2
+     "mer": 15.07,
+     "decodes": 3
+    },
+    "12": {
+     "mer": 14.85,
+     "decodes": 3
+    },
+    "13": {
+     "mer": 14.94,
+     "decodes": 3
+    },
+    "14": {
+     "mer": 15.18,
+     "decodes": 3
+    },
+    "15": {
+     "mer": 15.18,
+     "decodes": 3
+    },
+    "16": {
+     "mer": 15.17,
+     "decodes": 3
     },
     "23": {
      "mer": 14.49,
@@ -61,6 +81,11 @@
     "1": "rabbit",
     "10": "discone",
     "11": "discone",
+    "12": "discone",
+    "13": "discone",
+    "14": "discone",
+    "15": "discone",
+    "16": "discone",
     "2": "rabbit",
     "23": "rabbit",
     "3": "rabbit",
@@ -73,7 +98,7 @@
   },
   "9": {
    "antenna": "rabbit",
-   "median_mer": 13.05,
+   "median_mer": 13.16,
    "decodes": 0,
    "best_hour": "6",
    "hours": {
@@ -121,6 +146,26 @@
      "mer": 13.39,
      "decodes": 0
     },
+    "12": {
+     "mer": 13.28,
+     "decodes": 0
+    },
+    "13": {
+     "mer": 13.09,
+     "decodes": 0
+    },
+    "14": {
+     "mer": 13.3,
+     "decodes": 0
+    },
+    "15": {
+     "mer": 13.26,
+     "decodes": 0
+    },
+    "16": {
+     "mer": 13.28,
+     "decodes": 0
+    },
     "23": {
      "mer": 12.68,
      "decodes": 0
@@ -131,6 +176,11 @@
     "1": "rabbit",
     "10": "rabbit",
     "11": "rabbit",
+    "12": "rabbit",
+    "13": "rabbit",
+    "14": "rabbit",
+    "15": "rabbit",
+    "16": "rabbit",
     "2": "rabbit",
     "23": "rabbit",
     "3": "rabbit",
@@ -145,7 +195,7 @@
    "antenna": "rabbit",
    "median_mer": 12.72,
    "decodes": 0,
-   "best_hour": "9",
+   "best_hour": "15",
    "hours": {
     "0": {
      "mer": 12.57,
@@ -191,6 +241,26 @@
      "mer": 11.63,
      "decodes": 0
     },
+    "12": {
+     "mer": 13.1,
+     "decodes": 0
+    },
+    "13": {
+     "mer": 11.93,
+     "decodes": 0
+    },
+    "14": {
+     "mer": 12.17,
+     "decodes": 0
+    },
+    "15": {
+     "mer": 14.16,
+     "decodes": 0
+    },
+    "16": {
+     "mer": 13.11,
+     "decodes": 0
+    },
     "23": {
      "mer": 11.79,
      "decodes": 0
@@ -201,6 +271,11 @@
     "1": "rabbit",
     "10": "rabbit",
     "11": "rabbit",
+    "12": "rabbit",
+    "13": "rabbit",
+    "14": "rabbit",
+    "15": "rabbit",
+    "16": "rabbit",
     "2": "rabbit",
     "23": "rabbit",
     "3": "rabbit",
@@ -213,8 +288,8 @@
   },
   "21": {
    "antenna": "rabbit",
-   "median_mer": 16.69,
-   "decodes": 30,
+   "median_mer": 15.94,
+   "decodes": 45,
    "best_hour": "4",
    "hours": {
     "0": {
@@ -261,6 +336,26 @@
      "mer": 15.2,
      "decodes": 3
     },
+    "12": {
+     "mer": 15.74,
+     "decodes": 3
+    },
+    "13": {
+     "mer": 15.23,
+     "decodes": 3
+    },
+    "14": {
+     "mer": 15.61,
+     "decodes": 3
+    },
+    "15": {
+     "mer": 15.46,
+     "decodes": 3
+    },
+    "16": {
+     "mer": 15.71,
+     "decodes": 3
+    },
     "23": {
      "mer": 16.74,
      "decodes": 1
@@ -271,6 +366,11 @@
     "1": "rabbit",
     "10": "rabbit",
     "11": "rabbit",
+    "12": "rabbit",
+    "13": "rabbit",
+    "14": "rabbit",
+    "15": "rabbit",
+    "16": "rabbit",
     "2": "rabbit",
     "23": "rabbit",
     "3": "rabbit",
@@ -283,8 +383,8 @@
   },
   "34": {
    "antenna": "rabbit",
-   "median_mer": 16.79,
-   "decodes": 31,
+   "median_mer": 16.82,
+   "decodes": 47,
    "best_hour": "23",
    "hours": {
     "0": {
@@ -329,7 +429,27 @@
     },
     "11": {
      "mer": 17.07,
-     "decodes": 2
+     "decodes": 3
+    },
+    "12": {
+     "mer": 16.92,
+     "decodes": 3
+    },
+    "13": {
+     "mer": 17.02,
+     "decodes": 3
+    },
+    "14": {
+     "mer": 16.78,
+     "decodes": 3
+    },
+    "15": {
+     "mer": 16.89,
+     "decodes": 3
+    },
+    "16": {
+     "mer": 17.08,
+     "decodes": 3
     },
     "23": {
      "mer": 17.54,
@@ -341,6 +461,11 @@
     "1": "rabbit",
     "10": "rabbit",
     "11": "rabbit",
+    "12": "rabbit",
+    "13": "rabbit",
+    "14": "rabbit",
+    "15": "rabbit",
+    "16": "rabbit",
     "2": "rabbit",
     "23": "rabbit",
     "3": "rabbit",
@@ -353,8 +478,8 @@
   },
   "36": {
    "antenna": "rabbit",
-   "median_mer": 16.7,
-   "decodes": 31,
+   "median_mer": 16.42,
+   "decodes": 47,
    "best_hour": "4",
    "hours": {
     "0": {
@@ -398,8 +523,28 @@
      "decodes": 3
     },
     "11": {
-     "mer": 15.93,
-     "decodes": 2
+     "mer": 15.77,
+     "decodes": 3
+    },
+    "12": {
+     "mer": 16.36,
+     "decodes": 3
+    },
+    "13": {
+     "mer": 16.34,
+     "decodes": 3
+    },
+    "14": {
+     "mer": 16.05,
+     "decodes": 3
+    },
+    "15": {
+     "mer": 16.42,
+     "decodes": 3
+    },
+    "16": {
+     "mer": 15.68,
+     "decodes": 3
     },
     "23": {
      "mer": 16.44,
@@ -411,6 +556,11 @@
     "1": "rabbit",
     "10": "rabbit",
     "11": "rabbit",
+    "12": "rabbit",
+    "13": "rabbit",
+    "14": "rabbit",
+    "15": "rabbit",
+    "16": "rabbit",
     "2": "rabbit",
     "23": "rabbit",
     "3": "rabbit",
