@@ -60,7 +60,9 @@ while args.window == 0 or time.time() - t0 < args.window:
     try:
         size = log.stat().st_size
         if size < off:
-            off = 0                       # log rotated
+            off = 0                       # log rotated = NEW chain/channel:
+            quiet_count = 0               # re-arm from scratch so channel
+            last_fs = time.time()         # hops can't fake a quiet->storm
         with open(log, "r", errors="ignore") as f:
             f.seek(off)
             chunk = f.read()
@@ -69,8 +71,11 @@ while args.window == 0 or time.time() - t0 < args.window:
         continue
     if RE_FS.search(chunk):
         last_fs = time.time()
-    elif time.time() - last_fs > 8 and off > 0 and last_fs > t0 + 20:
-        fire(f"SYNCLOSS no field-sync telemetry for {time.time()-last_fs:.0f}s")
+    elif chunk and time.time() - last_fs > 8 and last_fs > t0 + 20:
+        # chunk non-empty = chain ALIVE and writing, yet no field syncs:
+        # true sync loss. (A frozen log = chain benched between cube
+        # cycles — that fired 17 false SYNCLOSS specimens on 7/06.)
+        fire(f"SYNCLOSS chain alive, no field-sync for {time.time()-last_fs:.0f}s")
         last_fs = time.time()             # re-arm
     for pk, bad in RE_RS5.findall(chunk):
         bad = int(bad)

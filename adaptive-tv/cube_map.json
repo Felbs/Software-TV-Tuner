@@ -1,53 +1,79 @@
 {
- "generated": "07:11:48",
+ "generated": "11:42:54",
  "channels": {
   "7": {
-   "antenna": "rabbit",
-   "median_mer": 14.66,
+   "antenna": "discone",
+   "median_mer": 14.79,
    "decodes": 11,
-   "best_hour": "5",
+   "best_hour": "10",
    "hours": {
     "0": {
-     "mer": 14.4,
+     "mer": 14.84,
      "decodes": 0
     },
     "1": {
-     "mer": 14.27,
-     "decodes": 1
+     "mer": 14.47,
+     "decodes": 0
     },
     "2": {
-     "mer": 14.6,
-     "decodes": 1
+     "mer": 14.24,
+     "decodes": 0
     },
     "3": {
-     "mer": 14.57,
-     "decodes": 1
+     "mer": 14.31,
+     "decodes": 0
     },
     "4": {
-     "mer": 14.66,
-     "decodes": 1
+     "mer": 14.6,
+     "decodes": 0
     },
     "5": {
-     "mer": 15.4,
-     "decodes": 3
+     "mer": 15.06,
+     "decodes": 0
     },
     "6": {
-     "mer": 15.04,
+     "mer": 15.25,
      "decodes": 3
     },
     "7": {
-     "mer": 15.13,
-     "decodes": 1
+     "mer": 14.72,
+     "decodes": 0
+    },
+    "9": {
+     "mer": 15.17,
+     "decodes": 3
+    },
+    "10": {
+     "mer": 15.34,
+     "decodes": 3
+    },
+    "11": {
+     "mer": 15.14,
+     "decodes": 2
     },
     "23": {
-     "mer": 14.6,
+     "mer": 14.49,
      "decodes": 0
     }
+   },
+   "owner_by_hour": {
+    "0": "discone",
+    "1": "rabbit",
+    "10": "discone",
+    "11": "discone",
+    "2": "rabbit",
+    "23": "rabbit",
+    "3": "rabbit",
+    "4": "rabbit",
+    "5": "rabbit",
+    "6": "discone",
+    "7": "rabbit",
+    "9": "discone"
    }
   },
   "9": {
    "antenna": "rabbit",
-   "median_mer": 12.73,
+   "median_mer": 13.05,
    "decodes": 0,
    "best_hour": "6",
    "hours": {
@@ -83,17 +109,43 @@
      "mer": 13.05,
      "decodes": 0
     },
+    "9": {
+     "mer": 13.04,
+     "decodes": 0
+    },
+    "10": {
+     "mer": 13.13,
+     "decodes": 0
+    },
+    "11": {
+     "mer": 13.39,
+     "decodes": 0
+    },
     "23": {
      "mer": 12.68,
      "decodes": 0
     }
+   },
+   "owner_by_hour": {
+    "0": "rabbit",
+    "1": "rabbit",
+    "10": "rabbit",
+    "11": "rabbit",
+    "2": "rabbit",
+    "23": "rabbit",
+    "3": "rabbit",
+    "4": "rabbit",
+    "5": "rabbit",
+    "6": "rabbit",
+    "7": "rabbit",
+    "9": "rabbit"
    }
   },
   "15": {
    "antenna": "rabbit",
    "median_mer": 12.72,
    "decodes": 0,
-   "best_hour": "4",
+   "best_hour": "9",
    "hours": {
     "0": {
      "mer": 12.57,
@@ -127,16 +179,42 @@
      "mer": 11.72,
      "decodes": 0
     },
+    "9": {
+     "mer": 14.12,
+     "decodes": 0
+    },
+    "10": {
+     "mer": 13.68,
+     "decodes": 0
+    },
+    "11": {
+     "mer": 11.63,
+     "decodes": 0
+    },
     "23": {
      "mer": 11.79,
      "decodes": 0
     }
+   },
+   "owner_by_hour": {
+    "0": "rabbit",
+    "1": "rabbit",
+    "10": "rabbit",
+    "11": "rabbit",
+    "2": "rabbit",
+    "23": "rabbit",
+    "3": "rabbit",
+    "4": "rabbit",
+    "5": "rabbit",
+    "6": "rabbit",
+    "7": "rabbit",
+    "9": "rabbit"
    }
   },
   "21": {
    "antenna": "rabbit",
-   "median_mer": 17.02,
-   "decodes": 23,
+   "median_mer": 16.69,
+   "decodes": 30,
    "best_hour": "4",
    "hours": {
     "0": {
@@ -171,16 +249,42 @@
      "mer": 16.0,
      "decodes": 1
     },
+    "9": {
+     "mer": 15.49,
+     "decodes": 2
+    },
+    "10": {
+     "mer": 15.4,
+     "decodes": 2
+    },
+    "11": {
+     "mer": 15.2,
+     "decodes": 3
+    },
     "23": {
      "mer": 16.74,
      "decodes": 1
     }
+   },
+   "owner_by_hour": {
+    "0": "rabbit",
+    "1": "rabbit",
+    "10": "rabbit",
+    "11": "rabbit",
+    "2": "rabbit",
+    "23": "rabbit",
+    "3": "rabbit",
+    "4": "rabbit",
+    "5": "rabbit",
+    "6": "rabbit",
+    "7": "rabbit",
+    "9": "rabbit"
    }
   },
   "34": {
    "antenna": "rabbit",
-   "median_mer": 16.77,
-   "decodes": 23,
+   "median_mer": 16.79,
+   "decodes": 31,
    "best_hour": "23",
    "hours": {
     "0": {
@@ -215,16 +319,42 @@
      "mer": 16.87,
      "decodes": 1
     },
+    "9": {
+     "mer": 16.82,
+     "decodes": 3
+    },
+    "10": {
+     "mer": 16.78,
+     "decodes": 3
+    },
+    "11": {
+     "mer": 17.07,
+     "decodes": 2
+    },
     "23": {
      "mer": 17.54,
      "decodes": 1
     }
+   },
+   "owner_by_hour": {
+    "0": "rabbit",
+    "1": "rabbit",
+    "10": "rabbit",
+    "11": "rabbit",
+    "2": "rabbit",
+    "23": "rabbit",
+    "3": "rabbit",
+    "4": "rabbit",
+    "5": "rabbit",
+    "6": "rabbit",
+    "7": "rabbit",
+    "9": "rabbit"
    }
   },
   "36": {
    "antenna": "rabbit",
-   "median_mer": 16.97,
-   "decodes": 22,
+   "median_mer": 16.7,
+   "decodes": 31,
    "best_hour": "4",
    "hours": {
     "0": {
@@ -255,10 +385,40 @@
      "mer": 16.9,
      "decodes": 3
     },
+    "7": {
+     "mer": 16.39,
+     "decodes": 1
+    },
+    "9": {
+     "mer": 15.99,
+     "decodes": 3
+    },
+    "10": {
+     "mer": 15.64,
+     "decodes": 3
+    },
+    "11": {
+     "mer": 15.93,
+     "decodes": 2
+    },
     "23": {
      "mer": 16.44,
      "decodes": 1
     }
+   },
+   "owner_by_hour": {
+    "0": "rabbit",
+    "1": "rabbit",
+    "10": "rabbit",
+    "11": "rabbit",
+    "2": "rabbit",
+    "23": "rabbit",
+    "3": "rabbit",
+    "4": "rabbit",
+    "5": "rabbit",
+    "6": "rabbit",
+    "7": "rabbit",
+    "9": "rabbit"
    }
   }
  }
