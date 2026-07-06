@@ -196,7 +196,11 @@ int atsc_rs_decoder_erasure_impl::dynamic_max_erasures() const
     const double m = std::max(d_recent_metric, d_recent_metric_max * 0.5);
     if (m < 3500.0) return std::max(4, d_max_erasures - 6);
     if (m < 5500.0) return d_max_erasures;
-    return std::min(20, d_max_erasures + 4);
+    // ceiling 16, not 20 (2026-07-06): RS allows 2t+s<=20, so s=20 leaves
+    // ZERO error margin — any stray error can satisfy parity on a WRONG
+    // codeword. That zero-margin mode measured 30k miscorrections/145s
+    // on a borderline signal. s<=16 keeps a 2-error cushion always.
+    return std::min(16, d_max_erasures + 4);
 }
 
 int atsc_rs_decoder_erasure_impl::decode_block(const unsigned char* in207,
@@ -217,6 +221,14 @@ int atsc_rs_decoder_erasure_impl::decode_block(const unsigned char* in207,
     // First attempt: hard decode (no erasures).
     int n = decode_rs_char(d_rs, tmp, nullptr, 0);
     if (n >= 0) {
+        // guard v2 witness: hard decodes are ground truth for live PIDs
+        {
+            const uint16_t pid =
+                ((tmp[PAD_BYTES + 1] & 0x1F) << 8) | tmp[PAD_BYTES + 2];
+            if (d_pid_seen[pid] < 60000) d_pid_seen[pid]++;
+            if (++d_pid_seen_total % 500000 == 0)      // slow aging
+                for (auto& c : d_pid_seen) c >>= 1;
+        }
         // Update histogram with positions that were corrected.
         // Compare corrected tmp[PAD..PAD+CODE_LEN] against original in207.
         for (int i = 0; i < CODE_LEN; i++) {
@@ -255,7 +267,7 @@ int atsc_rs_decoder_erasure_impl::decode_block(const unsigned char* in207,
                   return a.first > b.first;
               });
 
-    int no_eras = std::min<int>({d_effective_max_erasures, (int)ranked.size(), 20});
+    int no_eras = std::min<int>({d_effective_max_erasures, (int)ranked.size(), 16});
     int eras_pos[20];
     for (int i = 0; i < no_eras; i++)
         eras_pos[i] = ranked[i].second + PAD_BYTES;   // positions in 255-buf
@@ -283,8 +295,32 @@ int atsc_rs_decoder_erasure_impl::decode_block(const unsigned char* in207,
         const char* p = std::getenv("STVT_RS_MISCORR_GUARD");
         return !(p && p[0] == '0');
     }();
-    const bool miscorrect =
+    bool miscorrect =
         (n >= 0) && MISCORR_GUARD && (tmp[PAD_BYTES] != 0x47);
+
+    // GUARD v2 (2026-07-06): the sync-byte check catches 255/256 wrong
+    // codewords; the ~1/256 that leak measured ~0.8 corrupt pkts/s on a
+    // borderline signal (2026-07-06 morning A/B) — the visible glitches.
+    // Three independent TS invariants multiply the rejection power:
+    //   PID witnessed on a hard decode  (wrong codewords have random PIDs)
+    //   TEI bit must be 0               (a "corrected" packet can't be errored)
+    //   adaptation_field_control != 0   (reserved value never transmitted)
+    // STVT_RS_GUARD2=0 disables (A/B hook).
+    static const bool GUARD2 = []() {
+        const char* p = std::getenv("STVT_RS_GUARD2");
+        return !(p && p[0] == '0');
+    }();
+    if (n >= 0 && !miscorrect && GUARD2 && MISCORR_GUARD) {
+        const uint16_t pid =
+            ((tmp[PAD_BYTES + 1] & 0x1F) << 8) | tmp[PAD_BYTES + 2];
+        const bool tei = (tmp[PAD_BYTES + 1] & 0x80) != 0;
+        const int afc = (tmp[PAD_BYTES + 3] >> 4) & 0x3;
+        if (tei || afc == 0 ||
+            (d_pid_seen_total > 200 && d_pid_seen[pid] == 0)) {
+            miscorrect = true;
+            d_guard2_rejects++;
+        }
+    }
 
     if (n >= 0 && !miscorrect) {
         d_erasure_successes++;
@@ -429,7 +465,8 @@ int atsc_rs_decoder_erasure_impl::work(int noutput_items,
                      "era_ok=%d miscorr=%d bad=%d "
                      "(last5s: pkts=%d era_dec=%d era_ok=%d bad=%d)  "
                      "weak_pos[%d:%d,%d:%d,%d:%d]  "
-                     "vit_metric=%.3f vit_max=%.3f tags=%d eff_eras=%d\n",
+                     "vit_metric=%.3f vit_max=%.3f tags=%d eff_eras=%d "
+                     "g2rej=%d\n",
                      elapsed_ms / 1000.0,
                      d_packets, d_errors_corrected,
                      d_erasure_decodes, d_erasure_successes, d_miscorrections,
@@ -437,7 +474,8 @@ int atsc_rs_decoder_erasure_impl::work(int noutput_items,
                      d_log_packets, d_log_eras_dec, d_log_eras_ok, d_log_bad,
                      top3[0], top3v[0], top3[1], top3v[1], top3[2], top3v[2],
                      d_recent_metric, d_recent_metric_max,
-                     d_metric_tag_count, d_effective_max_erasures);
+                     d_metric_tag_count, d_effective_max_erasures,
+                     d_guard2_rejects);
         d_last_log = now;
         d_log_packets  = 0;
         d_log_eras_dec = 0;
