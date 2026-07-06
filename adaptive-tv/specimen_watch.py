@@ -38,6 +38,7 @@ off = 0
 quiet_count = 0     # arm only after 2 consecutive quiet windows (10 s) —
                     # a fresh chain's startup convergence looks like a
                     # storm (learned from specimen #1, uptime 14 s)
+fs_seen = False     # SYNCLOSS needs sync to have existed in this log
 last_fs = time.time()
 last_trig = 0.0
 t0 = time.time()
@@ -63,6 +64,7 @@ while args.window == 0 or time.time() - t0 < args.window:
             off = 0                       # log rotated = NEW chain/channel:
             quiet_count = 0               # re-arm from scratch so channel
             last_fs = time.time()         # hops can't fake a quiet->storm
+            fs_seen = False               # and sync must be re-proven
         with open(log, "r", errors="ignore") as f:
             f.seek(off)
             chunk = f.read()
@@ -71,11 +73,15 @@ while args.window == 0 or time.time() - t0 < args.window:
         continue
     if RE_FS.search(chunk):
         last_fs = time.time()
-    elif chunk and time.time() - last_fs > 8 and last_fs > t0 + 20:
-        # chunk non-empty = chain ALIVE and writing, yet no field syncs:
-        # true sync loss. (A frozen log = chain benched between cube
-        # cycles — that fired 17 false SYNCLOSS specimens on 7/06.)
-        fire(f"SYNCLOSS chain alive, no field-sync for {time.time()-last_fs:.0f}s")
+        fs_seen = True
+    elif (chunk and fs_seen and time.time() - last_fs > 8
+          and last_fs > t0 + 20):
+        # SYNC LOSS requires sync to have EXISTED in THIS chain's log:
+        # chain alive + had field-syncs + they stopped. (Pilot-only
+        # channels that never synced fired 37 false specimens on 7/06;
+        # frozen inter-cycle logs fired 17 before that. Third rule's
+        # the charm.)
+        fire(f"SYNCLOSS had sync, lost it {time.time()-last_fs:.0f}s ago")
         last_fs = time.time()             # re-arm
     for pk, bad in RE_RS5.findall(chunk):
         bad = int(bad)
