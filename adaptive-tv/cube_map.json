@@ -1,0 +1,265 @@
+{
+ "generated": "07:11:48",
+ "channels": {
+  "7": {
+   "antenna": "rabbit",
+   "median_mer": 14.66,
+   "decodes": 11,
+   "best_hour": "5",
+   "hours": {
+    "0": {
+     "mer": 14.4,
+     "decodes": 0
+    },
+    "1": {
+     "mer": 14.27,
+     "decodes": 1
+    },
+    "2": {
+     "mer": 14.6,
+     "decodes": 1
+    },
+    "3": {
+     "mer": 14.57,
+     "decodes": 1
+    },
+    "4": {
+     "mer": 14.66,
+     "decodes": 1
+    },
+    "5": {
+     "mer": 15.4,
+     "decodes": 3
+    },
+    "6": {
+     "mer": 15.04,
+     "decodes": 3
+    },
+    "7": {
+     "mer": 15.13,
+     "decodes": 1
+    },
+    "23": {
+     "mer": 14.6,
+     "decodes": 0
+    }
+   }
+  },
+  "9": {
+   "antenna": "rabbit",
+   "median_mer": 12.73,
+   "decodes": 0,
+   "best_hour": "6",
+   "hours": {
+    "0": {
+     "mer": 12.55,
+     "decodes": 0
+    },
+    "1": {
+     "mer": 12.21,
+     "decodes": 0
+    },
+    "2": {
+     "mer": 12.53,
+     "decodes": 0
+    },
+    "3": {
+     "mer": 13.22,
+     "decodes": 0
+    },
+    "4": {
+     "mer": 13.01,
+     "decodes": 0
+    },
+    "5": {
+     "mer": 13.91,
+     "decodes": 0
+    },
+    "6": {
+     "mer": 14.29,
+     "decodes": 0
+    },
+    "7": {
+     "mer": 13.05,
+     "decodes": 0
+    },
+    "23": {
+     "mer": 12.68,
+     "decodes": 0
+    }
+   }
+  },
+  "15": {
+   "antenna": "rabbit",
+   "median_mer": 12.72,
+   "decodes": 0,
+   "best_hour": "4",
+   "hours": {
+    "0": {
+     "mer": 12.57,
+     "decodes": 0
+    },
+    "1": {
+     "mer": 12.54,
+     "decodes": 0
+    },
+    "2": {
+     "mer": 12.72,
+     "decodes": 0
+    },
+    "3": {
+     "mer": 13.1,
+     "decodes": 0
+    },
+    "4": {
+     "mer": 13.99,
+     "decodes": 0
+    },
+    "5": {
+     "mer": 12.15,
+     "decodes": 0
+    },
+    "6": {
+     "mer": 12.83,
+     "decodes": 0
+    },
+    "7": {
+     "mer": 11.72,
+     "decodes": 0
+    },
+    "23": {
+     "mer": 11.79,
+     "decodes": 0
+    }
+   }
+  },
+  "21": {
+   "antenna": "rabbit",
+   "median_mer": 17.02,
+   "decodes": 23,
+   "best_hour": "4",
+   "hours": {
+    "0": {
+     "mer": 17.19,
+     "decodes": 3
+    },
+    "1": {
+     "mer": 17.05,
+     "decodes": 3
+    },
+    "2": {
+     "mer": 17.0,
+     "decodes": 3
+    },
+    "3": {
+     "mer": 17.24,
+     "decodes": 3
+    },
+    "4": {
+     "mer": 17.62,
+     "decodes": 3
+    },
+    "5": {
+     "mer": 15.94,
+     "decodes": 3
+    },
+    "6": {
+     "mer": 15.95,
+     "decodes": 3
+    },
+    "7": {
+     "mer": 16.0,
+     "decodes": 1
+    },
+    "23": {
+     "mer": 16.74,
+     "decodes": 1
+    }
+   }
+  },
+  "34": {
+   "antenna": "rabbit",
+   "median_mer": 16.77,
+   "decodes": 23,
+   "best_hour": "23",
+   "hours": {
+    "0": {
+     "mer": 17.09,
+     "decodes": 3
+    },
+    "1": {
+     "mer": 16.64,
+     "decodes": 3
+    },
+    "2": {
+     "mer": 16.81,
+     "decodes": 3
+    },
+    "3": {
+     "mer": 16.79,
+     "decodes": 3
+    },
+    "4": {
+     "mer": 16.65,
+     "decodes": 3
+    },
+    "5": {
+     "mer": 16.72,
+     "decodes": 3
+    },
+    "6": {
+     "mer": 16.93,
+     "decodes": 3
+    },
+    "7": {
+     "mer": 16.87,
+     "decodes": 1
+    },
+    "23": {
+     "mer": 17.54,
+     "decodes": 1
+    }
+   }
+  },
+  "36": {
+   "antenna": "rabbit",
+   "median_mer": 16.97,
+   "decodes": 22,
+   "best_hour": "4",
+   "hours": {
+    "0": {
+     "mer": 16.62,
+     "decodes": 3
+    },
+    "1": {
+     "mer": 16.82,
+     "decodes": 3
+    },
+    "2": {
+     "mer": 17.01,
+     "decodes": 3
+    },
+    "3": {
+     "mer": 17.04,
+     "decodes": 3
+    },
+    "4": {
+     "mer": 17.07,
+     "decodes": 3
+    },
+    "5": {
+     "mer": 16.99,
+     "decodes": 3
+    },
+    "6": {
+     "mer": 16.9,
+     "decodes": 3
+    },
+    "23": {
+     "mer": 16.44,
+     "decodes": 1
+    }
+   }
+  }
+ }
+}

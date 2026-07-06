@@ -41,7 +41,9 @@ def chain_env(args):
     e.update({
         "STVT_ANTENNA": args.antenna, "STVT_IFGR": str(args.ifgr),
         "STVT_RFGAIN_SEL": str(args.rfgain), "STVT_EQ": "long",
-        "STVT_VITERBI": "soft", "STVT_RFNOTCH": "1", "STVT_DABNOTCH": "1",
+        "STVT_VITERBI": "soft", "STVT_RFNOTCH": "1",
+        # VHF law (2026-07-04): the DAB notch sits ON US VHF-hi — off below RF14
+        "STVT_DABNOTCH": "0" if args.rf < 14 else "1",
         "STVT_RS": "stock", "STVT_SPS": "1.1", "STVT_RRC_SYMS": "8",
         "STVT_TEISCRUB": "1", "STVT_EQ_LKG": "1", "STVT_EQ_LKG_RMS": "1.0",
         "STVT_EQ_TELEM": "1",                       # <-- the whole point

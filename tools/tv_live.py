@@ -537,6 +537,25 @@ class LiveTVTopBlock(gr.top_block):
             LOG.info(f"min_output_buffer: items={_min_buf} bytes={_min_buf_bytes}")
 
         self.connect(*chain_blocks)
+
+        # ── GLITCH SPECIMEN RECORDER (2026-07-06, E-ladder) ──
+        # STVT_IQ_RING=<secs> taps the scaler output (raw scaled SDR
+        # samples, int16 range) into a RAM ring; a TRIGGER file in
+        # STVT_IQ_RING_DIR dumps the surrounding IQ as a .cs16 specimen.
+        # Transient glitches become reproducible lab evidence. Zero cost
+        # when unset.
+        _ring_secs = float(os.environ.get("STVT_IQ_RING", "0"))
+        if _ring_secs > 0:
+            from iq_ring import iq_ring_sink
+            _ring_dir = os.environ.get(
+                "STVT_IQ_RING_DIR",
+                str(Path(__file__).parent / "data" / "specimens"))
+            self._iq_ring = iq_ring_sink(
+                ATSC_NATIVE_SAMPLE_RATE, _ring_secs, _ring_dir, scale=1.0,
+                meta={"rf": rf_channel,
+                      "antenna": os.environ.get("STVT_ANTENNA", "?")})
+            self.connect(scaler, self._iq_ring)
+            LOG.info(f"iq_ring: {_ring_secs}s specimen ring -> {_ring_dir}")
         if _rs_is_2port:
             for blk_in, blk_out in [(fs_check, equalizer),
                                      (equalizer, viterbi),

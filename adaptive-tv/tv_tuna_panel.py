@@ -29,8 +29,26 @@ PORT = 8642
 # (AGC servos the IF gain live; rfgain_sel is the regime that matters).
 # UHF values = Philips (2026-07-03); RF7 = first-ever VHF cal
 # (2026-07-05, rabbit ears @ flatness-aimed position, MER 15.2 at cliff).
-GAINS = {36: (3, 40), 34: (2, 32), 15: (1, 32), 7: (5, 32)}
+GAINS = {36: (3, 40), 34: (2, 32), 15: (1, 32), 7: (5, 32), 9: (5, 32),
+         21: (2, 32)}
 DEFAULT_GAIN = (3, 40)
+
+# E2 auto-antenna (2026-07-06): ports rewired B=rabbit ears, A=discone.
+# The overnight cube's map says which antenna owns each channel; the
+# panel consults it instead of trusting a hardwired port.
+ANT_PORT = {"rabbit": "Antenna B", "discone": "Antenna A"}
+DEFAULT_ANT = "Antenna B"          # rabbit ears own everything so far
+
+def antenna_for(rf):
+    try:
+        with open(Path(__file__).parent / "cube_map.json",
+                  encoding="utf-8") as f:
+            ch = json.load(f)["channels"].get(str(rf))
+        if ch:
+            return ANT_PORT.get(ch["antenna"], DEFAULT_ANT)
+    except (OSError, ValueError, KeyError):
+        pass
+    return DEFAULT_ANT
 RE_FS = re.compile(r"fs_err_rms=([\d.]+)")
 RE_FPLL = re.compile(r"mean\|x\|=([\d.]+).*?max\|x\|=([\d.]+)\s+in_rms=([\d.]+)")
 RE_CIR = re.compile(r"\[cir t=[\d.]+\] (.+)")
@@ -453,7 +471,7 @@ def base_env(rf):
     env = os.environ.copy()
     env["PATH"] = (r"C:\Program Files\SDRplay\API\x64;C:\ffmpeg\bin;"
                    + env.get("PATH", ""))
-    env.update({"STVT_ANTENNA": "Antenna A", "STVT_IFGR": str(ifgr),
+    env.update({"STVT_ANTENNA": antenna_for(rf), "STVT_IFGR": str(ifgr),
                 "STVT_RFGAIN_SEL": str(rfsel),
                 # hardware AGC servo: IF gain follows the antenna in
                 # real time (setpoint -20 dBFS, validated 2026-07-02),
@@ -466,7 +484,10 @@ def base_env(rf):
                 # the notch was amputating RF7-13 by ~20 dB (solved
                 # 2026-07-04: in_rms 16.5 -> 170 on RF7 with it off).
                 "STVT_DABNOTCH": "0" if rf < 14 else "1",
-                "STVT_RS": "stock", "STVT_SPS": "1.1",
+                # E4 (2026-07-06): erasure RS at 0 erasures = stock
+                # behavior + FEC telemetry (the formerly-dark region)
+                "STVT_RS": "erasure", "STVT_RS_ERASURES": "0",
+                "STVT_SPS": "1.1",
                 "STVT_RRC_SYMS": "8", "STVT_TEISCRUB": "1",
                 "STVT_EQ_LKG": "1", "STVT_EQ_LKG_RMS": "1.0",
                 "STVT_EQ_TELEM": "1",
@@ -526,7 +547,10 @@ def tune(rf, prog, virtual, name):
                 return
             env = base_env(rf)
             cm = chain_math()
-            marginal = (cm.get("mer_db") or 99) < 16.5
+            # 15.8 (2026-07-06): 16.5 muzzled audio on signals that play
+            # fine (RF36 @ 16.2 = clear picture). Video-only is for the
+            # true cliff edge, not a 1 dB safety blanket.
+            marginal = (cm.get("mer_db") or 99) < 15.8
             set_stage(70, f"extracting program {prog}"
                           + (" (forced-video mode)" if marginal else ""))
             watch_args = [PY, "-u", str(HERE / "tv_watch.py"), str(prog)]
@@ -610,7 +634,11 @@ def tune(rf, prog, virtual, name):
             if cliff_mode:
                 set_stage(52, f"MER {mer_now:.1f} dB — engaging cliff-edge "
                               "recovery (erasure FEC + tap guard)")
-                env.update({"STVT_RS": "erasure", "STVT_RS_ERASURES": "20",
+                # 2026-07-06 A/B on live RF36 @ MER 16.2: erasures=20 ran
+                # 98.3% MISCORRECTIONS (30508 miscorr vs 210 rescues in
+                # 145 s) — the recovery recipe was manufacturing glitches
+                # on borderline signals. Telemetry-only until re-proven.
+                env.update({"STVT_RS": "erasure", "STVT_RS_ERASURES": "0",
                             "STVT_EQ_QUALITY_BAD_RMS": "8"})
                 if GEN[0] != my_gen: return
                 kill_tv(); time.sleep(2)
@@ -656,7 +684,9 @@ def tune(rf, prog, virtual, name):
                           "launching player"
                           + (" (forced-video mode)" if cliff_mode else ""))
             watch_args = [PY, "-u", str(HERE / "tv_watch.py"), str(prog)]
-            if cliff_mode:
+            # forced-video only at the true cliff edge (was: any cliff_mode
+            # engagement — muzzled audio at 16.2 dB, see 15.8 note above)
+            if cliff_mode and mer_now < 15.8:
                 watch_args.append("marginal")   # show-all/no-skip forced video
             watch_log = open(HERE / "lab" / "panel_watch.log", "w")
             subprocess.Popen(watch_args,
