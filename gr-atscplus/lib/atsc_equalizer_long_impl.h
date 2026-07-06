@@ -36,6 +36,16 @@ private:
     float training_sequence1[KNOWN_FIELD_SYNC_LENGTH];
     float training_sequence2[KNOWN_FIELD_SYNC_LENGTH];
 
+    // 2026-07-06 DFE v1 (docs/DFE_BLUEPRINT.md): feedback section state.
+    // d_hist is double-length so the most recent NFB decisions are always
+    // a contiguous slice (write at h and h+NFB). Data segments only in
+    // v1; field syncs refill the history with KNOWN training symbols.
+    static constexpr int NFB_MAX = 384;
+    std::vector<float> d_fb;          // feedback taps (NFB long)
+    std::vector<float> d_hist;        // decided symbols, 2*NFB ring
+    int d_hpos = 0;
+    void dfe_push(float sym, int nfb);
+
     void filterN(const float* input_samples, float* output_samples, int nsamples);
     void adaptN(const float* input_samples,
                 const float* training_pattern,
