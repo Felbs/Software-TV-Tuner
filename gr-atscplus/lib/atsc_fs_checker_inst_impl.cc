@@ -26,8 +26,23 @@ using gr::dtv::plinfo;
 // PN511/PN63 error tolerances. Raised from upstream gr-dtv (20/5) to (50/15)
 // so synthetic IQ at SNR=25 dB AWGN with residual SRRC ISI still trains the
 // equalizer (otherwise rs_clean_frac collapses to 0%). Real RF lock at 99.1%.
-static const int PN511_ERROR_LIMIT = 50;
-static const int PN63_ERROR_LIMIT = 15;
+// 2026-07-05: env-overridable for RESCUE decoding — offline replay of a
+// canyon capture (RF7: 27 dB ripple kills FS detection outright) can
+// afford to accept risky syncs a live chain must reject. Defaults intact.
+static const int PN511_ERROR_LIMIT = []() -> int {
+    if (const char* p = std::getenv("ATSCPLUS_PN511_LIMIT")) {
+        int v = std::atoi(p);
+        if (v >= 10 && v <= 220) return v;
+    }
+    return 50;
+}();
+static const int PN63_ERROR_LIMIT = []() -> int {
+    if (const char* p = std::getenv("ATSCPLUS_PN63_LIMIT")) {
+        int v = std::atoi(p);
+        if (v >= 3 && v <= 30) return v;
+    }
+    return 15;
+}();
 
 namespace gr {
 namespace atscplus {
