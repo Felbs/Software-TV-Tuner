@@ -36,6 +36,14 @@ private:
     int   d_hist_decay_period;   // packets between decays
     std::array<int, CODE_LEN> d_hist_pos;
 
+    // 2026-07-06 miscorrection guard v2: PIDs witnessed on HARD-decoded
+    // packets (ground truth). An erasure decode producing an unseen PID
+    // is a wrong-codeword solution — reject. Ages via halving so a
+    // remux/PID change doesn't blacklist forever.
+    std::array<uint16_t, 8192> d_pid_seen{};
+    uint32_t d_pid_seen_total = 0;
+    int d_guard2_rejects = 0;
+
     // Stats
     int d_packets;
     int d_errors_corrected;

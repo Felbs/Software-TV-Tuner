@@ -699,6 +699,25 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
                 }
                 std::fprintf(stderr, "%s\n", line);
             }
+            // 2026-07-06 Wiener warm-start: dump the SIGNED averaged CIR
+            // (the stderr line above is magnitude-only peaks; the analytic
+            // tap solve needs signs). STVT_EQ_CIR_DUMP=<path>, overwritten
+            // each emission — latest channel snapshot wins.
+            static const char* CIR_DUMP = std::getenv("STVT_EQ_CIR_DUMP");
+            if (CIR_DUMP) {
+                FILE* fd = std::fopen(CIR_DUMP, "wb");
+                if (fd) {
+                    const uint32_t magic = 0x43495244u; /* 'CIRD' */
+                    const uint32_t n = (uint32_t)NDELAY;
+                    std::fwrite(&magic, 4, 1, fd);
+                    std::fwrite(&n, 4, 1, fd);
+                    std::vector<float> tmpf(NDELAY);
+                    for (int d = 0; d < NDELAY; d++)
+                        tmpf[d] = (float)cir_acc[d];
+                    std::fwrite(tmpf.data(), 4, NDELAY, fd);
+                    std::fclose(fd);
+                }
+            }
             std::fill(cir_acc.begin(), cir_acc.end(), 0.0);
             cir_cnt = 0;
         }
