@@ -33,20 +33,36 @@ GAINS = {36: (3, 40), 34: (2, 32), 15: (1, 32), 7: (5, 32), 9: (5, 32),
          21: (2, 32)}
 DEFAULT_GAIN = (3, 40)
 
-# E2 auto-antenna (2026-07-06): ports rewired B=rabbit ears, A=discone.
-# The overnight cube's map says which antenna owns each channel; the
-# panel consults it instead of trusting a hardwired port.
-ANT_PORT = {"rabbit": "Antenna B", "discone": "Antenna A"}
-DEFAULT_ANT = "Antenna B"          # rabbit ears own everything so far
+# E2 v2 (2026-07-07): THOMPSON-SAMPLING antenna selection over the
+# belief map (belief_map.py) — each (channel, antenna) is a posterior;
+# we draw from each and tune the winner. Exploration emerges from
+# uncertainty: a moved antenna (wide sd after its hardware epoch) gets
+# retested automatically, a proven one gets used. The universal-tuner
+# answer to "the map goes stale when hardware changes".
+ANT_PORT = {"philips": "Antenna B", "rabbit": "Antenna A",
+            "discone": "Antenna C"}
+DEFAULT_ANT = "Antenna B"          # the Philips (2026-07-07 champion)
 
 def antenna_for(rf):
+    import random
     try:
-        with open(Path(__file__).parent / "cube_map.json",
-                  encoding="utf-8") as f:
-            ch = json.load(f)["channels"].get(str(rf))
+        beliefs = json.loads((Path(__file__).parent /
+                              "belief_map.json").read_text())
+        cell = beliefs.get(str(rf), {})
+        draws = {}
+        for ant, b in cell.items():
+            if ant in ANT_PORT:
+                draws[ant] = random.gauss(b["mean"], max(0.3, b["sd"]))
+        if draws:
+            pick = max(draws, key=draws.get)
+            return ANT_PORT[pick]
+    except (OSError, ValueError, KeyError):
+        pass
+    # fallback: legacy hour-map
+    try:
+        ch = json.loads((Path(__file__).parent /
+                         "cube_map.json").read_text())["channels"].get(str(rf))
         if ch:
-            # hour-resolved first (ownership flips by hour: rabbit owns
-            # dawn VHF, discone owns daylight RF7), overall as fallback
             hr = str(time.localtime().tm_hour)
             ant = ch.get("owner_by_hour", {}).get(hr, ch["antenna"])
             return ANT_PORT.get(ant, DEFAULT_ANT)
