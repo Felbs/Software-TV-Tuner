@@ -1,0 +1,36 @@
+id: atscplus_atsc_equalizer_long
+label: ATSC+ Equalizer (long, telemetry)
+category: '[ATSC+]'
+flags: [ python ]
+
+documentation: |-
+    Long adaptive equalizer for 8-VSB with the TV Tuna research stack:
+    field-sync LMS anchor, confidence-gated decision-directed tracking,
+    optional decision-feedback section (STVT_EQ_DFE=1), live MER
+    telemetry (STVT_EQ_TELEM=1 prints fs_err_rms; MER = 20*log10(5/err)),
+    echo X-ray CIR export (STVT_EQ_CIR=1), warm-start/reseed tap cache.
+    Configuration via STVT_EQ_* environment variables (see project docs).
+
+inputs:
+-   domain: stream
+    dtype: float
+    vlen: 832
+-   domain: stream
+    label: plinfo
+    dtype: short
+    vlen: 2
+
+outputs:
+-   domain: stream
+    dtype: float
+    vlen: 832
+-   domain: stream
+    label: plinfo
+    dtype: short
+    vlen: 2
+
+templates:
+    imports: from gnuradio import atscplus
+    make: atscplus.atsc_equalizer_long()
+
+file_format: 1
