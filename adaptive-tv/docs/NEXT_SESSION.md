@@ -41,9 +41,16 @@ Bred on demand (DFE=1, RF34, strikes in 1-3 x 60s tries). Facts:
 - Tap surgery (dfe0+lkg) "didn't cure" — BUT command-ack lines in the
   corrupted samples' logs were NEVER verified. FIRST 2-MIN CHECK
   TOMORROW: breed + sheriff + grep "SHERIFF cmd" in the same log.
-  If acks missing -> surgery never ran -> the simple theory wins (DFE
-  confidently-wrong equilibrium sustains itself; dfe0 WOULD cure it).
-  If acks present -> remaining suspect = viterbi 12-decoder mux/state.
+  RESOLVED 22:55: the 90s trials' sheriff=True flag WAS the ack-string
+  check — acks present, 100% loss continued 50+s after consumed
+  surgery. **PRIME AND ONLY SUSPECT: VITERBI internal state (12-decoder
+  path memories / mux phase).** Everything else cleared: eq taps
+  (restored, no cure), DFE (suspended, no cure), deinterleaver
+  (realigns through), RS (stateless), derand (field-synced).
+  TOMORROW'S BUILD: viterbi reset command ('vit' on a command port /
+  reset() on corruption) + instrument its mux phase during a bred
+  onset. If a viterbi reset cures live, the sheriff's surgery tier
+  gets its missing scalpel — and likely RF15's DEAF cure with it.
 
 ## Build queue (ranked)
 1. E5 — RS-fail-disciplined adaptation: ground truth for the DFE anchor
