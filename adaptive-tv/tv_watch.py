@@ -211,6 +211,10 @@ def main():
     cmd = [MPV, str(target),
            f"--input-ipc-server={IPC}",
            "--force-seekable=yes", "--keep-open=yes", "--osc=yes",
+           # 2026-07-07: mpv opens NO window until its first decoded
+           # frame — on cliff streams that's "nothing ever popped up".
+           # Always show a window; black beats invisible.
+           "--force-window=yes",
            "--cache=yes", "--demuxer-readahead-secs=5",
            "--hwdec=no", "--video-sync=audio",
            "--alang=eng,en",

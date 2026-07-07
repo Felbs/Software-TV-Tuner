@@ -491,6 +491,10 @@ def base_env(rf):
                 # E4 (2026-07-06): erasure RS at 0 erasures = stock
                 # behavior + FEC telemetry (the formerly-dark region)
                 "STVT_RS": "erasure", "STVT_RS_ERASURES": "0",
+                # MOD-12 GUARD (2026-07-07): the slip cure — 456 saves in
+                # one night carried channel 9 to 35,546 headers. Inert on
+                # clean streams by construction.
+                "STVT_EQ_MOD12_GUARD": "1",
                 "STVT_SPS": "1.1",
                 "STVT_RRC_SYMS": "8", "STVT_TEISCRUB": "1",
                 "STVT_EQ_LKG": "1", "STVT_EQ_LKG_RMS": "1.0",
@@ -684,9 +688,18 @@ def tune(rf, prog, virtual, name):
                     pass
                 time.sleep(1.5)
             if GEN[0] != my_gen: return
+            # watchability gate (2026-07-07, survival-curve law): below
+            # ~15.0 sustained, headers are countable but frames are not
+            # assemblable — warn honestly instead of a silent cone.
+            watch_note = ""
+            if mers and mer_now < 15.0:
+                watch_note = (" — BELOW WATCHABLE (curve says 16+): "
+                              "expect stills/black; check the map for "
+                              "this channel's best hour")
             set_stage(75, f"stream proven — extracting program {prog}, "
                           "launching player"
-                          + (" (forced-video mode)" if cliff_mode else ""))
+                          + (" (forced-video mode)" if cliff_mode else "")
+                          + watch_note)
             watch_args = [PY, "-u", str(HERE / "tv_watch.py"), str(prog)]
             # forced-video only at the true cliff edge (was: any cliff_mode
             # engagement — muzzled audio at 16.2 dB, see 15.8 note above)
