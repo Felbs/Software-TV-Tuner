@@ -38,7 +38,13 @@ STATE_F = HERE / "cube_state.json"
 CHAINLOG = HERE / "cube_chain.log"
 
 CLIFF = 15.2
-ANTS = [("Antenna B", "rabbit"), ("Antenna A", "discone")]
+# 2026-07-07 three-antenna era: Philips on A (UHF star), rabbit ears on
+# B (all-round), discone on C (sub-200 MHz port: FM oracle + VHF-hi
+# retest — RF7/9 are inside C's range; the old 0/35 verdict predates
+# every current recipe). Each antenna samples only channels it can
+# physically serve.
+ANTS = [("Antenna B", "rabbit", [7, 9, 15, 21, 34, 36]),
+        ("Antenna A", "discone", [7, 9, 15, 21, 34, 36])]
 ROSTER = [7, 9, 15, 21, 34, 36]
 # (rfgain_sel, ifgr) starting points; state file evolves these per (rf, ant)
 GAINS = {7: (5, 32), 9: (5, 32), 15: (1, 32), 21: (2, 32),
@@ -222,8 +228,8 @@ def main():
         cyc += 1
         cycle_t0 = time.time()
         best_close = None         # most promising below-cliff pair
-        for antenna, ant in ANTS:
-            for rf in ROSTER:
+        for antenna, ant, rfs in ANTS:
+            for rf in rfs:
                 if datetime.now() >= until:
                     break
                 key = f"rf{rf}|{ant}"

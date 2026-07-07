@@ -42,6 +42,47 @@ def now_hm():
     return datetime.now().strftime("%H:%M")
 
 
+# ── phase 0: flutter probes (Physics Ladder P1) ───────────────────
+# 0.54 Hz periodic fading found on RF34/rabbit at 23:45 (~20 dB above
+# floor, hw-AGC off). Same channel on two antennas disambiguates:
+# follows the antenna = local/mechanical; on both = common path or DSP.
+import re as _re
+
+import numpy as _np
+
+
+def flutter_fft(rf, antenna, ant, rfg, ifgr, secs=75):
+    s = oc.sample(rf, antenna, rfg, ifgr, secs=secs)
+    txt = (HERE / "cube_chain.log").read_text(errors="ignore")
+    pts = [(float(a), float(b)) for a, b in _re.findall(
+        r"\[eq-long t=\s*([\d.]+)s\].*?fs_err_rms=([\d.]+)", txt)]
+    out = {"event": "flutter-probe", "rf": rf, "ant": ant,
+           "mer_med": s.get("mer_med"), "n": len(pts)}
+    if len(pts) > 120:
+        t = _np.array([p[0] for p in pts])
+        v = _np.array([p[1] for p in pts])
+        tu = _np.arange(t[0], t[-1], 0.2)
+        vu = _np.interp(tu, t, v)
+        vu -= vu.mean()
+        ps = _np.abs(_np.fft.rfft(vu * _np.hanning(len(vu)))) ** 2
+        fr = _np.fft.rfftfreq(len(vu), 0.2)
+        band = (fr > 0.2) & (fr < 2.4)
+        fb, pb = fr[band], ps[band]
+        floor = float(_np.median(pb)) + 1e-30
+        i = int(_np.argmax(pb))
+        out.update({"peak_hz": round(float(fb[i]), 2),
+                    "peak_db": round(10 * _np.log10(pb[i] / floor), 1)})
+    log_event(out)
+
+
+for probe in [(34, "Antenna B", "rabbit", 2, 32),
+              (34, "Antenna A", "discone", 2, 32),   # cross-antenna: does
+              (7, "Antenna B", "rabbit", 5, 32)]:    # 0.54 Hz follow B?
+    try:
+        flutter_fft(*probe)
+    except Exception as e:
+        log_event({"event": "flutter-probe-error", "err": str(e)[:80]})
+
 # ── phase 1: cube ──────────────────────────────────────────────────
 print(f"night shift: cube until {CUBE_END}, ambush until {AMBUSH_END}",
       flush=True)
@@ -54,9 +95,14 @@ os.environ["STVT_EQ_TAP_CACHE"] = str(CACHE)
 # +58 hdr/sample, loss 80%->21%). RF9 at dawn is exactly its regime.
 os.environ["STVT_EQ_DFE"] = "1"
 best = 0
+dwell_n = 0
+AMBUSH_ANTS = [("Antenna B", "rabbit"), ("Antenna A", "discone")]
 while now_hm() < AMBUSH_END:
-    s = oc.sample(9, "Antenna B", 5, 32, secs=300)
+    antenna, ant = AMBUSH_ANTS[dwell_n % 2]   # two independent shots
+    dwell_n += 1
+    s = oc.sample(9, antenna, 5, 32, secs=300)
     s["event"] = "rf9-ambush"
+    s["ant"] = ant
     log_event(s)
     hdr = s.get("hdr") or 0
     if hdr > 0:
