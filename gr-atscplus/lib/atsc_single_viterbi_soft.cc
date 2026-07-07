@@ -41,6 +41,10 @@ void atsc_single_viterbi_soft::reset()
     d_post_coder_state = 0;
     d_phase = 0;
     d_best_state_metric = 100000;
+    for (unsigned int i = 0; i < TB_LEN; i++)
+        d_conf_ring[i] = 0.0f;
+    d_conf_idx = 0;
+    d_conf_out = 0.0f;
 }
 
 atsc_single_viterbi_soft::atsc_single_viterbi_soft() { reset(); }
@@ -98,6 +102,21 @@ char atsc_single_viterbi_soft::decode(float input)
             d_best_state_metric = min_metric;
             best_state = state;
         }
+    }
+
+    // SOVA-lite: margin between the winner and the runner-up state.
+    // Delayed TB_LEN steps through a ring so the confidence reported
+    // by last_confidence() describes the dibit decode() just returned.
+    {
+        float second = 1e9f;
+        for (unsigned int state = 0; state < 4; state++) {
+            const float m = d_path_metrics[d_phase ^ 1][state];
+            if (state != best_state && m < second)
+                second = m;
+        }
+        d_conf_out = d_conf_ring[d_conf_idx];
+        d_conf_ring[d_conf_idx] = second - d_best_state_metric;
+        d_conf_idx = (d_conf_idx + 1) % TB_LEN;
     }
 
     if (d_best_state_metric > 10000) {
