@@ -117,6 +117,24 @@ def main():
     rng = np.random.default_rng(9)
     X, y = [], []
     log = HERE / "cube_log.jsonl"
+    # PILOT GATE (2026-07-07 lesson: 18 evals spent on a slumped channel
+    # = pure crater cartography). Don't hunt a dead objective: quick
+    # 30 s pulse check at known-sane knobs; defer if the channel can't
+    # plausibly harvest (median well under the assemblability cliff).
+    pulse = evaluate(np.array([0.25, 0.0, 0.0, 0.0, 0.45, 0.5]),
+                     args.rf, args.ant, args.rfg, 30)[1]
+    pm = pulse.get("mer_med") or 0
+    print(f"pilot gate: RF{args.rf} pulse MER {pm}", flush=True)
+    if pm < 14.5:
+        print(f"CHANNEL NOT HUNTABLE (needs ~14.5+, breathing toward 16) "
+              f"— defer the hunt; do not spend evaluations on a flat "
+              f"objective.", flush=True)
+        with open(log, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"event": "bo-deferred", "rf": args.rf,
+                                "pulse_mer": pm,
+                                "t": datetime.now().strftime("%H:%M:%S")})
+                    + "\n")
+        return
     print(f"BO harvest tuner: RF{args.rf} {args.ant}, "
           f"{args.evals} evaluations", flush=True)
     for i in range(args.evals):
