@@ -228,8 +228,9 @@ void atsc_equalizer_long_impl::filterN_dd(const float* input_samples,
     const float mu_fb_eff = MU_FB / (1.0f + 21.0f * (float)NFB);
 
     // μ==0 → behave exactly like the legacy passive filter (zero behavior
-    // change when the knob is off).
-    if (DD_MU <= 0.0f && !DFE) {
+    // change when the knob is off). Sheriff suspension counts as off.
+    const bool dfe_on = DFE && !d_dfe_suspend;
+    if (DD_MU <= 0.0f && !dfe_on) {
         filterN(input_samples, output_samples, nsamples);
         return;
     }
@@ -239,7 +240,7 @@ void atsc_equalizer_long_impl::filterN_dd(const float* input_samples,
         float y = 0.0f;
         volk_32f_x2_dot_prod_32f(&y, x, &d_taps[0], NTAPS);
         const float* hist_w = &d_hist[d_hpos + 1];   // last NFB decisions
-        if (DFE) {
+        if (dfe_on) {
             float fb = 0.0f;
             volk_32f_x2_dot_prod_32f(&fb, hist_w, &d_fb[0], NFB);
             y -= fb;
@@ -260,7 +261,7 @@ void atsc_equalizer_long_impl::filterN_dd(const float* input_samples,
 
         float e = decision - y;             // target − output
         const bool confident = std::fabs(e) <= DD_GATE;
-        if (DFE && confident && std::isfinite(e)) {
+        if (dfe_on && confident && std::isfinite(e)) {
             // feedback update BEFORE the push — the push mutates the
             // window's oldest slot (v1 bug: update-after-push fed the
             // newest decision into the oldest tap's gradient)
@@ -268,7 +269,7 @@ void atsc_equalizer_long_impl::filterN_dd(const float* input_samples,
             volk_32f_s32f_multiply_32f(tmp_fb, hist_w, mu_fb_eff * e, NFB);
             volk_32f_x2_subtract_32f(&d_fb[0], &d_fb[0], tmp_fb, NFB);
         }
-        if (DFE)
+        if (dfe_on)
             dfe_push(decision, NFB);        // history advances every symbol
         if (!confident) continue;           // unconfident — don't adapt FFE
 
@@ -288,7 +289,7 @@ void atsc_equalizer_long_impl::filterN_dd(const float* input_samples,
     // DFE per-field-ish leak: bounds FFE/FBF disagreement growth (v1 runs
     // the FS anchor WITHOUT feedback awareness — see blueprint; the leak
     // plus the confidence gate keep any double-cancellation self-limiting)
-    if (DFE) {
+    if (dfe_on) {
         for (int k = 0; k < NFB; k++) d_fb[k] *= 0.9995f;
     }
 
@@ -1086,6 +1087,62 @@ int atsc_equalizer_long_impl::general_work(int noutput_items,
                (NTAPS - NPRETAPS) * sizeof(float));
 
         if (d_segno == -1) {
+            // ── E5 COMMAND PORT (2026-07-06) ── the FEC sheriff's lever.
+            // RS truth lives OUTSIDE this block's influence; when an
+            // external supervisor sees the confidently-wrong signature
+            // (healthy fs_err + massive RS failure), it drops a one-word
+            // command file that we poll once per field sync (~21 Hz,
+            // one stat() — negligible). Commands: lkg | delta | cache |
+            // dfe0 | dfe1. File is consumed (deleted) on execution.
+            static const char* CMD_FILE = std::getenv("STVT_EQ_CMD_FILE");
+            if (CMD_FILE) {
+                std::FILE* cf = std::fopen(CMD_FILE, "rb");
+                if (cf) {
+                    char cmd[16] = { 0 };
+                    size_t n = std::fread(cmd, 1, sizeof(cmd) - 1, cf);
+                    std::fclose(cf);
+                    std::remove(CMD_FILE);
+                    while (n && (cmd[n - 1] == '\n' || cmd[n - 1] == '\r' ||
+                                 cmd[n - 1] == ' '))
+                        cmd[--n] = 0;
+                    bool ok = true;
+                    if (!std::strcmp(cmd, "lkg") && d_lkg_valid) {
+                        d_taps = d_taps_lkg;
+                        std::fill(d_fb.begin(), d_fb.end(), 0.0f);
+                    } else if (!std::strcmp(cmd, "delta")) {
+                        std::fill(d_taps.begin(), d_taps.end(), 0.0f);
+                        d_taps[NPRETAPS] = 1.0f;
+                        std::fill(d_fb.begin(), d_fb.end(), 0.0f);
+                    } else if (!std::strcmp(cmd, "dfe0")) {
+                        std::fill(d_fb.begin(), d_fb.end(), 0.0f);
+                        d_dfe_suspend = true;
+                    } else if (!std::strcmp(cmd, "dfe1")) {
+                        d_dfe_suspend = false;
+                    } else if (!std::strcmp(cmd, "cache")) {
+                        if (const char* p =
+                                std::getenv("STVT_EQ_TAP_CACHE_FILE")) {
+                            std::FILE* f = std::fopen(p, "rb");
+                            if (f) {
+                                uint32_t mg = 0, nn = 0;
+                                std::vector<float> t(NTAPS);
+                                if (std::fread(&mg, 4, 1, f) == 1 &&
+                                    std::fread(&nn, 4, 1, f) == 1 &&
+                                    mg == 0x54415043u &&
+                                    nn == (uint32_t)NTAPS &&
+                                    std::fread(t.data(), 4, NTAPS, f)
+                                        == (size_t)NTAPS)
+                                    d_taps = t;
+                                std::fclose(f);
+                            }
+                        }
+                        std::fill(d_fb.begin(), d_fb.end(), 0.0f);
+                    } else {
+                        ok = false;
+                    }
+                    std::fprintf(stderr, "[eq-long] SHERIFF cmd '%s'%s\n",
+                                 cmd, ok ? "" : " (unknown)");
+                }
+            }
             // RLS field-sync adaptation when STVT_EQ_RLS=1, else LMS (default).
             static const bool RLS_ENABLED = []() {
                 const char* p = std::getenv("STVT_EQ_RLS"); return p && std::atoi(p) != 0;

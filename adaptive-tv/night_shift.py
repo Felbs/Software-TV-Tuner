@@ -154,6 +154,16 @@ os.environ["STVT_EQ_DFE"] = "1"
 # current knowledge instead of crawling. First live exercise = tonight.
 os.environ["STVT_EQ_RESEED"] = "1"
 os.environ["STVT_EQ_QUALITY_BAD_RMS"] = "8"
+# E5 v1: the FEC sheriff rides along — detects confidently-wrong
+# equilibria (healthy MER + dead RS), tries tap surgery via the eq
+# command port, escalates to chain kill (the dwell just ends early
+# and the next one starts fresh).
+os.environ["STVT_EQ_CMD_FILE"] = str(HERE / "eq_cmd.txt")
+sheriff = subprocess.Popen(
+    [PY, "-u", str(HERE / "fec_sheriff.py"),
+     "--log", str(HERE / "cube_chain.log"),
+     "--cmd", str(HERE / "eq_cmd.txt"),
+     "--mer", "14.0", "--badfrac", "0.6", "--cooldown", "20"])
 best = 0
 dwell_n = 0
 recent_zero = 0
@@ -188,6 +198,10 @@ while True:
             except OSError:
                 pass
 log_event({"event": "ambush-done", "best_hdr": best, "dwells": dwell_n})
+try:
+    sheriff.terminate()
+except Exception:
+    pass
 
 # ── phase 3: morning ───────────────────────────────────────────────
 env = os.environ.copy()
