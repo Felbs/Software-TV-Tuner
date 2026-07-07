@@ -43,8 +43,13 @@ CLIFF = 15.2
 # retest — RF7/9 are inside C's range; the old 0/35 verdict predates
 # every current recipe). Each antenna samples only channels it can
 # physically serve.
-ANTS = [("Antenna B", "rabbit", [7, 9, 15, 21, 34, 36]),
-        ("Antenna A", "discone", [7, 9, 15, 21, 34, 36])]
+# THE THREE-ANTENNA ERA (2026-07-07, found connector): Philips on B
+# (reigning TV champion — WETA conqueror), rabbit ears on A (Baltimore
+# specialist, position un-aimed since the attic move), discone on C
+# (FM oracle; VHF-hi only for TV).
+ANTS = [("Antenna B", "philips", [7, 9, 15, 21, 34, 36]),
+        ("Antenna A", "rabbit", [7, 9, 15, 21, 34, 36]),
+        ("Antenna C", "discone", [7, 9])]
 ROSTER = [7, 9, 15, 21, 34, 36]
 # (rfgain_sel, ifgr) starting points; state file evolves these per (rf, ant)
 GAINS = {7: (5, 32), 9: (5, 32), 15: (1, 32), 21: (2, 32),
@@ -54,7 +59,8 @@ RE_FS = re.compile(r"fs_err_rms=([\d.]+)")
 RE_MX = re.compile(r"mean\|x\|=([\d.]+)")
 RE_RS = re.compile(r"\[rs_erasure t=.*?pkts=(\d+) ec=(\d+) "
                    r"era_dec=\d+ era_ok=\d+ miscorr=\d+ bad=(\d+) "
-                   r"\(last5s: pkts=(\d+) era_dec=\d+ era_ok=\d+ bad=(\d+)\)")
+                   r"\(last5s: pkts=(\d+) era_dec=\d+ era_ok=\d+ bad=(\d+)"
+                   r"(?: sync=\d+)?\)")
 RE_VIT = re.compile(r"vit_metric=([\d.]+) vit_max=([\d.]+)")
 
 SAMPLE_SECS = 28

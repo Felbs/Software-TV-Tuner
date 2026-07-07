@@ -74,6 +74,59 @@ def parse_psi(data):
     return pmts, pids
 
 
+def harvest_bytes(data, prog=None, psi_cache=None):
+    """Incremental core: harvest complete clean GOPs from a byte window.
+    Returns (harvested_bytes, psi_cache). GOPs straddling the window
+    edge are sacrificed — simplicity over the last few percent."""
+    if psi_cache is None:
+        pmts, pids = parse_psi(data)
+        if not pmts:
+            return b"", None
+        if prog is None or prog not in pmts:
+            prog = max(pmts, key=lambda g: pids.get(pmts[g][1], 0))
+        psi_cache = (prog, *pmts[prog])
+    prog, pmt_pid, vpid, apids = psi_cache
+    keep_always = {0, pmt_pid, *apids}
+    out = bytearray()
+    chunk = bytearray()
+    chunk_clean = False        # head partial GOP: never emit
+    last_cc = None
+    i = data.find(b"\x47")
+    while i >= 0 and i + PKT <= len(data):
+        p = data[i:i + PKT]
+        if p[0] != 0x47:
+            i = data.find(b"\x47", i + 1)
+            continue
+        pid = ((p[1] & 0x1F) << 8) | p[2]
+        tei = p[1] & 0x80
+        if pid in keep_always:
+            if not tei:
+                out += p
+        elif pid == vpid:
+            cc = p[3] & 0x0F
+            has_payload = p[3] & 0x10
+            pusi = p[1] & 0x40
+            boundary = pusi and (b"\x00\x00\x01\xb3" in p or
+                                 b"\x00\x00\x01\xb8" in p)
+            if boundary:
+                if chunk and chunk_clean:
+                    out += chunk
+                chunk = bytearray()
+                chunk_clean = True
+                last_cc = None
+            if tei:
+                chunk_clean = False
+            if has_payload and last_cc is not None \
+                    and cc != ((last_cc + 1) & 0x0F):
+                chunk_clean = False
+            if has_payload:
+                last_cc = cc
+            chunk += p
+        i += PKT
+    # tail partial GOP: sacrificed (next window re-anchors at a boundary)
+    return bytes(out), psi_cache
+
+
 def harvest(path, out_path, prog=None, verbose=True):
     data = Path(path).read_bytes()
     pmts, pids = parse_psi(data[:6_000_000] if len(data) > 6_000_000 else data)
@@ -155,21 +208,66 @@ def main():
     outp = str(Path(args.ts).with_suffix(".harvested.ts"))
 
     if args.follow:
+        # incremental live mode: parse only NEW bytes each pass, append
+        # harvested GOPs to the output — O(new data), not O(file).
         mpv = None
-        print("follow mode: harvesting every 5 s (patience player)")
+        offset = 0
+        Path(outp).write_bytes(b"")
+        print("follow mode: incremental harvest every 4 s "
+              "(patience player)", flush=True)
+        psi_cache = None
         while True:
             try:
-                harvest(args.ts, outp, args.prog, verbose=False)
+                size = Path(args.ts).stat().st_size
             except OSError:
-                pass
+                time.sleep(2)
+                continue
+            if size < offset:
+                offset = 0                      # rotation
+                Path(outp).write_bytes(b"")
+            if size - offset >= 400_000:
+                with open(args.ts, "rb") as f:
+                    f.seek(max(0, offset - (offset % PKT)))
+                    data = f.read(size - offset + (offset % PKT))
+                offset = size
+                try:
+                    chunk_out, psi_cache = harvest_bytes(
+                        data, args.prog, psi_cache)
+                    if chunk_out:
+                        with open(outp, "ab") as f:
+                            f.write(chunk_out)
+                except Exception:
+                    pass
             if mpv is None and Path(outp).exists() \
-                    and Path(outp).stat().st_size > 2_000_000:
+                    and Path(outp).stat().st_size > 1_500_000:
+                # stdin-fed: a pipe never EOFs, so mpv never freezes at
+                # the live edge (the growing-file pause disease)
                 mpv = subprocess.Popen(
-                    [MPV, outp, "--force-window=yes", "--keep-open=yes",
-                     "--force-seekable=yes",
-                     "--title=Harvest Player (true frames only)"])
-                print("player launched", flush=True)
-            time.sleep(5)
+                    [MPV, "-", "--force-window=yes",
+                     "--cache=yes", "--cache-secs=10",
+                     "--title=Harvest Player (true frames only)"],
+                    stdin=subprocess.PIPE)
+
+                def pump(proc=mpv, path=outp):
+                    pos = 0
+                    while proc.poll() is None:
+                        try:
+                            sz = Path(path).stat().st_size
+                            if sz > pos:
+                                with open(path, "rb") as f:
+                                    f.seek(pos)
+                                    buf = f.read(sz - pos)
+                                proc.stdin.write(buf)
+                                proc.stdin.flush()
+                                pos = sz
+                        except (OSError, ValueError):
+                            break
+                        time.sleep(1)
+
+                import threading
+                threading.Thread(target=pump, daemon=True).start()
+                print("player launched (stdin-fed)", flush=True)
+            time.sleep(4)
     else:
         harvest(args.ts, outp, args.prog)
         if args.play:
