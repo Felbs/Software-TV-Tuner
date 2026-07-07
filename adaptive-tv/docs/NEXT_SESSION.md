@@ -1,101 +1,64 @@
-# NEXT_SESSION — start here (written end of 2026-07-06, Fable's last night)
+# NEXT_SESSION — start here (rewritten end of 2026-07-07, Fable's last day)
 
-## State of the rig
-- Antennas: rabbit ears = ANT B (aimed, DO NOT disturb casually — position
-  is part of the calibration), discone = ANT A. Philips/old-faithful NOT
-  connected (one coax connector short; buy an F-connector/barrel).
-- DLL: DFE v1.3 installed (STVT_EQ_DFE opt-in, anchor STVT_EQ_DFE_ANCHOR
-  opt-in-and-unsafe, reseed STVT_EQ_RESEED built, erasure ceiling 16 +
-  guard v2). Remember: _rebuild.bat does NOT install.
-- night_shift.py = the overnight orchestrator (flutter probes → cube →
-  tripwire → alternating-antenna RF9 ambush w/ DFE+reseed → panel).
+## The rig (three-antenna era, since 7/07 midday)
+- **Philips = ANT B** — reigning TV champion (19+ on UHF pair, WETA
+  conqueror 17.7, RF9 at noon 15.5). Position only "similar" to its
+  7/03 calibration — a flatness-tone aim session would likely add dB.
+- **rabbit ears = ANT A** — moved in the attic 7/07: profile scrambled
+  (gained WETA 17.1, LOST RF7 to floor, Baltimore dented). Re-aim with
+  the flatness tone targeting RF21 (its unique crown) when convenient.
+- **discone = ANT C** (BNC→UHF adapter) — FM oracle home; TV only VHF
+  (RF7 ~1.3 dB worse on C than A; its TV career is over anyway).
+- USER STEER (standing): the user picks antennas — panel has a manual
+  antenna dropdown (guide tab); belief-map Thompson is a SUGGESTER.
+- SDR on motherboard USB3 (hub REMOVED — it caused slips; law: never
+  hubs). SMA adapters on order → rabbit re-aim + all-ports-forever.
 
-## Open results to check first (morning of 7/07)
-1. Ambush outcome: cube_log.jsonl events rf9-ambush / TRIPWIRE /
-   ambush-done; golden specimen if hdr ≥ 20.
-2. Flutter probes: flutter-probe events — did 0.54 Hz follow the antenna?
-   (RF34/rabbit had a 20 dB periodic fade component, hw-AGC off.)
-3. Specimens: Z:\src\magic-tv-decoder\tools\data\specimens (watcher v4
-   is honest; DEAF trigger armed).
-4. Reseed: grep chain logs for "QUALITY LKG reset" during ambush dwells.
+## The weapons (all validated live, all in the DLL)
+| Weapon | Env | Status |
+|---|---|---|
+| MOD-12 guard v2 | STVT_EQ_MOD12_GUARD (**default ON**) | 5-round passed; 456 saves the historic night |
+| DFE v1.3 | STVT_EQ_DFE=1 | marginal lane only (healthy-channel intermittent corruption unresolved — root cause was mod-12 slips via CPU load, may be safe now: RETEST with guard on) |
+| Reseed-on-collapse | STVT_EQ_RESEED=1 | built, armed in ambush |
+| FEC sheriff | fec_sheriff.py | 3 tiers proven live (surgery/scalpel/kill) |
+| **SOVA** | STVT_SOVA=1 + RS erasure≥1 | **174 rescues/75s vs 1-in-586k lifetime**; cliff +16 hdr +0.28 dB; healthy no packet harm; marginal-lane adopted; **5-round default gauntlet = first task** |
+| Harvest player | harvest_player.py | GOP-gated force-play; healthy 71%→1266 frames; prey = breathing channels; live --follow mode untested |
+| BO knob tuner | bo_harvest.py | homebrew GP+EI; needs a live gradient (breathing channel) |
+| Belief map | belief_map.py | posteriors + hardware epochs + Thompson |
+| Dawn forecast v2 | dawn_score2.py | real radiosonde refractivity (Wyoming WSGI; cert fallback); calibration pair #1: surface-6.0 under a monster (duct was aloft) |
+| Beacon oracle | beacon_oracle.py | FM path-sounding on discone-C |
 
-## SOLVED CASE (01:50, read this first): DFE healthy-channel corruption
-specimen_20260706_212651.cs16 (kept in specimens/): caught live at MER
-16.87 / 56k bad. Stage-1 = CLEAN-RF. Replay of the SAME IQ with DFE off
-= 17 headers, decodes fine. Corruption is 100% DFE-internal. Mechanism
-candidate: confidently-wrong equilibrium — wrong decisions + feedback
-make |e| small, the gate can't distinguish right from self-consistent,
-fb taps absorb the lie between FS flushes. Fix directions: fb energy
-cap; decision-vs-training crosscheck at each FS (fs_err spike while
-data-e small = the signature); or E5's RS-fail discipline (below).
-Same failure CLASS as v1.2's anchor mirage and (suspected) RF15 DEAF:
-adaptation graded by a reference it can influence.
+## Laws added 7/07 (verify in memory palace)
+- POSITION is the biggest dial: a moved antenna is a NEW antenna
+  (hardware epochs). WETA: 1 lifetime header → 362/2min by location.
+- Assemblability cliff ≈ 16 (not 15.2): headers count below it, frames
+  don't assemble. Steady-cliff has nothing to harvest; BREATHING does.
+- Slips = CPU load (×8 under stress) + USB path (hub → 0 after direct).
+- Concealment (TEISCRUB=0) doubles stream richness but unmarked damage
+  defeats gating — scrubbed for harvest, unscrubbed for vote-merging.
+- Instruments lie until their control group catches them (7 cases in
+  2 days). ffprobe -count_frames hallucinates on ATSC muxes — the only
+  honest frame counter is ffmpeg null-sink decode.
+- GR: every output port must land somewhere (twin deinterleaver's
+  plinfo needs a null_sink).
 
-## DEAF/corruption forensics state (23:45 close — READ BEFORE E5 WORK)
-Bred on demand (DFE=1, RF34, strikes in 1-3 x 60s tries). Facts:
-- IQ is CLEAN-RF; same IQ replays fine with DFE off (specimen 212651).
-- Deinterleaver EXONERATED: realigns steady 481/window THROUGH the
-  corruption (field_syncs= in its telemetry line, new).
-- Pre-RS sync-byte probe was INVALID (data still randomizer-whitened
-  before RS — 0x47 only exists post-derand; control windows caught it).
-- Tap surgery (dfe0+lkg) "didn't cure" — BUT command-ack lines in the
-  corrupted samples' logs were NEVER verified. FIRST 2-MIN CHECK
-  TOMORROW: breed + sheriff + grep "SHERIFF cmd" in the same log.
-  FINAL STATE (23:20, decider v2 with positional ack proof):
-  - dfe0+lkg ack'd DURING corruption -> no cure (equilibrium theory DEAD)
-  - VITERBI SCALPEL built (STVT_VIT_CMD_FILE full reset: 12 decoders +
-    fifos) and fired mid-corruption -> no cure in its 10s window
-    (verify chain-side "[viterbi_soft] SCALPEL" ack + give it a longer
-    window before fully acquitting)
-  - corruption SELF-HEALS sometimes (remissions in 3/8 uncontrolled
-    tries) — not permanent damage, a wrong ATTRACTOR something falls
-    into and occasionally out of
-  - Only proven cure: chain restart (sheriff tier 3 — operationally
-    fine, 3s)
-  REMAINING SUSPECTS: upstream feedback loops with attractor dynamics —
-  timing recovery (sync) and FPLL carrier loop (both keep FS
-  correlating/healthy MER while data dies). TOMORROW: instrument
-  sync/fpll internal state (sampling-phase, NCO freq) during a bred
-  onset; also verify scalpel ack + longer post-scalpel window.
-  Sheriff tiers ALL exercised live 22:47: surgery :00 -> scalpel :10 ->
-  kill :20. The protocol machine works; the disease map is one organ
-  shorter each run. Sheriff regex now tolerates sync= field (its 5th
-  instrument-audit lesson).
+## Queue (ranked)
+1. SOVA 5-round default gauntlet; if passed → default-on like the guard.
+2. DFE healthy-channel retest WITH guard+no-hub (its corruption may
+   have been slips all along → DFE could go default too).
+3. Harvest player --follow live demo on breathing evening RF21;
+   integrate as panel "HARVEST MODE" button (force-play for sub-16).
+4. BO hunt completion (needs breathing; evening block attempted 7/07).
+5. Double-decode voting (E7) using UNSCRUBBED captures.
+6. Rabbit re-aim session (flatness tone, RF21 target) + Philips peak.
+7. GRC: env→parameters pass + example flowgraph + README screenshots.
+8. Radio Tuna: adaptive survey probe, 106.5-107.9 gap, WETA-HD codec
+   mystery. Dawn-score calibration accumulates each morning.
+9. P1 flutter: 0.2-0.5 Hz on all antennas (foliage?); tie to τc gearing.
 
-## Build queue (ranked)
-1. E5 — RS-fail-disciplined adaptation: ground truth for the DFE anchor
-   (v1.2's mirage: self-referential fs_err; see memory + DFE_BLUEPRINT).
-   NOW THREE CONVICTIONS deep (anchor mirage, DFE equilibrium, DEAF
-   suspicion) — this is unambiguously the next big build.
-2. Philips session (evening): swap onto B, probe RF15 (close-in echo
-   escape hypothesis), full-cube column; then re-aim rabbits (flatness
-   tone) when swapped back.
-3. Evening cube 17:00–24:00 — the map's remaining gap.
-4. 5-round DFE gauntlets marginal-only regime to tighten the conditional.
-5. PHYSICS_LADDER.md P2 (METAR dawn forecasting) and P4 (FM beacon
-   oracle — wants discone on port C, needs that connector).
-6. Radio Tuna: adaptive survey probe, 106.5–107.9 sweep gap, WETA HD
-   codec mystery (try prog 1/2, newer nrsc5 build).
-
-## Laws learned this era (verify in memory palace)
-- Time is a tuning knob; ownership flips by hour (cube_map owner_by_hour).
-- Cliff = S-curve; 15.2 is half-loss; watchable = 16+ (cliff_curve.py).
-- Wiener/DFE = conditional weapons: sub-cliff only, fresh only.
-- Erasures: never zero-margin (≤16); histogram positions are useless
-  (1 rescue / 586k) — positions must come from viterbi confidence.
-- Metrics whose reference the adapting system controls are mirages
-  (v1.2). Defaults need 5-round gauntlets; 2 rounds = direction only.
-- Audit every new instrument's first outputs (specimen watcher: 3 false
-  families in one day).
-- Panel sweeper holds the SDR even when idle — bench the panel process
-  for ANY chain work. Kill processes via PowerShell tool, never
-  bash-wrapped powershell ($_ gets eaten).
-
-## The scoreboard vs the ultimate goal
-Rabbit ears: 6/6 channels decoded at the right hours. Discone: RF7
-daytime + dawn VHF (its UHF is physics, not a bug). Channel 9: first
-headers ever + measured window + tonight's armed ambush. RF15: named
-disease (oscillating close-in multipath), two weapons staged (DFE,
-Philips position). The tuner now chooses gain, antenna, hour, and
-filter structure by measurement. Next level: the atmosphere itself
-(P2), other transmitters as sensors (P4), true combining (P5/RSPduo).
+## Tonight (armed)
+Bedtime → night_shift.py: dawn_score2 (00Z balloon) → 3-antenna cube
+till 05:00 → tripwire (03:30, MER≥13.8 early-start) → ambush3 on
+PHILIPS port B: guard+DFE+reseed+SOVA+warm taps, TS archiver → best
+dwell becomes rf9_morning_show.ts (null-decode-verified) + one polite
+announce. Panel restored at 07:10.
