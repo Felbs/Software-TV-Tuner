@@ -144,72 +144,8 @@ while cube.poll() is None:
             break
 log_event({"event": "night-cube-done", "tripped": tripped})
 
-# ── phase 2: RF9 ambush ────────────────────────────────────────────
-os.environ["STVT_EQ_TAP_CACHE"] = str(CACHE)
-# DFE v1.1: gauntlet-proven marginal-channel weapon (RF7 sub-cliff:
-# +58 hdr/sample, loss 80%->21%). RF9 at dawn is exactly its regime.
-os.environ["STVT_EQ_DFE"] = "1"
-# Reseed-on-collapse (built tonight): quality resets re-read the tap
-# cache FILE (refreshed by each dwell's LKG saves) — recovery jumps to
-# current knowledge instead of crawling. First live exercise = tonight.
-os.environ["STVT_EQ_RESEED"] = "1"
-os.environ["STVT_EQ_QUALITY_BAD_RMS"] = "8"
-# E5 v1: the FEC sheriff rides along — detects confidently-wrong
-# equilibria (healthy MER + dead RS), tries tap surgery via the eq
-# command port, escalates to chain kill (the dwell just ends early
-# and the next one starts fresh).
-os.environ["STVT_EQ_CMD_FILE"] = str(HERE / "eq_cmd.txt")
-os.environ["STVT_VIT_CMD_FILE"] = str(HERE / "vit_cmd.txt")
-os.environ["STVT_VIT_SLIP_FILE"] = str(HERE / "vit_slip.txt")
-sheriff = subprocess.Popen(
-    [PY, "-u", str(HERE / "fec_sheriff.py"),
-     "--log", str(HERE / "cube_chain.log"),
-     "--cmd", str(HERE / "eq_cmd.txt"),
-     "--vitcmd", str(HERE / "vit_cmd.txt"),
-     "--slipfile", str(HERE / "vit_slip.txt"),
-     "--mer", "14.0", "--badfrac", "0.6", "--cooldown", "20"])
-best = 0
-dwell_n = 0
-recent_zero = 0
-HARD_STOP = "07:10"
-AMBUSH_ANTS = [("Antenna B", "rabbit"), ("Antenna A", "discone")]
-while True:
-    # stay past AMBUSH_END while the fish are biting (hot extension);
-    # hard stop protects the user's morning TV
-    if now_hm() >= HARD_STOP:
-        break
-    if now_hm() >= AMBUSH_END and recent_zero >= 2:
-        break
-    antenna, ant = AMBUSH_ANTS[dwell_n % 2]   # two independent shots
-    dwell_n += 1
-    s = oc.sample(9, antenna, 5, 32, secs=300)
-    s["event"] = "rf9-ambush"
-    s["ant"] = ant
-    log_event(s)
-    hdr = s.get("hdr") or 0
-    recent_zero = recent_zero + 1 if hdr == 0 else 0
-    if hdr > 0:
-        oc.announce(f"Channel 9: {hdr} video headers, "
-                    f"M E R {s.get('mer_med')}")
-    if hdr > best:
-        best = hdr
-        # a genuinely decoding RF9 deserves a specimen of its OWN success
-        if hdr >= 20:
-            trig = Path(r"Z:\src\magic-tv-decoder\tools\data"
-                        r"\specimens\TRIGGER")
-            try:
-                trig.write_text(f"RF9-GOLDEN {hdr} headers")
-            except OSError:
-                pass
-log_event({"event": "ambush-done", "best_hdr": best, "dwells": dwell_n})
-try:
-    sheriff.terminate()
-except Exception:
-    pass
-
-# ── phase 3: morning ───────────────────────────────────────────────
-env = os.environ.copy()
-env["PATH"] = r"C:\Program Files\SDRplay\API\x64" + os.pathsep + env["PATH"]
-subprocess.Popen([PY, "-u", str(HERE / "tv_tuna_panel.py")], env=env,
-                 cwd=str(HERE))
-print("night shift complete — panel relaunched for the morning", flush=True)
+# ── phase 2+3: delegated to ambush3 (guard-armed dwells + TS archiver,
+# the morning-show recorder; ambush3 also relaunches the panel) ──────
+r2 = subprocess.run([PY, "-u", str(HERE / "ambush3.py")])
+log_event({"event": "ambush3-exit", "rc": r2.returncode})
+print("night shift complete (via ambush3)", flush=True)
