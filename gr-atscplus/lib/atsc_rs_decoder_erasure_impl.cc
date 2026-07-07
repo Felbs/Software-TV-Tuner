@@ -39,9 +39,13 @@ atsc_rs_decoder_erasure_impl::atsc_rs_decoder_erasure_impl(int max_erasures)
                  // ports. plinfo lets us skip field-sync segments which
                  // aren't RS-encoded and would produce 100% garbage if
                  // decoded as data. THIS WAS THE PSI-CORRUPTION BUG.
-                 io_signature::make2(2, 2,
+                 // input 2 (optional, 2026-07-07): SOVA per-byte
+                 // reliability plane from the viterbi (deinterleaved by
+                 // a twin deinterleaver) — TRUE erasure positions
+                 io_signature::make3(2, 3,
                      sizeof(unsigned char) * CODE_LEN,
-                     sizeof(gr::dtv::plinfo)),
+                     sizeof(gr::dtv::plinfo),
+                     sizeof(unsigned char) * CODE_LEN),
                  io_signature::make2(2, 2,
                      sizeof(unsigned char) * PKT_LEN,
                      sizeof(gr::dtv::plinfo)))
@@ -204,7 +208,8 @@ int atsc_rs_decoder_erasure_impl::dynamic_max_erasures() const
 }
 
 int atsc_rs_decoder_erasure_impl::decode_block(const unsigned char* in207,
-                                               unsigned char* out188)
+                                               unsigned char* out188,
+                                               const unsigned char* rel207)
 {
     // (207, 187) shortened from (255, 235) — 48 byte implicit zero pad
     // at the front of the 255-byte buffer fed to decode_rs_char.
@@ -250,33 +255,46 @@ int atsc_rs_decoder_erasure_impl::decode_block(const unsigned char* in207,
     }
 
     // First attempt failed.
-    // If we don't have meaningful histogram yet, give up.
-    if (d_hist_count < 20) {
-        std::memcpy(out188, in207, PKT_LEN);
-        return -1;
-    }
-
-    // Retry with empirical erasures from the histogram.
-    // Pick the top-K positions by correction count.
-    std::vector<std::pair<int, int>> ranked;
-    ranked.reserve(CODE_LEN);
-    for (int i = 0; i < CODE_LEN; i++) {
-        if (d_hist_pos[i] > 0)
-            ranked.emplace_back(d_hist_pos[i], i);
-    }
-    if (ranked.empty()) {
-        std::memcpy(out188, in207, PKT_LEN);
-        return -1;
-    }
-    std::sort(ranked.begin(), ranked.end(),
-              [](const std::pair<int,int>& a, const std::pair<int,int>& b) {
-                  return a.first > b.first;
-              });
-
-    int no_eras = std::min<int>({d_effective_max_erasures, (int)ranked.size(), 16});
+    int no_eras = 0;
     int eras_pos[20];
-    for (int i = 0; i < no_eras; i++)
-        eras_pos[i] = ranked[i].second + PAD_BYTES;   // positions in 255-buf
+    if (rel207) {
+        // ── SOVA ERASURES (2026-07-07) ── the trellis's own per-byte
+        // doubt marks the erasures. Correctly-placed erasures are worth
+        // 2x errors (2t+s<=20); the histogram guessing this replaces
+        // rescued 1 packet in 586k attempts.
+        std::vector<std::pair<int, int>> weak;   // (reliability, pos)
+        weak.reserve(CODE_LEN);
+        for (int i = 0; i < CODE_LEN; i++)
+            weak.emplace_back(rel207[i], i);
+        std::sort(weak.begin(), weak.end());
+        no_eras = std::min(d_effective_max_erasures, 16);
+        for (int i = 0; i < no_eras; i++)
+            eras_pos[i] = weak[i].second + PAD_BYTES;
+    } else {
+        // legacy: empirical position histogram
+        if (d_hist_count < 20) {
+            std::memcpy(out188, in207, PKT_LEN);
+            return -1;
+        }
+        std::vector<std::pair<int, int>> ranked;
+        ranked.reserve(CODE_LEN);
+        for (int i = 0; i < CODE_LEN; i++) {
+            if (d_hist_pos[i] > 0)
+                ranked.emplace_back(d_hist_pos[i], i);
+        }
+        if (ranked.empty()) {
+            std::memcpy(out188, in207, PKT_LEN);
+            return -1;
+        }
+        std::sort(ranked.begin(), ranked.end(),
+                  [](const std::pair<int,int>& a, const std::pair<int,int>& b) {
+                      return a.first > b.first;
+                  });
+        no_eras = std::min<int>({d_effective_max_erasures,
+                                 (int)ranked.size(), 16});
+        for (int i = 0; i < no_eras; i++)
+            eras_pos[i] = ranked[i].second + PAD_BYTES;
+    }
 
     // Re-fill tmp because decode_rs_char may have modified it.
     std::memset(tmp, 0, PAD_BYTES);
@@ -389,8 +407,14 @@ int atsc_rs_decoder_erasure_impl::work(int noutput_items,
     // Day 3: update effective erasure budget from latest metric.
     d_effective_max_erasures = dynamic_max_erasures();
 
+    // SOVA reliability plane (optional input 2): true per-byte doubt
+    // from the trellis. When present, erasure positions come from HERE.
+    const unsigned char* rel = input_items.size() > 2
+        ? static_cast<const unsigned char*>(input_items[2]) : nullptr;
+
     for (int i = 0; i < noutput_items; i++) {
         const unsigned char* in_pkt  = in  + i * CODE_LEN;
+        const unsigned char* rel_pkt = rel ? rel + i * CODE_LEN : nullptr;
         unsigned char*       out_pkt = out + i * PKT_LEN;
 
         // Always propagate plinfo (downstream blocks need it).
@@ -410,7 +434,7 @@ int atsc_rs_decoder_erasure_impl::work(int noutput_items,
             continue;
         }
 
-        int n = decode_block(in_pkt, out_pkt);
+        int n = decode_block(in_pkt, out_pkt, rel_pkt);
         d_packets++;
         d_log_packets++;
 

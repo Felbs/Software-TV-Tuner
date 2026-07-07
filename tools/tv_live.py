@@ -564,6 +564,26 @@ class LiveTVTopBlock(gr.top_block):
                                      (rs, derand)]:
                 self.connect((blk_in, 0), (blk_out, 0))
                 self.connect((blk_in, 1), (blk_out, 1))
+            # ── SOVA reliability plane (2026-07-07, STVT_SOVA=1) ──
+            # viterbi port 2 carries per-byte trellis confidence; a TWIN
+            # deinterleaver applies the identical permutation so each
+            # reliability byte stays glued to its data byte; rs input 2
+            # turns the weakest bytes into TRUE erasures.
+            if (int(os.environ.get("STVT_SOVA", "0"))
+                    and os.environ.get("STVT_VITERBI") == "soft"
+                    and os.environ.get("STVT_RS") == "erasure"):
+                dei_rel = atscplus.atsc_deinterleaver()
+                self.connect((viterbi, 2), (dei_rel, 0))
+                self.connect((viterbi, 1), (dei_rel, 1))
+                self.connect((dei_rel, 0), (rs, 2))
+                # every output must land somewhere: twin's plinfo -> null
+                _rel_pl_sink = blocks.null_sink(
+                    gr.sizeof_char * 4)  # sizeof(plinfo) == 4
+                self.connect((dei_rel, 1), _rel_pl_sink)
+                self._dei_rel = dei_rel
+                self._rel_pl_sink = _rel_pl_sink
+                LOG.info("SOVA: reliability plane wired "
+                         "(viterbi:2 -> twin deinterleaver -> rs:2)")
         else:
             for blk_in, blk_out in [(fs_check, equalizer),
                                      (equalizer, viterbi),

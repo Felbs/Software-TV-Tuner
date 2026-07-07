@@ -92,7 +92,8 @@ private:
     // Day 6: now writes 188 bytes (matching stock dtv.atsc_rs_decoder which
     // outputs the first 188 bytes of the 207-byte codeword — sync byte at
     // offset 0 is preserved by deinterleaver, NOT manually injected).
-    int decode_block(const unsigned char* in207, unsigned char* out188);
+    int decode_block(const unsigned char* in207, unsigned char* out188,
+                 const unsigned char* rel207 = nullptr);
 
 public:
     atsc_rs_decoder_erasure_impl(int max_erasures);
