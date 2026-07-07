@@ -496,6 +496,11 @@ def base_env(rf):
     _ant = STATE.get("ant_override") or antenna_for(rf)
     env.update({"STVT_ANTENNA": _ant, "STVT_IFGR": str(ifgr),
                 "STVT_RFGAIN_SEL": str(rfsel),
+                # E7 second-opinion memory: the chain keeps its last ~35 s
+                # of IQ in RAM (~1.1 GB); the 🩺 button snapshots it —
+                # no second SDR session, no TV pause (7/07 v2)
+                "STVT_IQ_RING": "35",
+                "STVT_IQ_RING_DIR": str(HERE / "lab" / "e7_ring"),
                 # hardware AGC servo: IF gain follows the antenna in
                 # real time (setpoint -20 dBFS, validated 2026-07-02),
                 # so aiming/moving the antenna no longer invalidates
@@ -551,10 +556,18 @@ def set_stage(pct, msg):
 # ── E7 SECOND OPINION (2026-07-07 night): capture ~30 s of raw airwaves,
 # decode them THREE times with different equalizer trajectories, and
 # splice every clean GOP any pass rescued over the damage (e7_vote.py
-# heal-merge). TV pauses ~1 min for the capture, comes back, and the
-# healed replay pops up when the votes are in.
+# heal-merge).
+#
+# v2 (same night): snapshot the CHAIN'S OWN IQ ring instead of opening a
+# second SDR session. The separate-capture path was chronically lossy
+# (~4% sample drops after rapid open/close churn — decode-verified at
+# 15.8% bad on a healthy channel) while the live chain decodes the same
+# antenna clean. The ring holds the last ~35 s the viewer just watched:
+# TV never pauses, no wedge, and the second opinion is on the exact
+# glitches that prompted the click.
 E7 = {"status": "idle"}
 _MPV = r"C:\Program Files\MPV Player\mpv.exe"
+E7_RING_DIR = HERE / "lab" / "e7_ring"
 
 
 def e7_run(secs=30):
@@ -565,47 +578,63 @@ def e7_run(secs=30):
     if rf is None or prog is None:
         E7["status"] = "error: tune a channel first"
         return
-    virt, name = STATE.get("virtual"), STATE.get("name", "")
-    ant = STATE.get("ant_override") or antenna_for(rf)
-    rfsel, ifgr = GAINS.get(rf, DEFAULT_GAIN)
-    cap = HERE / "lab" / "captures" / "e7_live.cs16"
     healed = HERE / "lab" / "e7_healed.ts"
 
     def run():
         try:
-            E7["status"] = f"capturing {secs}s of RF{rf} (TV pauses)"
-            with LOCK:
-                GEN[0] += 1          # park the tuner state machine
-            kill_tv()
-            time.sleep(2)
-            r = subprocess.run(
-                [PY, "-u", str(HERE / "iq_capture.py"), "--rf", str(rf),
-                 "--secs", str(secs), "--antenna", ant,
-                 "--rfgain", str(rfsel), "--ifgr", str(ifgr),
-                 "--out", str(cap)],
-                capture_output=True, text=True, timeout=secs + 120)
-            if not cap.exists() or cap.stat().st_size < 1_000_000:
-                E7["status"] = "error: capture failed (SDR wedge? retry)"
-                threading.Thread(target=tune, args=(rf, prog, virt, name),
-                                 daemon=True).start()
+            E7["status"] = "snapshotting the last ~30 s from the IQ ring"
+            E7_RING_DIR.mkdir(parents=True, exist_ok=True)
+            before = set(E7_RING_DIR.glob("*.cs16"))
+            (E7_RING_DIR / "TRIGGER").write_text(
+                "E7 second opinion", encoding="utf-8")
+            cap = None
+            for _ in range(45):          # ring dump lands within seconds
+                time.sleep(1)
+                new = [p for p in E7_RING_DIR.glob("*.cs16")
+                       if p not in before and p.stat().st_size > 1_000_000]
+                if new:
+                    cand = max(new, key=lambda p: p.stat().st_mtime)
+                    sz = cand.stat().st_size
+                    time.sleep(2)
+                    if cand.stat().st_size == sz:   # write finished
+                        cap = cand
+                        break
+            if cap is None:
+                E7["status"] = ("error: no ring snapshot — retune once "
+                                "(chain needs the IQ ring enabled)")
                 return
-            E7["status"] = "TV returning; decoding 3 opinions (~4 min)"
-            threading.Thread(target=tune, args=(rf, prog, virt, name),
-                             daemon=True).start()
+            E7["status"] = "decoding 3 opinions of what you just watched"
             env = dict(os.environ)
             env["STVT_DABNOTCH"] = "0" if rf < 14 else "1"
-            r = subprocess.run(
-                [PY, "-u", str(HERE / "e7_vote.py"), str(cap),
-                 "--passes", "3", "--prog", str(prog), "--out", str(healed)],
-                capture_output=True, text=True, env=env, timeout=1200)
+            vote_cmd = [PY, "-u", str(HERE / "e7_vote.py"), str(cap),
+                        "--passes", "3", "--prog", str(prog),
+                        "--out", str(healed)]
+            # warm-start from the live chain's tap cache (RF9-class
+            # channels burn a third of a cold 35 s replay converging)
+            ant = re.sub(r"\W+", "",
+                         STATE.get("ant_override") or antenna_for(rf))
+            tapc = HERE / "lab" / "tapcache" / f"taps_{ant}_rf{rf}.bin"
+            if tapc.exists():
+                vote_cmd += ["--tapc", str(tapc)]
+            r = subprocess.run(vote_cmd, capture_output=True, text=True,
+                               env=env, timeout=1200)
             tail = [ln for ln in (r.stdout or "").splitlines()
                     if "frames:" in ln or "union:" in ln]
             E7["status"] = ("done: " + " · ".join(tail)[-160:]) if tail \
                 else f"error: vote failed rc={r.returncode}"
-            if healed.exists() and healed.stat().st_size > 500_000:
+            hm = re.search(r"(\d+)/(\d+) damaged GOPs healed",
+                           r.stdout or "")
+            n_healed = int(hm.group(1)) if hm else 0
+            # only pop the replay when the vote actually rescued GOPs —
+            # a no-donor replay next to live TV is just a confusing twin
+            if n_healed > 0 and healed.exists() \
+                    and healed.stat().st_size > 500_000:
                 subprocess.Popen([_MPV, str(healed), "--force-window=yes",
                                   "--keep-open=yes",
-                                  "--title=E7 Second Opinion (healed)"])
+                                  "--title=E7 Second Opinion "
+                                  f"({n_healed} GOPs healed)"])
+            elif E7["status"].startswith("done"):
+                E7["status"] += " · no rescues needed — replay not shown"
         except Exception as e:
             E7["status"] = f"error: {e}"
 
@@ -1070,7 +1099,7 @@ canvas{width:100%;image-rendering:pixelated;display:block;border-radius:4px}
   <div class="cards" id="knobcards"></div>
   <h3 style="margin:14px 0 4px">🔬 TUNA SCIENCE — the invented instruments, live
     <button onclick="fetch('/api/e7',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(()=>{})"
-      style="margin-left:12px;font-size:12px" title="Capture 30s of raw airwaves, decode 3 ways, splice the best of every pass. TV pauses ~1 min.">🩺 SECOND OPINION (E7)</button>
+      style="margin-left:12px;font-size:12px" title="Snapshot the last ~30s you just watched from the chain's IQ ring, decode it 3 ways, splice the best of every pass. TV keeps playing.">🩺 SECOND OPINION (E7)</button>
   </h3>
   <div class="cards" id="sciencecards"></div>
   <div id="scinotes" style="font-size:11px;color:#8aa;line-height:1.5;max-width:900px"></div>

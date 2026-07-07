@@ -71,21 +71,44 @@ def main():
     t0 = time.time()
     t_first = None      # clock starts at FIRST sample — stream-activation
                         # latency is not a drop (metric fix 2026-07-05)
-    with open(out, "wb") as f:
+    # RAM capture (2026-07-07): the old write-per-read loop let any disk
+    # stall overflow the SDR ring — the source of the chronic ~0.5-1%
+    # sample drops that masqueraded as RF damage in every specimen.
+    # Buffer the whole capture in RAM (<=60 s ~ 1.9 GB), write ONCE.
+    if args.secs <= 60:
+        ram = np.empty(2 * n_want, np.int16)
         while got < n_want and time.time() - t0 < args.secs * 3 + 10:
             r = sdr.readStream(st, [buf], 65536, timeoutUs=500000)
             if r.ret > 0:
                 if t_first is None:
                     t_first = time.time()
                 n = min(r.ret, n_want - got)
-                f.write(buf[:2 * n].tobytes())
+                ram[2 * got:2 * (got + n)] = buf[:2 * n]
                 got += n
             elif r.ret == SoapySDR.SOAPY_SDR_TIMEOUT:
                 timeouts += 1
             else:
                 shorts += 1
-    sdr.deactivateStream(st)
-    sdr.closeStream(st)
+        sdr.deactivateStream(st)
+        sdr.closeStream(st)
+        with open(out, "wb") as f:
+            f.write(ram[:2 * got].tobytes())
+    else:
+        with open(out, "wb") as f:
+            while got < n_want and time.time() - t0 < args.secs * 3 + 10:
+                r = sdr.readStream(st, [buf], 65536, timeoutUs=500000)
+                if r.ret > 0:
+                    if t_first is None:
+                        t_first = time.time()
+                    n = min(r.ret, n_want - got)
+                    f.write(buf[:2 * n].tobytes())
+                    got += n
+                elif r.ret == SoapySDR.SOAPY_SDR_TIMEOUT:
+                    timeouts += 1
+                else:
+                    shorts += 1
+        sdr.deactivateStream(st)
+        sdr.closeStream(st)
 
     elapsed = (time.time() - t_first) if t_first else 1.0
     continuity = got / max(1.0, elapsed * args.rate)

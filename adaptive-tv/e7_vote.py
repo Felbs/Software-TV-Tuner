@@ -28,10 +28,16 @@ from harvest_player import parse_psi, PKT   # noqa: E402
 PY = sys.executable
 REPLAY = Path(r"Z:\src\magic-tv-decoder\tools\tv_replay.py")
 
+# Chain-dialect decode env (7/07 late): a ring specimen decoded 4.3% bad
+# with the live chain's exact config (SPS 1.1 / RRC 8 / no FOLD) vs
+# 25.5% bad with the old replay defaults (SPS 1.5 + FOLD) — the vote
+# must speak the same dialect as the chain that recorded the material.
 CLIFF_ENV = {
     "STVT_VITERBI": "soft", "STVT_RS": "erasure", "STVT_RS_ERASURES": "14",
     "STVT_SOVA": "1", "STVT_EQ": "long", "STVT_TEISCRUB": "0",
-    "STVT_FPLL_FOLD": "1",
+    "STVT_SPS": "1.1", "STVT_RRC_SYMS": "8",
+    "STVT_EQ_LKG": "1", "STVT_EQ_LKG_RMS": "1.0",
+    "STVT_EQ_MOD12_GUARD": "1",
 }
 
 
@@ -63,7 +69,10 @@ def heal_stream(base_ts, donors, out_path, prog=None):
         return 0, 0
     if prog is None or prog not in pmts:
         prog = max(pmts, key=lambda g: pids.get(pmts[g][1], 0))
-    _, vpid, _ = pmts[prog]
+    pmt_pid, vpid, apids = pmts[prog]
+    # pass through ONLY the target program (PSI + its audio): a full-mux
+    # passthrough made mpv pick a DIFFERENT subchannel than the live TV
+    keep = {0, pmt_pid, *apids}
     out = bytearray()
     chunk = bytearray()
     chunk_clean = True
@@ -94,7 +103,8 @@ def heal_stream(base_ts, donors, out_path, prog=None):
             continue
         pid = ((p[1] & 0x1F) << 8) | p[2]
         if pid != vpid:
-            out += p                      # audio/PSI/other: pass through
+            if pid in keep:
+                out += p                  # target program's PSI/audio only
             i += PKT
             continue
         cc = p[3] & 0x0F
@@ -202,6 +212,11 @@ def main():
     ap.add_argument("--prog", type=int)
     ap.add_argument("--skip-step", type=int, default=40000,
                     help="IQ samples of start-offset diversity per pass")
+    ap.add_argument("--tapc", default=None,
+                    help="warm-start tap cache from the live chain — "
+                         "copied per pass (never written back); without "
+                         "it, slow-converging channels (RF9 class) burn "
+                         "a third of a short capture converging cold")
     ap.add_argument("--keep", action="store_true")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
@@ -213,6 +228,10 @@ def main():
         log = work / f"pass{k}.log"
         env = dict(os.environ, **CLIFF_ENV)
         env["STVT_IQ_SKIP"] = str(k * args.skip_step)
+        if args.tapc and Path(args.tapc).exists():
+            tc = work / f"tapc{k}.bin"
+            tc.write_bytes(Path(args.tapc).read_bytes())
+            env["STVT_EQ_TAP_CACHE_FILE"] = str(tc)
         # pass diversity axis 2: alternate DFE on odd passes
         if k % 2 == 1:
             env["STVT_EQ_DFE"] = "1"
@@ -251,13 +270,21 @@ def main():
     print(f"[e7] base=pass{base_i} ({frs[base_i]} frames): "
           f"{healed}/{damaged} damaged GOPs healed", flush=True)
 
-    # honest metrics: null-sink frames + decoder error lines (glitch proxy)
-    fr_u, err_u = null_sink_frames(outp, with_errors=True)
-    _, err_b = null_sink_frames(passes[base_i], with_errors=True)
-    win = fr_u > max(frs, default=0) or err_u < err_b
-    print(f"[e7] frames: passes={frs} healed={fr_u}; "
-          f"decode-errors: base={err_b} healed={err_u} -> "
-          f"{'WIN' if win else 'no gain'}", flush=True)
+    if healed == 0:
+        # no donors: emit the base stream UNTOUCHED — remuxing without
+        # rescues only jitters the interleave (a fake "win" the liveness
+        # law forbids)
+        outp.write_bytes(Path(passes[base_i]).read_bytes())
+        print(f"[e7] frames: passes={frs} healed={frs[base_i]}; "
+              f"no donors -> no gain", flush=True)
+    else:
+        # honest metrics: frames must not drop AND errors must fall
+        fr_u, err_u = null_sink_frames(outp, with_errors=True)
+        _, err_b = null_sink_frames(passes[base_i], with_errors=True)
+        win = healed > 0 and fr_u >= frs[base_i] and err_u < err_b
+        print(f"[e7] frames: passes={frs} healed={fr_u}; "
+              f"decode-errors: base={err_b} healed={err_u} -> "
+              f"{'WIN' if win else 'no gain'}", flush=True)
     print(f"[e7] healed file: {outp}")
     if not args.keep:
         for t in passes:
