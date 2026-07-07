@@ -20,10 +20,13 @@ import time
 
 import overnight_cube as oc
 
+# Recast 2026-07-07 evening (three-antenna era): patient was RF7 on
+# ANT-A — now the moved rabbit's dead floor (8.5, uninformative).
+# Discone-C RF7 is the honest marginal cell (14-15.3, breathing).
 CELLS = [
     ("healthy", 34, "Antenna B", 2, 32),
     ("cliff",   21, "Antenna B", 2, 26),
-    ("patient",  7, "Antenna A", 5, 32),
+    ("patient",  7, "Antenna C", 5, 32),
 ]
 SECS = 40
 
