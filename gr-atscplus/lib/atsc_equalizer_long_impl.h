@@ -44,6 +44,7 @@ private:
     std::vector<float> d_fb;          // feedback taps (NFB long)
     std::vector<float> d_hist;        // decided symbols, 2*NFB ring
     int d_hpos = 0;
+    bool d_dfe_suspend = false;       // E5 sheriff can pull the DFE offline
     void dfe_push(float sym, int nfb);
 
     void filterN(const float* input_samples, float* output_samples, int nsamples);
