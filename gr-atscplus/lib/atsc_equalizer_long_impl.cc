@@ -1059,8 +1059,22 @@ int atsc_equalizer_long_impl::general_work(int noutput_items,
                 }
                 return 192;
             }();
+            // v1.2's fb-aware anchor is OPT-IN after the 5-round gauntlet
+            // caught it co-drifting: training vs the adjusted target made
+            // fs_err SELF-REFERENTIAL (graded its own homework) — MER 19.5
+            // with 100% RS fail, the liveness-law mirage. Needs a ground-
+            // truth constraint (RS-fail feedback, E5) before default.
+            static const bool DFE_ANCHOR = []() {
+                const char* p = std::getenv("STVT_EQ_DFE_ANCHOR");
+                return p && std::atoi(p) != 0;
+            }();
             if (RLS_ENABLED) {
                 adaptN_rls(data_mem, trn, data_mem2, KNOWN_FIELD_SYNC_LENGTH);
+            } else if (DFE_G && !DFE_ANCHOR) {
+                // v1.1 semantics: raw-target anchor + known-symbol flush
+                adaptN(data_mem, trn, data_mem2, KNOWN_FIELD_SYNC_LENGTH);
+                for (int k = 0; k < KNOWN_FIELD_SYNC_LENGTH; k++)
+                    dfe_push(trn[k], NFB_G);
             } else if (DFE_G) {
                 // DFE v1.2 FB-AWARE ANCHOR: the data path outputs
                 // FFE·x − fb·hist, so training the FFE against raw trn
