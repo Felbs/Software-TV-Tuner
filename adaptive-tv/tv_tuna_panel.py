@@ -528,6 +528,69 @@ def kill_tv():
 def set_stage(pct, msg):
     STATE.update({"stage": msg, "stage_pct": pct})
 
+
+# ── TUNA SCIENCE (2026-07-07): the invented instruments, served live ──
+_SCI_CACHE = {"t": 0.0, "data": {}}
+
+
+def science_data():
+    """Time knob, survival curve, guard/sheriff/dawn/oracle — cheap reads,
+    5 s cache. Education layer for the NERD tab."""
+    now = time.time()
+    if now - _SCI_CACHE["t"] < 5:
+        return _SCI_CACHE["data"]
+    out = {}
+    # survival curve position (measured 7/06-07: 0% @14, 50% @15.2,
+    # ~85% @16.4, 99.7% @17 — logistic fit)
+    cm = chain_math()
+    mer = cm.get("mer_db")
+    if mer:
+        surv = 100.0 / (1.0 + math.exp(-(mer - 15.25) / 0.55))
+        out["survival"] = {"mer": mer, "pct": round(surv),
+                           "watchable": mer >= 16.0}
+    # time knob: this channel's hour-resolved ownership from the cube map
+    try:
+        cmap = json.loads((HERE / "cube_map.json").read_text())
+        ch = cmap["channels"].get(str(STATE["rf"]))
+        if ch:
+            hr = str(time.localtime().tm_hour)
+            out["timeknob"] = {"now_owner": ch.get("owner_by_hour", {})
+                               .get(hr, ch["antenna"]),
+                               "best_hour": ch.get("best_hour"),
+                               "median": ch.get("median_mer")}
+    except (OSError, ValueError, KeyError):
+        pass
+    # guard saves this chain-session
+    try:
+        txt = CHAIN_LOG.read_text(errors="ignore")
+        out["guard_fires"] = txt.count("MOD12 GUARD")
+        out["slips_seen"] = txt.count("MOD12 SLIP")
+    except OSError:
+        pass
+    # sheriff / dawn / oracle: latest events from the campaign log
+    try:
+        lines = (HERE / "cube_log.jsonl").read_text(
+            encoding="utf-8").splitlines()
+        for line in reversed(lines[-400:]):
+            try:
+                o = json.loads(line)
+            except ValueError:
+                continue
+            ev = o.get("event", "")
+            if ev == "SHERIFF" and "sheriff" not in out:
+                out["sheriff"] = {"action": o.get("action"), "t": o.get("t")}
+            elif ev in ("dawn-score2", "dawn-score") and "dawn" not in out:
+                out["dawn"] = {"score": o.get("score"),
+                               "verdict": o.get("verdict"), "t": o.get("t")}
+            elif ev == "beacon-oracle" and "oracle" not in out:
+                out["oracle"] = {"paths": o.get("paths_db"), "t": o.get("t")}
+            if all(k in out for k in ("sheriff", "dawn", "oracle")):
+                break
+    except OSError:
+        pass
+    _SCI_CACHE.update({"t": now, "data": out})
+    return out
+
 def tune(rf, prog, virtual, name):
     BAL["on"] = False
     FLAT["on"] = False
@@ -889,6 +952,9 @@ canvas{width:100%;image-rendering:pixelated;display:block;border-radius:4px}
 <div id="pageN" style="display:none">
   <div class="cards" id="mathcards"></div>
   <div class="cards" id="knobcards"></div>
+  <h3 style="margin:14px 0 4px">🔬 TUNA SCIENCE — the invented instruments, live</h3>
+  <div class="cards" id="sciencecards"></div>
+  <div id="scinotes" style="font-size:11px;color:#8aa;line-height:1.5;max-width:900px"></div>
   <div id="wfwrap"><div id="wfstatus">waterfall starting…</div>
     <canvas id="wfchan" width="1480" height="34"></canvas>
     <canvas id="wf" width="1480" height="380" style="cursor:grab"></canvas>
@@ -1195,6 +1261,23 @@ let kc='';const K=s.knobs||{};
 if(s.knobs && (k in K || k==='RF'||k==='PROG')){
 const v=k==='RF'?s.rf:(k==='PROG'?s.prog:K[k]);if(v!==undefined&&v!==null)kc+=card(k,v,'')}});
 document.getElementById('knobcards').innerHTML=kc;
+// ── TUNA SCIENCE cards ──
+let sc='';const SC=s.science||{};
+if(SC.survival){const p=SC.survival.pct;
+sc+=card('SURVIVAL CURVE',p+'%','packets that live · '+(SC.survival.watchable?'WATCHABLE':'below 16 = not watchable'),p>=85?'good':(p>=50?'warn':'bad'))}
+if(SC.timeknob){sc+=card('TIME KNOB',SC.timeknob.now_owner||'?','best hour: '+(SC.timeknob.best_hour||'?')+'h · antenna now')}
+if(SC.guard_fires!==undefined)sc+=card('MOD-12 GUARD',SC.guard_fires,'slips healed this session',SC.guard_fires>20?'warn':'good');
+if(SC.sheriff)sc+=card('FEC SHERIFF',SC.sheriff.action,'last action · '+SC.sheriff.t);
+if(SC.dawn)sc+=card('DAWN FORECAST',SC.dawn.score,SC.dawn.verdict);
+if(SC.oracle&&SC.oracle.paths)sc+=card('BEACON ORACLE',Object.entries(SC.oracle.paths).map(([k,v])=>k.slice(0,4)+':'+(v===null?'—':v)).join(' '),'path dB vs baseline · '+SC.oracle.t);
+document.getElementById('sciencecards').innerHTML=sc;
+document.getElementById('scinotes').innerHTML=
+'<b>Survival curve</b>: measured on this rig 7/06-07 — packet survival vs MER is an S-curve (50% at 15.2, watchable TV needs 16+). '+
+'<b>Time knob</b>: channel ownership flips by hour (discone owns RF7 in daylight, rabbits at dawn) — the map picks the antenna. '+
+'<b>Mod-12 guard</b>: a stream hiccup rotates the viterbi\\'s 12-decoder grid (was: minutes of garbage); the guard drops ≤11 segments and heals it in one field. '+
+'<b>FEC sheriff</b>: Reed-Solomon truth polices the adaptive layers — surgery, then the viterbi scalpel, then restart. '+
+'<b>Dawn forecast</b>: the Sterling VA weather balloon\\'s refractivity profile predicts tropo windows. '+
+'<b>Beacon oracle</b>: FM stations as free path-sounders — a hot Baltimore path says go fish Baltimore TV.';
 }catch(e){}}
 // ── waterfall v2: client row buffer + pan/zoom + channel overlay ──
 let lastRow=0, wfFreqs=null, wfChans=null, tunedMhz=null;
@@ -1399,7 +1482,8 @@ class H(BaseHTTPRequestHandler):
         elif self.path == "/api/nerd":
             self._send(json.dumps({"rf": STATE["rf"], "prog": STATE["prog"],
                                    "knobs": STATE.get("env") or {},
-                                   "live": live_math()}))
+                                   "live": live_math(),
+                                   "science": science_data()}))
         elif self.path.startswith("/api/waterfall"):
             since = 0
             if "since=" in self.path:
