@@ -42,19 +42,39 @@
 - GR: every output port must land somewhere (twin deinterleaver's
   plinfo needs a null_sink).
 
+## 7/07 late-night results (the finale sprint)
+- GMD/Forney erasure ladder SHIPPED (rs_decoder_erasure, STVT_RS_GMD=0
+  reverts): replay A/B verdict = keep, no dB — failed codewords die far
+  beyond erasure range. Honest counters: gmd_trials=/gmd_rej=.
+- tv_replay is now THE decoder test rail: SOVA plane wired, STVT_IQ_SKIP
+  diversity knob. ~3 min/arm, zero radio steal, deterministic.
+- E7 DONE + WIN (e7_vote.py): heal-merge (splice clean same-PTS GOP
+  twins from sibling decodes over damaged ones, never drop). Impulse
+  specimen: 799 frames kept, decode errors 715→688. Diversity proven.
+- DFE anchor retest: INDETERMINATE (rf15 specimens ~96% dead in replay;
+  dead material can't discriminate EQ questions). Stays opt-in.
+- TURBO_BLUEPRINT.md: stage-2 RS-truth trellis pinning = the crown-jewel
+  post-Fable build (~1-1.5 dB nobody ships).
+
 ## Queue (ranked)
-1. SOVA 5-round default gauntlet; if passed → default-on like the guard.
-2. DFE healthy-channel retest WITH guard+no-hub (its corruption may
+1. TURBO stage 2: atsc_turbo_decoder hierarchical block per
+   TURBO_BLUEPRINT.md (RS-truth pinning, re-decode failed spans only).
+2. Capture a MID-CLIFF ECHO specimen (15-16 dB + multipath, RF15/RF21
+   breathing) — the missing testbed for DFE-anchor + GMD + turbo A/Bs.
+3. SOVA 5-round default gauntlet; if passed → default-on like the guard.
+4. DFE healthy-channel retest WITH guard+no-hub (its corruption may
    have been slips all along → DFE could go default too).
-3. Harvest player --follow live demo on breathing evening RF21;
+5. E7 live integration: panel "SECOND OPINION" button — record 60s IQ
+   (iq_ring), e7_vote offline, play healed file. More passes = more
+   donors; try 5. Also finer-than-GOP splice (PES-level).
+6. Harvest player --follow live demo on breathing evening RF21;
    integrate as panel "HARVEST MODE" button (force-play for sub-16).
-4. BO hunt completion (needs breathing; evening block attempted 7/07).
-5. Double-decode voting (E7) using UNSCRUBBED captures.
-6. Rabbit re-aim session (flatness tone, RF21 target) + Philips peak.
-7. GRC: env→parameters pass + example flowgraph + README screenshots.
-8. Radio Tuna: adaptive survey probe, 106.5-107.9 gap, WETA-HD codec
+7. BO hunt completion (needs breathing; evening block attempted 7/07).
+8. Rabbit re-aim session (flatness tone, RF21 target) + Philips peak.
+9. GRC: env→parameters pass + example flowgraph + README screenshots.
+10. Radio Tuna: adaptive survey probe, 106.5-107.9 gap, WETA-HD codec
    mystery. Dawn-score calibration accumulates each morning.
-9. P1 flutter: 0.2-0.5 Hz on all antennas (foliage?); tie to τc gearing.
+11. P1 flutter: 0.2-0.5 Hz on all antennas (foliage?); tie to τc gearing.
 
 ## Tonight (armed)
 Bedtime → night_shift.py: dawn_score2 (00Z balloon) → 3-antenna cube
