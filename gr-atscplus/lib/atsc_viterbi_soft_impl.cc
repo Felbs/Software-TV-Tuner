@@ -16,6 +16,8 @@
 #include "atsc_viterbi_soft_impl.h"
 #include "atsc_viterbi_mux.h"
 #include <gnuradio/io_signature.h>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <pmt/pmt.h>
 
@@ -78,6 +80,28 @@ int atsc_viterbi_soft_impl::work(int noutput_items,
     auto out = static_cast<unsigned char*>(output_items[0]);
     auto plin = static_cast<const plinfo*>(input_items[1]);
     auto plout = static_cast<plinfo*>(output_items[1]);
+
+    // ── 2026-07-06 THE SCALPEL ── the corruption/DEAF forensics left
+    // exactly one un-alibied organ: this block's internal state (12
+    // trellis path memories + alignment fifos). STVT_VIT_CMD_FILE lets
+    // the FEC sheriff order a FULL state reset mid-stream — fifos AND
+    // decoders (the stock reset() only touched fifos). Poll cost: one
+    // fopen attempt per work() call.
+    static const char* VIT_CMD = std::getenv("STVT_VIT_CMD_FILE");
+    if (VIT_CMD) {
+        std::FILE* cf = std::fopen(VIT_CMD, "rb");
+        if (cf) {
+            std::fclose(cf);
+            std::remove(VIT_CMD);
+            for (int i = 0; i < NCODERS; i++) {
+                fifo[i].reset();
+                viterbi[i].reset();
+            }
+            std::fprintf(stderr,
+                         "[viterbi_soft] SCALPEL: full state reset "
+                         "(12 decoders + fifos)\n");
+        }
+    }
 
     // The way the fs_checker works ensures we start getting packets
     // starting with a field sync, and out input multiple is set to

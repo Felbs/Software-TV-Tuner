@@ -25,7 +25,8 @@ from datetime import datetime
 from pathlib import Path
 
 RE_FS = re.compile(r"fs_err_rms=([\d.]+)")
-RE_RS5 = re.compile(r"\(last5s: pkts=(\d+) era_dec=\d+ era_ok=\d+ bad=(\d+)\)")
+RE_RS5 = re.compile(
+    r"\(last5s: pkts=(\d+) era_dec=\d+ era_ok=\d+ bad=(\d+)(?: sync=\d+)?\)")
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--log", required=True)
@@ -33,6 +34,7 @@ ap.add_argument("--cmd", required=True)
 ap.add_argument("--mer", type=float, default=15.0)
 ap.add_argument("--badfrac", type=float, default=0.5)
 ap.add_argument("--cooldown", type=float, default=15.0)
+ap.add_argument("--vitcmd", default="", help="viterbi scalpel command file")
 ap.add_argument("--window", type=int, default=0, help="exit after N s")
 ap.add_argument("--jsonl", default=str(Path(__file__).parent / "cube_log.jsonl"))
 args = ap.parse_args()
@@ -72,12 +74,22 @@ def act(reason):
     log_ev("dfe0+lkg", reason)
 
 
+scalpel_used = False
+
+
 def escalate(reason):
-    """Tap surgery didn't cure it -> the damage lives downstream of the
-    equalizer (the DEAF anatomy, 2026-07-06: dfe0+lkg left 100% loss
-    running). The one proven medicine is a chain restart."""
-    global acted_at
+    """Tap surgery didn't cure it. Forensics (2026-07-06 23:00) left one
+    un-alibied organ: viterbi internal state. Tier 2 = THE SCALPEL
+    (full viterbi reset via STVT_VIT_CMD_FILE). Tier 3 = chain kill."""
+    global acted_at, scalpel_used
+    if args.vitcmd and not scalpel_used:
+        scalpel_used = True
+        acted_at = time.time()          # re-arm the escalation timer
+        Path(args.vitcmd).write_text("reset")
+        log_ev("SCALPEL (viterbi reset)", reason)
+        return
     acted_at = None
+    scalpel_used = False
     import psutil
     log_ev("CHAIN-KILL", reason)       # log FIRST — the kill ends our world
     for p in psutil.process_iter(["name", "cmdline"]):
@@ -130,5 +142,8 @@ while args.window == 0 or time.time() - t0 < args.window:
                 guilty = 0
         else:
             if frac < 0.1:
+                if acted_at is not None and scalpel_used:
+                    log_ev("SCALPEL CURED IT", f"bad down to {frac:.0%}")
                 acted_at = None        # cured — stand down escalation
+                scalpel_used = False
             guilty = 0

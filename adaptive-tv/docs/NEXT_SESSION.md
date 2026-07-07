@@ -41,16 +41,26 @@ Bred on demand (DFE=1, RF34, strikes in 1-3 x 60s tries). Facts:
 - Tap surgery (dfe0+lkg) "didn't cure" — BUT command-ack lines in the
   corrupted samples' logs were NEVER verified. FIRST 2-MIN CHECK
   TOMORROW: breed + sheriff + grep "SHERIFF cmd" in the same log.
-  RESOLVED 22:55: the 90s trials' sheriff=True flag WAS the ack-string
-  check — acks present, 100% loss continued 50+s after consumed
-  surgery. **PRIME AND ONLY SUSPECT: VITERBI internal state (12-decoder
-  path memories / mux phase).** Everything else cleared: eq taps
-  (restored, no cure), DFE (suspended, no cure), deinterleaver
-  (realigns through), RS (stateless), derand (field-synced).
-  TOMORROW'S BUILD: viterbi reset command ('vit' on a command port /
-  reset() on corruption) + instrument its mux phase during a bred
-  onset. If a viterbi reset cures live, the sheriff's surgery tier
-  gets its missing scalpel — and likely RF15's DEAF cure with it.
+  FINAL STATE (23:20, decider v2 with positional ack proof):
+  - dfe0+lkg ack'd DURING corruption -> no cure (equilibrium theory DEAD)
+  - VITERBI SCALPEL built (STVT_VIT_CMD_FILE full reset: 12 decoders +
+    fifos) and fired mid-corruption -> no cure in its 10s window
+    (verify chain-side "[viterbi_soft] SCALPEL" ack + give it a longer
+    window before fully acquitting)
+  - corruption SELF-HEALS sometimes (remissions in 3/8 uncontrolled
+    tries) — not permanent damage, a wrong ATTRACTOR something falls
+    into and occasionally out of
+  - Only proven cure: chain restart (sheriff tier 3 — operationally
+    fine, 3s)
+  REMAINING SUSPECTS: upstream feedback loops with attractor dynamics —
+  timing recovery (sync) and FPLL carrier loop (both keep FS
+  correlating/healthy MER while data dies). TOMORROW: instrument
+  sync/fpll internal state (sampling-phase, NCO freq) during a bred
+  onset; also verify scalpel ack + longer post-scalpel window.
+  Sheriff tiers ALL exercised live 22:47: surgery :00 -> scalpel :10 ->
+  kill :20. The protocol machine works; the disease map is one organ
+  shorter each run. Sheriff regex now tolerates sync= field (its 5th
+  instrument-audit lesson).
 
 ## Build queue (ranked)
 1. E5 — RS-fail-disciplined adaptation: ground truth for the DFE anchor
