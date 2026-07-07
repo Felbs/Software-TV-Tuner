@@ -1149,19 +1149,33 @@ int atsc_equalizer_long_impl::general_work(int noutput_items,
             // of the deficit so the next segments realign it.
             {
                 static const bool MOD12_G = []() {
+                    // default ON since 2026-07-07 (gauntlet-passed)
                     const char* p = std::getenv("STVT_EQ_MOD12_GUARD");
-                    return p && std::atoi(p) != 0;
+                    return !(p && p[0] == '0');
                 }();
-                if (MOD12_G && d_mod12_count != 0 && d_mod12_drop == 0) {
-                    // drop k=c: next field start lands at (c + 312 - c)
-                    // ≡ 0 (mod 12). Do NOT reset the counter — it must
-                    // keep tracking absolute emitted phase or the
-                    // arithmetic oscillates (drops every field forever).
-                    d_mod12_drop = d_mod12_count;
-                    std::fprintf(stderr,
-                                 "[eq-long] MOD12 GUARD: phase %d at FS — "
-                                 "dropping %d segments to realign\n",
-                                 d_mod12_count, d_mod12_drop);
+                if (MOD12_G && d_mod12_drop == 0) {
+                    // v2 DEBOUNCE (2026-07-07 gauntlet lesson): a single
+                    // glitched FS detection reads a bogus nonzero phase;
+                    // realigning against it DROPS GOOD SEGMENTS (cliff
+                    // cell ran worse with v1 in storm conditions). Real
+                    // slips persist — same phase, field after field
+                    // (456/456 last night). Fire only on a repeat.
+                    if (d_mod12_count != 0 &&
+                        d_mod12_count == d_mod12_pending) {
+                        // drop k=c: next field start lands at
+                        // (c + 312 - c) ≡ 0 (mod 12). Counter is NOT
+                        // reset — absolute phase tracking, else drops
+                        // oscillate forever.
+                        d_mod12_drop = d_mod12_count;
+                        d_mod12_pending = -1;
+                        std::fprintf(stderr,
+                                     "[eq-long] MOD12 GUARD: phase %d "
+                                     "confirmed x2 — dropping %d segments\n",
+                                     d_mod12_count, d_mod12_drop);
+                    } else {
+                        d_mod12_pending =
+                            (d_mod12_count != 0) ? d_mod12_count : -1;
+                    }
                 }
             }
             // RLS field-sync adaptation when STVT_EQ_RLS=1, else LMS (default).
@@ -1233,8 +1247,11 @@ int atsc_equalizer_long_impl::general_work(int noutput_items,
             // swallow <=11 segments (~1 ms) and the grid realigns —
             // self-heal within one field. STVT_EQ_MOD12_GUARD=1.
             static const bool MOD12_GUARD = []() {
+                // DEFAULT ON since 2026-07-07 (5-round gauntlet: win
+                // somewhere, regress nowhere). STVT_EQ_MOD12_GUARD=0
+                // opts out.
                 const char* p = std::getenv("STVT_EQ_MOD12_GUARD");
-                return p && std::atoi(p) != 0;
+                return !(p && p[0] == '0');
             }();
             if (MOD12_GUARD && d_mod12_drop > 0) {
                 d_mod12_drop--;               // consume, don't produce
