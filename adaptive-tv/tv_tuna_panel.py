@@ -724,11 +724,16 @@ def tune(rf, prog, virtual, name):
             if cliff_mode:
                 set_stage(52, f"MER {mer_now:.1f} dB — engaging cliff-edge "
                               "recovery (erasure FEC + tap guard)")
-                # 2026-07-06 A/B on live RF36 @ MER 16.2: erasures=20 ran
-                # 98.3% MISCORRECTIONS (30508 miscorr vs 210 rescues in
-                # 145 s) — the recovery recipe was manufacturing glitches
-                # on borderline signals. Telemetry-only until re-proven.
-                env.update({"STVT_RS": "erasure", "STVT_RS_ERASURES": "0",
+                # 2026-07-07 FINAL FORM — the two-mode chain: healthy
+                # signals ride lean (full stack = ~20% throughput tax,
+                # 5-round gauntlet), cliff signals get the whole proven
+                # arsenal: SOVA trellis-doubt erasures (174 rescues/75s),
+                # DFE (+58 hdr/sample sub-cliff), reseed, quality reset.
+                # Guard is default-on everywhere already.
+                env.update({"STVT_RS": "erasure", "STVT_RS_ERASURES": "14",
+                            "STVT_SOVA": "1",
+                            "STVT_EQ_DFE": "1",
+                            "STVT_EQ_RESEED": "1",
                             "STVT_EQ_QUALITY_BAD_RMS": "8"})
                 if GEN[0] != my_gen: return
                 kill_tv(); time.sleep(2)
