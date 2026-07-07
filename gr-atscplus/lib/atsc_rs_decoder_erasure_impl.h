@@ -74,6 +74,7 @@ private:
     int d_log_eras_dec;
     int d_log_eras_ok;
     int d_log_bad;
+    int d_log_syncok = 0;   // DEAF forensics: framed inputs this window
 
     // Day 10: persistent histogram across chain restarts.
     static constexpr uint32_t HIST_MAGIC   = 0x52534552;  // "RSER"
