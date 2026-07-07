@@ -83,11 +83,66 @@ for probe in [(34, "Antenna B", "rabbit", 2, 32),
     except Exception as e:
         log_event({"event": "flutter-probe-error", "err": str(e)[:80]})
 
-# ── phase 1: cube ──────────────────────────────────────────────────
-print(f"night shift: cube until {CUBE_END}, ambush until {AMBUSH_END}",
-      flush=True)
-r = subprocess.run([PY, "-u", str(HERE / "overnight_cube.py"), CUBE_END])
-log_event({"event": "night-cube-done", "rc": r.returncode})
+# ── phase 1: cube, with the PILOT TRIPWIRE (Physics Ladder P3) ─────
+# Detection precedes decoding: enhancement onset shows in RF9's cube
+# samples long before video is possible. From TRIPWIRE_FROM onward, a
+# rising RF9 (mer_med >= TRIP_MER) retires the cube EARLY and starts
+# the ambush at the enhancement's leading edge instead of at a fixed
+# alarm-clock hour.
+TRIPWIRE_FROM = "03:30"
+TRIP_MER = 13.8          # RF9 baseline ~12.5; 13.8 = clear rising edge
+
+import psutil
+
+
+def rf9_recent_mer():
+    try:
+        lines = (HERE / "cube_log.jsonl").read_text(
+            encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines[-120:]):
+        try:
+            o = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if o.get("rf") == 9 and o.get("ant") == "rabbit" \
+                and "event" not in o:
+            return o.get("mer_med")
+    return None
+
+
+def kill_tree(proc):
+    try:
+        p = psutil.Process(proc.pid)
+        for c in p.children(recursive=True):
+            try:
+                c.kill()
+            except psutil.NoSuchProcess:
+                pass
+        p.kill()
+    except psutil.NoSuchProcess:
+        pass
+
+
+print(f"night shift: cube until {CUBE_END} (tripwire from "
+      f"{TRIPWIRE_FROM}), ambush until {AMBUSH_END}", flush=True)
+cube = subprocess.Popen([PY, "-u", str(HERE / "overnight_cube.py"),
+                         CUBE_END])
+tripped = False
+while cube.poll() is None:
+    time.sleep(30)
+    if now_hm() >= TRIPWIRE_FROM:
+        m = rf9_recent_mer()
+        if m is not None and m >= TRIP_MER:
+            log_event({"event": "TRIPWIRE", "rf9_mer": m,
+                       "note": "rising edge — ambush starts early"})
+            oc.announce("Channel 9 rising early")
+            tripped = True
+            kill_tree(cube)
+            time.sleep(4)
+            break
+log_event({"event": "night-cube-done", "tripped": tripped})
 
 # ── phase 2: RF9 ambush ────────────────────────────────────────────
 os.environ["STVT_EQ_TAP_CACHE"] = str(CACHE)
@@ -96,8 +151,16 @@ os.environ["STVT_EQ_TAP_CACHE"] = str(CACHE)
 os.environ["STVT_EQ_DFE"] = "1"
 best = 0
 dwell_n = 0
+recent_zero = 0
+HARD_STOP = "07:10"
 AMBUSH_ANTS = [("Antenna B", "rabbit"), ("Antenna A", "discone")]
-while now_hm() < AMBUSH_END:
+while True:
+    # stay past AMBUSH_END while the fish are biting (hot extension);
+    # hard stop protects the user's morning TV
+    if now_hm() >= HARD_STOP:
+        break
+    if now_hm() >= AMBUSH_END and recent_zero >= 2:
+        break
     antenna, ant = AMBUSH_ANTS[dwell_n % 2]   # two independent shots
     dwell_n += 1
     s = oc.sample(9, antenna, 5, 32, secs=300)
@@ -105,6 +168,7 @@ while now_hm() < AMBUSH_END:
     s["ant"] = ant
     log_event(s)
     hdr = s.get("hdr") or 0
+    recent_zero = recent_zero + 1 if hdr == 0 else 0
     if hdr > 0:
         oc.announce(f"Channel 9: {hdr} video headers, "
                     f"M E R {s.get('mer_med')}")
@@ -118,7 +182,7 @@ while now_hm() < AMBUSH_END:
                 trig.write_text(f"RF9-GOLDEN {hdr} headers")
             except OSError:
                 pass
-log_event({"event": "ambush-done", "best_hdr": best})
+log_event({"event": "ambush-done", "best_hdr": best, "dwells": dwell_n})
 
 # ── phase 3: morning ───────────────────────────────────────────────
 env = os.environ.copy()
