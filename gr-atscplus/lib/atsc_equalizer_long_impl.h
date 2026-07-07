@@ -54,6 +54,7 @@ private:
     // corruption/DEAF mechanism). Cure: drop <=11 segments to realign.
     int d_mod12_count = 0;            // data segments emitted, mod 12
     int d_mod12_drop = 0;             // segments still to drop
+    int d_mod12_pending = -1;         // v2 debounce: phase must repeat
 
     void filterN(const float* input_samples, float* output_samples, int nsamples);
     void adaptN(const float* input_samples,
