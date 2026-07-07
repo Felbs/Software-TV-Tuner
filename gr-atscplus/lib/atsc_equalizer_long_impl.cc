@@ -1048,30 +1048,42 @@ int atsc_equalizer_long_impl::general_work(int noutput_items,
                 const char* p = std::getenv("STVT_EQ_RLS"); return p && std::atoi(p) != 0;
             }();
             const float* trn = (d_flags & 0x0010) ? training_sequence2 : training_sequence1;
-            if (RLS_ENABLED) {
-                adaptN_rls(data_mem, trn, data_mem2, KNOWN_FIELD_SYNC_LENGTH);
-            } else if (d_flags & 0x0010) {
-                adaptN(data_mem, training_sequence2, data_mem2, KNOWN_FIELD_SYNC_LENGTH);
-            } else {
-                adaptN(data_mem, training_sequence1, data_mem2, KNOWN_FIELD_SYNC_LENGTH);
-            }
-            // DFE v1: flush the decision history with the KNOWN training
-            // symbols — one guaranteed-correct reset per field kills
-            // decision-error propagation for free (blueprint trick #1).
             static const bool DFE_G = []() {
                 const char* p = std::getenv("STVT_EQ_DFE");
                 return p && std::atoi(p) != 0;
             }();
-            if (DFE_G) {
-                static const int NFB_G = []() -> int {
-                    if (const char* p = std::getenv("STVT_EQ_DFE_NFB")) {
-                        int v = std::atoi(p);
-                        if (v >= 16 && v <= NFB_MAX) return v;
-                    }
-                    return 192;
-                }();
-                for (int k = 0; k < KNOWN_FIELD_SYNC_LENGTH; k++)
+            static const int NFB_G = []() -> int {
+                if (const char* p = std::getenv("STVT_EQ_DFE_NFB")) {
+                    int v = std::atoi(p);
+                    if (v >= 16 && v <= NFB_MAX) return v;
+                }
+                return 192;
+            }();
+            if (RLS_ENABLED) {
+                adaptN_rls(data_mem, trn, data_mem2, KNOWN_FIELD_SYNC_LENGTH);
+            } else if (DFE_G) {
+                // DFE v1.2 FB-AWARE ANCHOR: the data path outputs
+                // FFE·x − fb·hist, so training the FFE against raw trn
+                // gives FFE and FBF FIGHTING objectives (v1.1's
+                // intermittent healthy-channel instability). Fix without
+                // touching adaptN: train against the ADJUSTED target
+                // trn' = trn + fb·hist — then (FFE·x − fb·hist ≈ trn)
+                // and both filters descend ONE objective. History
+                // advances with the KNOWN symbols as we go (this also
+                // replaces the separate post-adaptN flush).
+                float trn_adj[KNOWN_FIELD_SYNC_LENGTH];
+                for (int k = 0; k < KNOWN_FIELD_SYNC_LENGTH; k++) {
+                    float fbv = 0.0f;
+                    volk_32f_x2_dot_prod_32f(&fbv, &d_hist[d_hpos + 1],
+                                             &d_fb[0], NFB_G);
+                    trn_adj[k] = trn[k] + fbv;
                     dfe_push(trn[k], NFB_G);
+                }
+                adaptN(data_mem, trn_adj, data_mem2, KNOWN_FIELD_SYNC_LENGTH);
+            } else if (d_flags & 0x0010) {
+                adaptN(data_mem, training_sequence2, data_mem2, KNOWN_FIELD_SYNC_LENGTH);
+            } else {
+                adaptN(data_mem, training_sequence1, data_mem2, KNOWN_FIELD_SYNC_LENGTH);
             }
         } else {
             // Continuous decision-directed tracking on data segments (no-op
