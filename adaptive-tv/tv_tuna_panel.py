@@ -548,6 +548,70 @@ def set_stage(pct, msg):
     STATE.update({"stage": msg, "stage_pct": pct})
 
 
+# ── E7 SECOND OPINION (2026-07-07 night): capture ~30 s of raw airwaves,
+# decode them THREE times with different equalizer trajectories, and
+# splice every clean GOP any pass rescued over the damage (e7_vote.py
+# heal-merge). TV pauses ~1 min for the capture, comes back, and the
+# healed replay pops up when the votes are in.
+E7 = {"status": "idle"}
+_MPV = r"C:\Program Files\MPV Player\mpv.exe"
+
+
+def e7_run(secs=30):
+    if E7["status"] not in ("idle",) and not E7["status"].startswith(
+            ("done", "error")):
+        return
+    rf, prog = STATE.get("rf"), STATE.get("prog")
+    if rf is None or prog is None:
+        E7["status"] = "error: tune a channel first"
+        return
+    virt, name = STATE.get("virtual"), STATE.get("name", "")
+    ant = STATE.get("ant_override") or antenna_for(rf)
+    rfsel, ifgr = GAINS.get(rf, DEFAULT_GAIN)
+    cap = HERE / "lab" / "captures" / "e7_live.cs16"
+    healed = HERE / "lab" / "e7_healed.ts"
+
+    def run():
+        try:
+            E7["status"] = f"capturing {secs}s of RF{rf} (TV pauses)"
+            with LOCK:
+                GEN[0] += 1          # park the tuner state machine
+            kill_tv()
+            time.sleep(2)
+            r = subprocess.run(
+                [PY, "-u", str(HERE / "iq_capture.py"), "--rf", str(rf),
+                 "--secs", str(secs), "--antenna", ant,
+                 "--rfgain", str(rfsel), "--ifgr", str(ifgr),
+                 "--out", str(cap)],
+                capture_output=True, text=True, timeout=secs + 120)
+            if not cap.exists() or cap.stat().st_size < 1_000_000:
+                E7["status"] = "error: capture failed (SDR wedge? retry)"
+                threading.Thread(target=tune, args=(rf, prog, virt, name),
+                                 daemon=True).start()
+                return
+            E7["status"] = "TV returning; decoding 3 opinions (~4 min)"
+            threading.Thread(target=tune, args=(rf, prog, virt, name),
+                             daemon=True).start()
+            env = dict(os.environ)
+            env["STVT_DABNOTCH"] = "0" if rf < 14 else "1"
+            r = subprocess.run(
+                [PY, "-u", str(HERE / "e7_vote.py"), str(cap),
+                 "--passes", "3", "--prog", str(prog), "--out", str(healed)],
+                capture_output=True, text=True, env=env, timeout=1200)
+            tail = [ln for ln in (r.stdout or "").splitlines()
+                    if "frames:" in ln or "union:" in ln]
+            E7["status"] = ("done: " + " · ".join(tail)[-160:]) if tail \
+                else f"error: vote failed rc={r.returncode}"
+            if healed.exists() and healed.stat().st_size > 500_000:
+                subprocess.Popen([_MPV, str(healed), "--force-window=yes",
+                                  "--keep-open=yes",
+                                  "--title=E7 Second Opinion (healed)"])
+        except Exception as e:
+            E7["status"] = f"error: {e}"
+
+    threading.Thread(target=run, daemon=True).start()
+
+
 # ── TUNA SCIENCE (2026-07-07): the invented instruments, served live ──
 _SCI_CACHE = {"t": 0.0, "data": {}}
 
@@ -586,6 +650,8 @@ def science_data():
         out["slips_seen"] = txt.count("MOD12 SLIP")
     except OSError:
         pass
+    if E7["status"] != "idle":
+        out["e7"] = E7["status"]
     # sheriff / dawn / oracle: latest events from the campaign log
     try:
         lines = (HERE / "cube_log.jsonl").read_text(
@@ -1002,7 +1068,10 @@ canvas{width:100%;image-rendering:pixelated;display:block;border-radius:4px}
 <div id="pageN" style="display:none">
   <div class="cards" id="mathcards"></div>
   <div class="cards" id="knobcards"></div>
-  <h3 style="margin:14px 0 4px">🔬 TUNA SCIENCE — the invented instruments, live</h3>
+  <h3 style="margin:14px 0 4px">🔬 TUNA SCIENCE — the invented instruments, live
+    <button onclick="fetch('/api/e7',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(()=>{})"
+      style="margin-left:12px;font-size:12px" title="Capture 30s of raw airwaves, decode 3 ways, splice the best of every pass. TV pauses ~1 min.">🩺 SECOND OPINION (E7)</button>
+  </h3>
   <div class="cards" id="sciencecards"></div>
   <div id="scinotes" style="font-size:11px;color:#8aa;line-height:1.5;max-width:900px"></div>
   <div id="wfwrap"><div id="wfstatus">waterfall starting…</div>
@@ -1322,6 +1391,7 @@ if(SC.timeknob){sc+=card('TIME KNOB',SC.timeknob.now_owner||'?','best hour: '+(S
 if(SC.guard_fires!==undefined)sc+=card('MOD-12 GUARD',SC.guard_fires,'slips healed this session',SC.guard_fires>20?'warn':'good');
 if(SC.sheriff)sc+=card('FEC SHERIFF',SC.sheriff.action,'last action · '+SC.sheriff.t);
 if(SC.dawn)sc+=card('DAWN FORECAST',SC.dawn.score,SC.dawn.verdict);
+if(SC.e7)sc+=card('E7 SECOND OPINION',SC.e7.length>34?SC.e7.slice(0,34)+'…':SC.e7,SC.e7,SC.e7.startsWith('done')?'good':(SC.e7.startsWith('error')?'bad':'warn'));
 if(SC.oracle&&SC.oracle.paths)sc+=card('BEACON ORACLE',Object.entries(SC.oracle.paths).map(([k,v])=>k.slice(0,4)+':'+(v===null?'—':v)).join(' '),'path dB vs baseline · '+SC.oracle.t);
 document.getElementById('sciencecards').innerHTML=sc;
 document.getElementById('scinotes').innerHTML=
@@ -1599,6 +1669,9 @@ class H(BaseHTTPRequestHandler):
         elif self.path == "/api/record":
             out = record(req["virt"], req["title"])
             self._send(out or "scheduled", "text/plain; charset=utf-8")
+        elif self.path == "/api/e7":
+            e7_run(int(req.get("secs", 30)))
+            self._send('"second opinion started"')
         else:
             self.send_error(404)
 

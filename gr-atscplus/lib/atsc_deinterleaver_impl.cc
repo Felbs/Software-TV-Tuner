@@ -101,6 +101,10 @@ int atsc_deinterleaver_impl::work(int noutput_items,
         if (plin[i].first_regular_seg_p()) {
             sync();
             d_syncs_this_window++;   // DEAF forensics: field realignments
+            // SICKMAP anchor (turbo stage-2a): mark commutator-phase zero
+            // so rs_erasure can map codeword bytes to transmission time
+            add_item_tag(0, nitems_written(0) + (uint64_t)i,
+                         pmt::intern("deint_sync"), pmt::PMT_T);
         }
 
         // remap OUTPUT pipeline info to reflect all data segment end-to-end delay

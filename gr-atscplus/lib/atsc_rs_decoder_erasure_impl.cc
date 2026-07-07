@@ -247,6 +247,7 @@ int atsc_rs_decoder_erasure_impl::decode_block(const unsigned char* in207,
                 int v = d_hist_pos[i] + 1;
                 if (v > 2000) v = 2000;
                 d_hist_pos[i] = v;
+                sick_mark(i);      // SICKMAP writer: correction -> tx time
             }
         }
         std::memcpy(out188, tmp + PAD_BYTES, PKT_LEN);
@@ -264,10 +265,33 @@ int atsc_rs_decoder_erasure_impl::decode_block(const unsigned char* in207,
         // bytes) and take the FIRST solution that survives the full
         // guard battery. One fixed pattern wastes correction power
         // erasing good bytes; GMD finds each codeword's sweet size.
-        std::vector<std::pair<int, int>> weak;   // (reliability, pos)
+        // SICKMAP reader (STVT_RS_SICKMAP=1 enables): bytes whose
+        // transmission moment produced corrections in OTHER codewords get
+        // their weakness boosted — the interleaver map aims the erasures.
+        // OPT-IN after 7/07 replay A/Bs: wash on canyon AND impulse —
+        // failure is bimodal (lightly wounded or annihilated); the
+        // erasure-rescue pool is ~0.06% regardless of aim. Writer +
+        // telemetry stay always-on as a live disease map.
+        static const bool SICKMAP = []() {
+            const char* p = std::getenv("STVT_RS_SICKMAP");
+            return p && p[0] == '1';
+        }();
+        std::vector<std::pair<int, int>> weak;   // (eff weakness, pos)
         weak.reserve(CODE_LEN);
-        for (int i = 0; i < CODE_LEN; i++)
-            weak.emplace_back(rel207[i], i);
+        for (int i = 0; i < CODE_LEN; i++) {
+            int key = rel207[i];
+            if (SICKMAP) {
+                const int64_t T = tx_seg(i);
+                if (T >= 0) {
+                    const int s = d_sick[T & 511];
+                    if (s) {
+                        key -= 96 * (s > 2 ? 2 : s);
+                        d_sick_hit++;
+                    }
+                }
+            }
+            weak.emplace_back(key, i);
+        }
         std::sort(weak.begin(), weak.end());
         const int smax = std::min(d_effective_max_erasures, 16);
         // STVT_RS_GMD=0 restores the single fixed-smax attempt (A/B hook)
@@ -311,6 +335,7 @@ int atsc_rs_decoder_erasure_impl::decode_block(const unsigned char* in207,
                     int v = d_hist_pos[i] + 1;
                     if (v > 2000) v = 2000;
                     d_hist_pos[i] = v;
+                    sick_mark(i);
                 }
             }
             std::memcpy(out188, tmp + PAD_BYTES, PKT_LEN);
@@ -462,10 +487,39 @@ int atsc_rs_decoder_erasure_impl::work(int noutput_items,
     const unsigned char* rel = input_items.size() > 2
         ? static_cast<const unsigned char*>(input_items[2]) : nullptr;
 
+    // SICKMAP phase anchors: deint_sync tags mark commutator-phase zero.
+    // Phase-consistent re-anchors (every field: 312*207 is a multiple of
+    // 52) keep the original anchor so the map survives field boundaries;
+    // a true resync (glitch) rebases and clears the map.
+    std::vector<tag_t> sync_tags;
+    get_tags_in_window(sync_tags, 0, 0, noutput_items,
+                       pmt::intern("deint_sync"));
+    size_t sync_ti = 0;
+    const uint64_t abs0 = nitems_read(0);
+
     for (int i = 0; i < noutput_items; i++) {
         const unsigned char* in_pkt  = in  + i * CODE_LEN;
         const unsigned char* rel_pkt = rel ? rel + i * CODE_LEN : nullptr;
         unsigned char*       out_pkt = out + i * PKT_LEN;
+
+        while (sync_ti < sync_tags.size() &&
+               sync_tags[sync_ti].offset <= abs0 + (uint64_t)i) {
+            const uint64_t a = sync_tags[sync_ti].offset;
+            if (!d_anchor_seen) {
+                d_deint_anchor = a;
+                d_anchor_seen = true;
+                std::memset(d_sick, 0, sizeof(d_sick));
+            } else if (((a - d_deint_anchor) % 52) != 0) {
+                d_deint_anchor = a;
+                std::memset(d_sick, 0, sizeof(d_sick));
+            }
+            sync_ti++;
+        }
+        d_n_since = d_anchor_seen
+                        ? (int64_t)(abs0 + (uint64_t)i - d_deint_anchor)
+                        : -1;
+        if (d_n_since >= 0)
+            d_sick[d_n_since & 511] = 0;   // expire the slot fresh writes use
 
         // Always propagate plinfo (downstream blocks need it).
         plout[i] = plin[i];
@@ -546,7 +600,8 @@ int atsc_rs_decoder_erasure_impl::work(int noutput_items,
                      "(last5s: pkts=%d era_dec=%d era_ok=%d bad=%d sync=%d)  "
                      "weak_pos[%d:%d,%d:%d,%d:%d]  "
                      "vit_metric=%.3f vit_max=%.3f tags=%d eff_eras=%d "
-                     "g2rej=%d gmd_trials=%ld gmd_rej=%d\n",
+                     "g2rej=%d gmd_trials=%ld gmd_rej=%d "
+                     "sick_wr=%ld sick_hit=%ld\n",
                      elapsed_ms / 1000.0,
                      d_packets, d_errors_corrected,
                      d_erasure_decodes, d_erasure_successes, d_miscorrections,
@@ -556,7 +611,8 @@ int atsc_rs_decoder_erasure_impl::work(int noutput_items,
                      top3[0], top3v[0], top3[1], top3v[1], top3[2], top3v[2],
                      d_recent_metric, d_recent_metric_max,
                      d_metric_tag_count, d_effective_max_erasures,
-                     d_guard2_rejects, d_gmd_trials, d_gmd_rej);
+                     d_guard2_rejects, d_gmd_trials, d_gmd_rej,
+                     d_sick_wr, d_sick_hit);
         d_last_log = now;
         d_log_packets  = 0;
         d_log_eras_dec = 0;

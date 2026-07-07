@@ -47,6 +47,40 @@ private:
     // era_dec/miscorr/g2rej keep their pre-GMD meanings for sheriff/parsers
     long d_gmd_trials = 0;
     int d_gmd_rej = 0;
+    // SICKMAP (turbo stage-2a, 2026-07-07 night): cross-codeword erasure
+    // targeting. Corrections observed in DECODED codewords map back through
+    // the interleaver to transmission-time segments; failed codewords boost
+    // erasure priority for bytes that came from those sick moments. The
+    // outer code teaching itself through the interleaver's geometry.
+    uint64_t d_deint_anchor = 0;   // abs item idx of commutator-phase zero
+    bool d_anchor_seen = false;
+    int64_t d_n_since = -1;        // this codeword's index in anchor phase
+    uint8_t d_sick[512] = {};      // ring over transmission-time segments
+    long d_sick_wr = 0;            // corrections recorded into the map
+    long d_sick_hit = 0;           // failed-codeword bytes boosted by it
+
+    // byte pos of codeword d_n_since -> transmission-time segment (or -1).
+    // branch b = (pos - n) mod 52; lag = 156 + 208*(51-b) bytes (156 = 3*52
+    // cancels out of the phase, verified against plinfo's 52-segment delay)
+    inline int64_t tx_seg(int pos) const
+    {
+        if (d_n_since < 0)
+            return -1;
+        const int b = (int)(((pos - (d_n_since % 52)) % 52 + 52) % 52);
+        const int64_t P = d_n_since * 207 + pos;
+        const int64_t T = P - (156 + 208 * (51 - b));
+        return T < 0 ? -1 : T / 207;
+    }
+    inline void sick_mark(int pos)
+    {
+        const int64_t T = tx_seg(pos);
+        if (T >= 0) {
+            uint8_t& s = d_sick[T & 511];
+            if (s < 250)
+                s++;
+            d_sick_wr++;
+        }
+    }
 
     // Stats
     int d_packets;
