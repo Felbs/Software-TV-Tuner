@@ -44,6 +44,10 @@ os.environ.update({
     "STVT_EQ_RESEED": "1",
     "STVT_EQ_QUALITY_BAD_RMS": "8",
     "STVT_EQ_CMD_FILE": str(HERE / "eq_cmd.txt"),
+    # SOVA (2026-07-07): trellis-doubt erasures — 174 rescues/75s where
+    # the histogram managed 1-in-586k lifetime; cliff gauntlet win.
+    "STVT_SOVA": "1",
+    "STVT_RS_ERASURES": "14",
 })
 
 ARCHIVE_MER = 15.5        # archive dwells at/above this
@@ -178,7 +182,7 @@ def main():
         dwell_n += 1
         s = oc.sample(9, "Antenna B", 5, 32, secs=300)
         s["event"] = "rf9-ambush"
-        s["ant"] = "rabbit"
+        s["ant"] = "philips"   # port B = Philips since 7/07
         log_event(s)
         hdr = s.get("hdr") or 0
         recent_zero = recent_zero + 1 if hdr == 0 else 0
