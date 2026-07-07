@@ -491,7 +491,10 @@ def base_env(rf):
     env = os.environ.copy()
     env["PATH"] = (r"C:\Program Files\SDRplay\API\x64;C:\ffmpeg\bin;"
                    + env.get("PATH", ""))
-    env.update({"STVT_ANTENNA": antenna_for(rf), "STVT_IFGR": str(ifgr),
+    # user override first (the user picks the antenna; the code's job
+    # is to decode whatever it's given) — belief-map auto as fallback
+    _ant = STATE.get("ant_override") or antenna_for(rf)
+    env.update({"STVT_ANTENNA": _ant, "STVT_IFGR": str(ifgr),
                 "STVT_RFGAIN_SEL": str(rfsel),
                 # hardware AGC servo: IF gain follows the antenna in
                 # real time (setpoint -20 dBFS, validated 2026-07-02),
@@ -964,7 +967,16 @@ canvas{width:100%;image-rendering:pixelated;display:block;border-radius:4px}
 <button id="tabF" onclick="showTab('F')">🎯 SIGNAL FINDER</button>
 <button id="scanBtn" class="scanbtn" onclick="startScan()">📡 SCAN CHANNELS</button></div>
 <div id="status">loading…</div>
-<div id="pageG"><div id="grid">loading guide…</div></div>
+<div id="pageG">
+<div style="margin:4px 0 8px;font-size:12px">📡 antenna:
+<select id="antpick" style="background:#123;color:#cde;border:1px solid #356;padding:2px 6px">
+<option value="auto">auto (belief map)</option>
+<option value="Antenna B">Philips (B)</option>
+<option value="Antenna A">rabbit ears (A)</option>
+<option value="Antenna C">discone (C)</option>
+</select>
+<span style="color:#8aa">— you pick the antenna, the code decodes whatever it's given</span></div>
+<div id="grid">loading guide…</div></div>
 <div id="pageN" style="display:none">
   <div class="cards" id="mathcards"></div>
   <div class="cards" id="knobcards"></div>
@@ -1032,8 +1044,11 @@ document.getElementById('tab'+p).className=t===p?'on':'';}}
 function toast(m){const el=document.getElementById('toast');el.textContent=m;el.style.display='block';
 setTimeout(()=>el.style.display='none',6000)}
 async function tune(rf,prog,virt,name){
-toast('tuning '+virt+' '+name+' — ~30s to picture'+(rf<14?' (VHF — DAB-notch fix 2026-07-04)':''));
-await fetch('/api/tune',{method:'POST',body:JSON.stringify({rf,prog,virt,name})})}
+const antSel=document.getElementById('antpick').value;
+toast('tuning '+virt+' '+name+' — ~30s to picture'
+ +(antSel==='auto'?' · antenna: auto (belief map)':' · antenna: '+antSel)
+ +(rf<14?' (VHF — DAB-notch fix 2026-07-04)':''));
+await fetch('/api/tune',{method:'POST',body:JSON.stringify({rf,prog,virt,name,antenna:antSel})})}
 async function stopTv(){await fetch('/api/stop',{method:'POST'});toast('TV stopped — tuner idle, waterfall resumes')}
 async function rec(virt,title){toast('scheduling '+title+' …');
 const r=await fetch('/api/record',{method:'POST',body:JSON.stringify({virt,title})});toast(await r.text())}
@@ -1521,6 +1536,8 @@ class H(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length", 0))
         req = json.loads(self.rfile.read(n) or b"{}")
         if self.path == "/api/tune":
+            ant = req.get("antenna")
+            STATE["ant_override"] = ant if ant and ant != "auto" else None
             threading.Thread(target=tune,
                              args=(req["rf"], req["prog"], req["virt"],
                                    req.get("name", "")), daemon=True).start()
