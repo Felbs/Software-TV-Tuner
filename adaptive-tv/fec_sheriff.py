@@ -35,6 +35,8 @@ ap.add_argument("--mer", type=float, default=15.0)
 ap.add_argument("--badfrac", type=float, default=0.5)
 ap.add_argument("--cooldown", type=float, default=15.0)
 ap.add_argument("--vitcmd", default="", help="viterbi scalpel command file")
+ap.add_argument("--slipfile", default="", help="mod-12 slip marker file — "
+                "slip = convicted mechanism, restart immediately")
 ap.add_argument("--window", type=int, default=0, help="exit after N s")
 ap.add_argument("--jsonl", default=str(Path(__file__).parent / "cube_log.jsonl"))
 args = ap.parse_args()
@@ -103,6 +105,15 @@ def escalate(reason):
 
 while args.window == 0 or time.time() - t0 < args.window:
     time.sleep(2.0)
+    # mod-12 slip marker: mechanism CONVICTED 2026-07-06 23:5x — no
+    # diagnosis needed, the only cure is a restart. Execute directly.
+    if args.slipfile and Path(args.slipfile).exists():
+        try:
+            Path(args.slipfile).unlink()
+        except OSError:
+            pass
+        scalpel_used = True            # scalpel proven useless for slips
+        escalate("MOD12 SLIP announced by viterbi")   # -> kill tier
     try:
         size = log.stat().st_size
         if size < off:
