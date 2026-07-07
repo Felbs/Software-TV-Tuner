@@ -108,6 +108,41 @@ int atsc_viterbi_soft_impl::work(int noutput_items,
     // NCODERS, so we should always get a mod-NCODERS first packet
     assert(noutput_items % NCODERS == 0);
 
+    // ── 2026-07-06 MOD-12 PHASE SLIP DETECTOR ── the last-suspect
+    // hypothesis: a mid-stream discontinuity rotates the segment-to-
+    // decoder mapping (this block batches rigidly by 12 with no plinfo
+    // realign). If the field-start's position within our batch grid
+    // ever CHANGES, the mapping has slipped — 100% garbage at perfect
+    // upstream health, remissions at 1-in-12, resets useless. Logged
+    // here; the fix (plinfo-driven realign) comes after conviction.
+    {
+        static int last_field_pos = -1;
+        const uint64_t base = nitems_read(0);
+        for (int i = 0; i < noutput_items; i++) {
+            if (plin[i].first_regular_seg_p()) {
+                const int pos = (int)((base + (uint64_t)i) % NCODERS);
+                if (last_field_pos >= 0 && pos != last_field_pos) {
+                    std::fprintf(stderr,
+                                 "[viterbi_soft] MOD12 SLIP: field-start "
+                                 "phase %d -> %d\n", last_field_pos, pos);
+                    // announce to the sheriff for an immediate targeted
+                    // restart (the only cure until the plinfo-realign
+                    // fix lands) — corruption lifetime: minutes -> ~2 s
+                    static const char* SLIP_FILE =
+                        std::getenv("STVT_VIT_SLIP_FILE");
+                    if (SLIP_FILE) {
+                        std::FILE* sf = std::fopen(SLIP_FILE, "wb");
+                        if (sf) {
+                            std::fputs("slip", sf);
+                            std::fclose(sf);
+                        }
+                    }
+                }
+                last_field_pos = pos;
+            }
+        }
+    }
+
     int dbwhere;
     int dbindex;
     int shift;

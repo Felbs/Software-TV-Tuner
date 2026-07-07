@@ -159,10 +159,14 @@ os.environ["STVT_EQ_QUALITY_BAD_RMS"] = "8"
 # command port, escalates to chain kill (the dwell just ends early
 # and the next one starts fresh).
 os.environ["STVT_EQ_CMD_FILE"] = str(HERE / "eq_cmd.txt")
+os.environ["STVT_VIT_CMD_FILE"] = str(HERE / "vit_cmd.txt")
+os.environ["STVT_VIT_SLIP_FILE"] = str(HERE / "vit_slip.txt")
 sheriff = subprocess.Popen(
     [PY, "-u", str(HERE / "fec_sheriff.py"),
      "--log", str(HERE / "cube_chain.log"),
      "--cmd", str(HERE / "eq_cmd.txt"),
+     "--vitcmd", str(HERE / "vit_cmd.txt"),
+     "--slipfile", str(HERE / "vit_slip.txt"),
      "--mer", "14.0", "--badfrac", "0.6", "--cooldown", "20"])
 best = 0
 dwell_n = 0
