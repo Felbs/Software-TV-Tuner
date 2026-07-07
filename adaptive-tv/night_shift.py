@@ -86,9 +86,10 @@ def flutter_fft(rf, antenna, ant, rfg, ifgr, secs=75):
     log_event(out)
 
 
-for probe in [(34, "Antenna B", "rabbit", 2, 32),
-              (34, "Antenna A", "discone", 2, 32),   # cross-antenna: does
-              (7, "Antenna B", "rabbit", 5, 32)]:    # 0.54 Hz follow B?
+# port map since 7/07 rewire: rabbit=A, philips=B, discone=C
+for probe in [(34, "Antenna A", "rabbit", 2, 32),
+              (34, "Antenna B", "philips", 2, 32),   # cross-antenna: does
+              (7, "Antenna C", "discone", 5, 32)]:   # 0.54 Hz follow rabbit?
     try:
         flutter_fft(*probe)
     except Exception as e:
@@ -117,7 +118,7 @@ def rf9_recent_mer():
             o = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if o.get("rf") == 9 and o.get("ant") == "rabbit" \
+        if o.get("rf") == 9 and o.get("ant") == "philips" \
                 and "event" not in o:
             return o.get("mer_med")
     return None

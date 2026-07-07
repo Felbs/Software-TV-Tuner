@@ -733,6 +733,10 @@ def tune(rf, prog, virtual, name):
                 env.update({"STVT_RS": "erasure", "STVT_RS_ERASURES": "14",
                             "STVT_SOVA": "1",
                             "STVT_EQ_DFE": "1",
+                            # anchor promoted 7/07: on RF7 canyon replay,
+                            # DFE+anchor halves bad pkts (46%->21%) and
+                            # adds +51% frames vs no-DFE; inert elsewhere
+                            "STVT_EQ_DFE_ANCHOR": "1",
                             "STVT_EQ_RESEED": "1",
                             "STVT_EQ_QUALITY_BAD_RMS": "8"})
                 if GEN[0] != my_gen: return
@@ -1326,7 +1330,10 @@ document.getElementById('scinotes').innerHTML=
 '<b>Mod-12 guard</b>: a stream hiccup rotates the viterbi\\'s 12-decoder grid (was: minutes of garbage); the guard drops ≤11 segments and heals it in one field. '+
 '<b>FEC sheriff</b>: Reed-Solomon truth polices the adaptive layers — surgery, then the viterbi scalpel, then restart. '+
 '<b>Dawn forecast</b>: the Sterling VA weather balloon\\'s refractivity profile predicts tropo windows. '+
-'<b>Beacon oracle</b>: FM stations as free path-sounders — a hot Baltimore path says go fish Baltimore TV.';
+'<b>Beacon oracle</b>: FM stations as free path-sounders — a hot Baltimore path says go fish Baltimore TV. '+
+'<b>DFE anchor</b> (7/07): the echo-canceller\\'s feedback taps trained against the pilot anchor — on canyon multipath it halves bad packets (46%→21%) and adds +51% frames; rides automatically in cliff mode. '+
+'<b>GMD ladder</b> (7/07): Forney\\'s 1966 iterate-between-the-codes algorithm, powered by the viterbi\\'s own per-byte doubt (SOVA) — tries 2,4,…16 erasures and keeps the first answer that passes four independent truth checks. '+
+'<b>E7 second opinion</b>: decode the same airwaves twice with different equalizer trajectories and each pass rescues DIFFERENT picture groups — the healed merge splices clean twins over damage (never drops a frame).';
 }catch(e){}}
 // ── waterfall v2: client row buffer + pan/zoom + channel overlay ──
 let lastRow=0, wfFreqs=null, wfChans=null, tunedMhz=null;

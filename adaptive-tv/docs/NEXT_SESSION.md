@@ -51,8 +51,16 @@
 - E7 DONE + WIN (e7_vote.py): heal-merge (splice clean same-PTS GOP
   twins from sibling decodes over damaged ones, never drop). Impulse
   specimen: 799 frames kept, decode errors 715→688. Diversity proven.
-- DFE anchor retest: INDETERMINATE (rf15 specimens ~96% dead in replay;
-  dead material can't discriminate EQ questions). Stays opt-in.
+- DFE ANCHOR PROMOTED (the night's biggest win): fresh RF7 canyon
+  specimen (discone, 46% bad, breathing multipath) three-arm replay:
+  no-DFE 629 frames / DFE 860 / DFE+ANCHOR 951 (+51%, bad 46%->21%).
+  Impulse regression check: equal-best. v1.2's kill verdict was the
+  wrong disease — on echo channels the anchor is real. Now default in
+  panel cliff-mode env + ambush3.
+- Fresh specimens: discone_rf7_canyon.cs16 (46% bad breathing multipath
+  = THE echo testbed) + philips_rf15_evening.cs16 (0.4% bad healthy
+  control). night_shift port maps fixed (flutter probes + tripwire were
+  still pre-rewire).
 - TURBO_BLUEPRINT.md: stage-2 RS-truth trellis pinning = the crown-jewel
   post-Fable build (~1-1.5 dB nobody ships).
 
