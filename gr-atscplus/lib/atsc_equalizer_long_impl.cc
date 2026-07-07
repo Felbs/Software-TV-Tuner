@@ -1143,6 +1143,27 @@ int atsc_equalizer_long_impl::general_work(int noutput_items,
                                  cmd, ok ? "" : " (unknown)");
                 }
             }
+            // MOD-12 GUARD detection: at every field sync the emitted
+            // data-segment count must be ≡ 0 (mod 12). If not, a stream
+            // discontinuity rotated the viterbi grid — schedule a drop
+            // of the deficit so the next segments realign it.
+            {
+                static const bool MOD12_G = []() {
+                    const char* p = std::getenv("STVT_EQ_MOD12_GUARD");
+                    return p && std::atoi(p) != 0;
+                }();
+                if (MOD12_G && d_mod12_count != 0 && d_mod12_drop == 0) {
+                    // drop k=c: next field start lands at (c + 312 - c)
+                    // ≡ 0 (mod 12). Do NOT reset the counter — it must
+                    // keep tracking absolute emitted phase or the
+                    // arithmetic oscillates (drops every field forever).
+                    d_mod12_drop = d_mod12_count;
+                    std::fprintf(stderr,
+                                 "[eq-long] MOD12 GUARD: phase %d at FS — "
+                                 "dropping %d segments to realign\n",
+                                 d_mod12_count, d_mod12_drop);
+                }
+            }
             // RLS field-sync adaptation when STVT_EQ_RLS=1, else LMS (default).
             static const bool RLS_ENABLED = []() {
                 const char* p = std::getenv("STVT_EQ_RLS"); return p && std::atoi(p) != 0;
@@ -1204,12 +1225,28 @@ int atsc_equalizer_long_impl::general_work(int noutput_items,
             // passive filter when STVT_EQ_DD_MU is unset/0).
             filterN_dd(data_mem, data_mem2, ATSC_DATA_SEGMENT_LENGTH);
 
-            memcpy(&out[output_produced * ATSC_DATA_SEGMENT_LENGTH],
-                   data_mem2,
-                   ATSC_DATA_SEGMENT_LENGTH * sizeof(float));
+            // ── MOD-12 GUARD (2026-07-07, the convicted mechanism's true
+            // fix) ── each field = 312 data segments (26x12), so at every
+            // FS the emitted count mod 12 must be 0. A discontinuity
+            // breaks that and rotates the downstream viterbi's rigid
+            // batch mapping (100% garbage, 1-in-12 remissions). Cure:
+            // swallow <=11 segments (~1 ms) and the grid realigns —
+            // self-heal within one field. STVT_EQ_MOD12_GUARD=1.
+            static const bool MOD12_GUARD = []() {
+                const char* p = std::getenv("STVT_EQ_MOD12_GUARD");
+                return p && std::atoi(p) != 0;
+            }();
+            if (MOD12_GUARD && d_mod12_drop > 0) {
+                d_mod12_drop--;               // consume, don't produce
+            } else {
+                memcpy(&out[output_produced * ATSC_DATA_SEGMENT_LENGTH],
+                       data_mem2,
+                       ATSC_DATA_SEGMENT_LENGTH * sizeof(float));
 
-            plinfo pli_out(d_flags, d_segno);
-            out_pl[output_produced++] = pli_out;
+                plinfo pli_out(d_flags, d_segno);
+                out_pl[output_produced++] = pli_out;
+                d_mod12_count = (d_mod12_count + 1) % 12;
+            }
         }
 
         memcpy(data_mem, &data_mem[ATSC_DATA_SEGMENT_LENGTH], NPRETAPS * sizeof(float));

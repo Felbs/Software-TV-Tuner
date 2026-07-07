@@ -47,6 +47,14 @@ private:
     bool d_dfe_suspend = false;       // E5 sheriff can pull the DFE offline
     void dfe_push(float sym, int nfb);
 
+    // 2026-07-07 MOD-12 GUARD: each field emits exactly 312 data
+    // segments (26x12), so at every FS the emitted count mod 12 must
+    // be 0. A mid-stream discontinuity breaks that — and rotates the
+    // downstream viterbi's rigid 12-batch mapping (the convicted
+    // corruption/DEAF mechanism). Cure: drop <=11 segments to realign.
+    int d_mod12_count = 0;            // data segments emitted, mod 12
+    int d_mod12_drop = 0;             // segments still to drop
+
     void filterN(const float* input_samples, float* output_samples, int nsamples);
     void adaptN(const float* input_samples,
                 const float* training_pattern,
