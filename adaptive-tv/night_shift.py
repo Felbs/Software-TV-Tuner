@@ -48,6 +48,10 @@ try:
     subprocess.run([PY, "-u", str(HERE / "dawn_score2.py")], timeout=180)
 except Exception as e:
     log_event({"event": "dawn-score2-error", "err": str(e)[:80]})
+try:
+    subprocess.run([PY, "-u", str(HERE / "beacon_oracle.py")], timeout=300)
+except Exception as e:
+    log_event({"event": "oracle-error", "err": str(e)[:80]})
 
 # ── phase 0: flutter probes (Physics Ladder P1) ───────────────────
 # 0.54 Hz periodic fading found on RF34/rabbit at 23:45 (~20 dB above
