@@ -258,18 +258,59 @@ int atsc_rs_decoder_erasure_impl::decode_block(const unsigned char* in207,
     int no_eras = 0;
     int eras_pos[20];
     if (rel207) {
-        // ── SOVA ERASURES (2026-07-07) ── the trellis's own per-byte
-        // doubt marks the erasures. Correctly-placed erasures are worth
-        // 2x errors (2t+s<=20); the histogram guessing this replaces
-        // rescued 1 packet in 586k attempts.
+        // ── GMD / FORNEY DECODING (2026-07-07 night) ── the canonical
+        // iterative decoding of concatenated codes, powered by SOVA
+        // reliabilities: walk the erasure ladder (2, 4, ... 16 weakest
+        // bytes) and take the FIRST solution that survives the full
+        // guard battery. One fixed pattern wastes correction power
+        // erasing good bytes; GMD finds each codeword's sweet size.
         std::vector<std::pair<int, int>> weak;   // (reliability, pos)
         weak.reserve(CODE_LEN);
         for (int i = 0; i < CODE_LEN; i++)
             weak.emplace_back(rel207[i], i);
         std::sort(weak.begin(), weak.end());
-        no_eras = std::min(d_effective_max_erasures, 16);
-        for (int i = 0; i < no_eras; i++)
-            eras_pos[i] = weak[i].second + PAD_BYTES;
+        const int smax = std::min(d_effective_max_erasures, 16);
+        for (int s = 2; s <= smax; s += 2) {
+            for (int i = 0; i < s; i++)
+                eras_pos[i] = weak[i].second + PAD_BYTES;
+            std::memset(tmp, 0, PAD_BYTES);
+            std::memcpy(tmp + PAD_BYTES, in207, CODE_LEN);
+            d_erasure_decodes++;
+            d_log_eras_dec++;
+            int ng = decode_rs_char(d_rs, tmp, eras_pos, s);
+            if (ng < 0)
+                continue;
+            // guard battery per trial: sync byte + TS invariants + PID
+            if (tmp[PAD_BYTES] != 0x47) {
+                d_miscorrections++;
+                continue;
+            }
+            const uint16_t pid =
+                ((tmp[PAD_BYTES + 1] & 0x1F) << 8) | tmp[PAD_BYTES + 2];
+            const bool tei = (tmp[PAD_BYTES + 1] & 0x80) != 0;
+            const int afc = (tmp[PAD_BYTES + 3] >> 4) & 0x3;
+            if (tei || afc == 0 ||
+                (d_pid_seen_total > 200 && d_pid_seen[pid] == 0)) {
+                d_guard2_rejects++;
+                continue;
+            }
+            // accepted: a GMD rescue
+            d_erasure_successes++;
+            d_log_eras_ok++;
+            for (int i = 0; i < CODE_LEN; i++) {
+                if (tmp[PAD_BYTES + i] != in207[i]) {
+                    int v = d_hist_pos[i] + 1;
+                    if (v > 2000) v = 2000;
+                    d_hist_pos[i] = v;
+                }
+            }
+            std::memcpy(out188, tmp + PAD_BYTES, PKT_LEN);
+            d_hist_count++;
+            return ng;
+        }
+        // ladder exhausted — uncorrectable
+        std::memcpy(out188, in207, PKT_LEN);
+        return -1;
     } else {
         // legacy: empirical position histogram
         if (d_hist_count < 20) {

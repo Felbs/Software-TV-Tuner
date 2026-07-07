@@ -787,11 +787,24 @@ def tune(rf, prog, virtual, name):
                           "launching player"
                           + (" (forced-video mode)" if cliff_mode else "")
                           + watch_note)
-            watch_args = [PY, "-u", str(HERE / "tv_watch.py"), str(prog)]
-            # forced-video only at the true cliff edge (was: any cliff_mode
-            # engagement — muzzled audio at 16.2 dB, see 15.8 note above)
-            if cliff_mode and mer_now < 15.8:
-                watch_args.append("marginal")   # show-all/no-skip forced video
+            # HARVEST MODE (2026-07-07): below ~17 the raw stream carries
+            # visible tears (user's 16.8 channel 9: play-freeze-glitch).
+            # The harvester feeds the player ONLY complete clean GOPs —
+            # motion at a gentler rhythm instead of corruption.
+            # (harvest-live scoped to true-cliff only 2026-07-07 late:
+            # its splice stream confuses mpv's prober at probe time —
+            # bench-proven on finished files, live variant needs demuxer
+            # work; above 15 the proven tv_watch path plays with sound)
+            if mers and mer_now < 15.0:
+                watch_args = [PY, "-u", str(HERE / "harvest_player.py"),
+                              str(TOOLS / "data" / "tv_live" / "live.ts"),
+                              "--prog", str(prog), "--follow"]
+                set_stage(75, f"stream proven — HARVEST MODE "
+                              f"(MER {mer_now:.1f}: only true frames pass)")
+            else:
+                watch_args = [PY, "-u", str(HERE / "tv_watch.py"), str(prog)]
+                if cliff_mode and mer_now < 15.8:
+                    watch_args.append("marginal")
             watch_log = open(HERE / "lab" / "panel_watch.log", "w")
             subprocess.Popen(watch_args,
                              env=env, stdout=watch_log,
