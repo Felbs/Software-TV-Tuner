@@ -43,6 +43,10 @@ private:
     std::array<uint16_t, 8192> d_pid_seen{};
     uint32_t d_pid_seen_total = 0;
     int d_guard2_rejects = 0;
+    // GMD ladder bookkeeping (2026-07-07): trial-level counts kept apart so
+    // era_dec/miscorr/g2rej keep their pre-GMD meanings for sheriff/parsers
+    long d_gmd_trials = 0;
+    int d_gmd_rej = 0;
 
     // Stats
     int d_packets;

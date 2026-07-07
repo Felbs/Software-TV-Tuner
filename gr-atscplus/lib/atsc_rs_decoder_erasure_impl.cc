@@ -270,19 +270,28 @@ int atsc_rs_decoder_erasure_impl::decode_block(const unsigned char* in207,
             weak.emplace_back(rel207[i], i);
         std::sort(weak.begin(), weak.end());
         const int smax = std::min(d_effective_max_erasures, 16);
-        for (int s = 2; s <= smax; s += 2) {
+        // STVT_RS_GMD=0 restores the single fixed-smax attempt (A/B hook)
+        static const bool GMD = []() {
+            const char* p = std::getenv("STVT_RS_GMD");
+            return !(p && p[0] == '0');
+        }();
+        const int sstart = GMD ? 2 : smax;
+        // one "erasure decode" per ladder walk (keeps era_dec's meaning);
+        // per-trial counts go to gmd_trials/gmd_rej
+        d_erasure_decodes++;
+        d_log_eras_dec++;
+        for (int s = sstart; s <= smax; s += 2) {
             for (int i = 0; i < s; i++)
                 eras_pos[i] = weak[i].second + PAD_BYTES;
             std::memset(tmp, 0, PAD_BYTES);
             std::memcpy(tmp + PAD_BYTES, in207, CODE_LEN);
-            d_erasure_decodes++;
-            d_log_eras_dec++;
+            d_gmd_trials++;
             int ng = decode_rs_char(d_rs, tmp, eras_pos, s);
             if (ng < 0)
                 continue;
             // guard battery per trial: sync byte + TS invariants + PID
             if (tmp[PAD_BYTES] != 0x47) {
-                d_miscorrections++;
+                d_gmd_rej++;
                 continue;
             }
             const uint16_t pid =
@@ -291,7 +300,7 @@ int atsc_rs_decoder_erasure_impl::decode_block(const unsigned char* in207,
             const int afc = (tmp[PAD_BYTES + 3] >> 4) & 0x3;
             if (tei || afc == 0 ||
                 (d_pid_seen_total > 200 && d_pid_seen[pid] == 0)) {
-                d_guard2_rejects++;
+                d_gmd_rej++;
                 continue;
             }
             // accepted: a GMD rescue
@@ -537,7 +546,7 @@ int atsc_rs_decoder_erasure_impl::work(int noutput_items,
                      "(last5s: pkts=%d era_dec=%d era_ok=%d bad=%d sync=%d)  "
                      "weak_pos[%d:%d,%d:%d,%d:%d]  "
                      "vit_metric=%.3f vit_max=%.3f tags=%d eff_eras=%d "
-                     "g2rej=%d\n",
+                     "g2rej=%d gmd_trials=%ld gmd_rej=%d\n",
                      elapsed_ms / 1000.0,
                      d_packets, d_errors_corrected,
                      d_erasure_decodes, d_erasure_successes, d_miscorrections,
@@ -547,7 +556,7 @@ int atsc_rs_decoder_erasure_impl::work(int noutput_items,
                      top3[0], top3v[0], top3[1], top3v[1], top3[2], top3v[2],
                      d_recent_metric, d_recent_metric_max,
                      d_metric_tag_count, d_effective_max_erasures,
-                     d_guard2_rejects);
+                     d_guard2_rejects, d_gmd_trials, d_gmd_rej);
         d_last_log = now;
         d_log_packets  = 0;
         d_log_eras_dec = 0;

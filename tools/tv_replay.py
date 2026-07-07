@@ -100,6 +100,10 @@ class ReplayTopBlock(gr.top_block):
         _ext = str(iq_path).lower()
         _fmt = os.environ.get("STVT_IQ_FORMAT",
                               "cs16" if _ext.endswith((".cs16", ".sc16")) else "cf32")
+        # STVT_IQ_SKIP: drop the first N complex samples — decode-diversity
+        # knob for E7 voting (a different start gives the EQ/FPLL a different
+        # adaptation trajectory over the identical material).
+        _skip = int(os.environ.get("STVT_IQ_SKIP", "0"))
         if _fmt == "cs16":
             _fsrc = blocks.file_source(gr.sizeof_short, str(iq_path), repeat)
             _s2c  = blocks.interleaved_short_to_complex(False, False, 32767.0)
@@ -109,6 +113,11 @@ class ReplayTopBlock(gr.top_block):
         else:
             src = blocks.file_source(gr.sizeof_gr_complex, str(iq_path), repeat)
             LOG.info(f"input: CF32 {iq_path}")
+        if _skip:
+            _sk = blocks.skiphead(gr.sizeof_gr_complex, _skip)
+            self.connect(src, _sk)
+            src = _sk
+            LOG.info(f"skiphead: {_skip} samples")
 
         # SPS = internal oversampling (samples/symbol). 1.5 = stock 16.14 MS/s.
         # Lowering it cuts the matched-filter/resampler + all front-end blocks
@@ -239,6 +248,19 @@ class ReplayTopBlock(gr.top_block):
                      (viterbi, deinterleaver), (deinterleaver, rs), (rs, derand)]:
             self.connect((a, 0), (b, 0))
             self.connect((a, 1), (b, 1))
+        # ── SOVA reliability plane (2026-07-07) — mirror of tv_live.py ──
+        if (int(os.environ.get("STVT_SOVA", "0"))
+                and os.environ.get("STVT_VITERBI") == "soft"
+                and os.environ.get("STVT_RS") == "erasure"):
+            dei_rel = atscplus.atsc_deinterleaver()
+            self.connect((viterbi, 2), (dei_rel, 0))
+            self.connect((viterbi, 1), (dei_rel, 1))
+            self.connect((dei_rel, 0), (rs, 2))
+            _rel_pl_sink = blocks.null_sink(gr.sizeof_char * 4)
+            self.connect((dei_rel, 1), _rel_pl_sink)
+            self._dei_rel = dei_rel
+            self._rel_pl_sink = _rel_pl_sink
+            LOG.info("SOVA: reliability plane wired (replay)")
         self.connect(derand, depad)
 
         if os.environ.get("STVT_TEISCRUB", "1") == "1":
