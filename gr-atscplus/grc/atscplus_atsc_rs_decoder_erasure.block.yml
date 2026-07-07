@@ -1,0 +1,41 @@
+id: atscplus_atsc_rs_decoder_erasure
+label: ATSC+ RS Decoder (erasure, narrating)
+category: '[ATSC+]'
+flags: [ python ]
+
+documentation: |-
+    Reed-Solomon (207,187) decoder with empirical-erasure retry,
+    multi-layer miscorrection guard (sync byte + PID witness + TS
+    invariants) and 5-second FEC telemetry on stderr (packets,
+    corrections, failures, viterbi confidence). max_erasures 0 =
+    telemetry-only stock behavior; ceiling 16 (never zero-margin).
+
+parameters:
+-   id: max_erasures
+    label: Max erasures
+    dtype: int
+    default: '0'
+
+inputs:
+-   domain: stream
+    dtype: byte
+    vlen: 207
+-   domain: stream
+    label: plinfo
+    dtype: short
+    vlen: 2
+
+outputs:
+-   domain: stream
+    dtype: byte
+    vlen: 188
+-   domain: stream
+    label: plinfo
+    dtype: short
+    vlen: 2
+
+templates:
+    imports: from gnuradio import atscplus
+    make: atscplus.atsc_rs_decoder_erasure(${max_erasures})
+
+file_format: 1
