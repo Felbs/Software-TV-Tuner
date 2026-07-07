@@ -19,9 +19,23 @@
    is honest; DEAF trigger armed).
 4. Reseed: grep chain logs for "QUALITY LKG reset" during ambush dwells.
 
+## SOLVED CASE (01:50, read this first): DFE healthy-channel corruption
+specimen_20260706_212651.cs16 (kept in specimens/): caught live at MER
+16.87 / 56k bad. Stage-1 = CLEAN-RF. Replay of the SAME IQ with DFE off
+= 17 headers, decodes fine. Corruption is 100% DFE-internal. Mechanism
+candidate: confidently-wrong equilibrium — wrong decisions + feedback
+make |e| small, the gate can't distinguish right from self-consistent,
+fb taps absorb the lie between FS flushes. Fix directions: fb energy
+cap; decision-vs-training crosscheck at each FS (fs_err spike while
+data-e small = the signature); or E5's RS-fail discipline (below).
+Same failure CLASS as v1.2's anchor mirage and (suspected) RF15 DEAF:
+adaptation graded by a reference it can influence.
+
 ## Build queue (ranked)
 1. E5 — RS-fail-disciplined adaptation: ground truth for the DFE anchor
    (v1.2's mirage: self-referential fs_err; see memory + DFE_BLUEPRINT).
+   NOW THREE CONVICTIONS deep (anchor mirage, DFE equilibrium, DEAF
+   suspicion) — this is unambiguously the next big build.
 2. Philips session (evening): swap onto B, probe RF15 (close-in echo
    escape hypothesis), full-cube column; then re-aim rabbits (flatness
    tone) when swapped back.
