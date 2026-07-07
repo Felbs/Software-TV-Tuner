@@ -625,16 +625,17 @@ def e7_run(secs=30):
             hm = re.search(r"(\d+)/(\d+) damaged GOPs healed",
                            r.stdout or "")
             n_healed = int(hm.group(1)) if hm else 0
-            # only pop the replay when the vote actually rescued GOPs —
-            # a no-donor replay next to live TV is just a confusing twin
+            # NEVER auto-open a window (three user-confusions on 7/07:
+            # a surprise twin next to live TV reads as a broken tuner).
+            # The replay waits for the ▶ button in the science card.
             if n_healed > 0 and healed.exists() \
                     and healed.stat().st_size > 500_000:
-                subprocess.Popen([_MPV, str(healed), "--force-window=yes",
-                                  "--keep-open=yes",
-                                  "--title=E7 Second Opinion "
-                                  f"({n_healed} GOPs healed)"])
+                E7["replay"] = n_healed
+                E7["status"] += (f" · {n_healed} GOP(s) healed — replay "
+                                 "ready, press ▶")
             elif E7["status"].startswith("done"):
-                E7["status"] += " · no rescues needed — replay not shown"
+                E7["replay"] = 0
+                E7["status"] += " · no rescues needed"
         except Exception as e:
             E7["status"] = f"error: {e}"
 
@@ -1420,7 +1421,8 @@ if(SC.timeknob){sc+=card('TIME KNOB',SC.timeknob.now_owner||'?','best hour: '+(S
 if(SC.guard_fires!==undefined)sc+=card('MOD-12 GUARD',SC.guard_fires,'slips healed this session',SC.guard_fires>20?'warn':'good');
 if(SC.sheriff)sc+=card('FEC SHERIFF',SC.sheriff.action,'last action · '+SC.sheriff.t);
 if(SC.dawn)sc+=card('DAWN FORECAST',SC.dawn.score,SC.dawn.verdict);
-if(SC.e7)sc+=card('E7 SECOND OPINION',SC.e7.length>34?SC.e7.slice(0,34)+'…':SC.e7,SC.e7,SC.e7.startsWith('done')?'good':(SC.e7.startsWith('error')?'bad':'warn'));
+if(SC.e7){sc+=card('E7 SECOND OPINION',SC.e7.length>34?SC.e7.slice(0,34)+'…':SC.e7,SC.e7,SC.e7.startsWith('done')?'good':(SC.e7.startsWith('error')?'bad':'warn'));
+if(SC.e7.includes('replay ready'))sc+='<div style="margin:4px 0"><button onclick="fetch(\'/api/e7/play\',{method:\'POST\',headers:{\'Content-Type\':\'application/json\'},body:\'{}\'})">▶ watch healed replay (recording, not live)</button></div>'}
 if(SC.oracle&&SC.oracle.paths)sc+=card('BEACON ORACLE',Object.entries(SC.oracle.paths).map(([k,v])=>k.slice(0,4)+':'+(v===null?'—':v)).join(' '),'path dB vs baseline · '+SC.oracle.t);
 document.getElementById('sciencecards').innerHTML=sc;
 document.getElementById('scinotes').innerHTML=
@@ -1701,6 +1703,16 @@ class H(BaseHTTPRequestHandler):
         elif self.path == "/api/e7":
             e7_run(int(req.get("secs", 30)))
             self._send('"second opinion started"')
+        elif self.path == "/api/e7/play":
+            hp = HERE / "lab" / "e7_healed.ts"
+            if hp.exists() and hp.stat().st_size > 500_000:
+                subprocess.Popen(
+                    [_MPV, str(hp), "--force-window=yes", "--keep-open=yes",
+                     "--geometry=45%",
+                     "--title=E7 REPLAY of the last 30 s (not live TV)"])
+                self._send('"replay opened"')
+            else:
+                self._send('"no healed replay yet"')
         else:
             self.send_error(404)
 
