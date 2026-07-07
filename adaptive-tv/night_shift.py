@@ -149,6 +149,11 @@ os.environ["STVT_EQ_TAP_CACHE"] = str(CACHE)
 # DFE v1.1: gauntlet-proven marginal-channel weapon (RF7 sub-cliff:
 # +58 hdr/sample, loss 80%->21%). RF9 at dawn is exactly its regime.
 os.environ["STVT_EQ_DFE"] = "1"
+# Reseed-on-collapse (built tonight): quality resets re-read the tap
+# cache FILE (refreshed by each dwell's LKG saves) — recovery jumps to
+# current knowledge instead of crawling. First live exercise = tonight.
+os.environ["STVT_EQ_RESEED"] = "1"
+os.environ["STVT_EQ_QUALITY_BAD_RMS"] = "8"
 best = 0
 dwell_n = 0
 recent_zero = 0

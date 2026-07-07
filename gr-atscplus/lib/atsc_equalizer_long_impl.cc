@@ -859,7 +859,50 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
             auto _ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                             _now - d_last_quality_reset).count();
             if (_ms >= QUALITY_DEBOUNCE_MS) {
-                for (int k = 0; k < NTAPS; k++) d_taps[k] = d_taps_lkg[k];
+                // 2026-07-07 RESEED-ON-COLLAPSE (STVT_EQ_RESEED=1): re-read
+                // the tap-cache FILE instead of the in-RAM snapshot. The
+                // file can be refreshed mid-run by outside intelligence
+                // (Wiener solve of a fresh CIR, a better session's LKG) —
+                // recovery becomes a jump to current knowledge, not a
+                // crawl back from a stale snapshot.
+                static const bool RESEED = []() {
+                    const char* p = std::getenv("STVT_EQ_RESEED");
+                    return p && std::atoi(p) != 0;
+                }();
+                bool reseeded = false;
+                if (RESEED) {
+                    if (const char* cf =
+                            std::getenv("STVT_EQ_TAP_CACHE_FILE")) {
+                        std::FILE* f = std::fopen(cf, "rb");
+                        if (f) {
+                            uint32_t mg = 0, n = 0;
+                            std::vector<float> t(NTAPS);
+                            if (std::fread(&mg, 4, 1, f) == 1 &&
+                                std::fread(&n, 4, 1, f) == 1 &&
+                                mg == 0x54415043u && n == (uint32_t)NTAPS &&
+                                std::fread(t.data(), 4, NTAPS, f)
+                                    == (size_t)NTAPS) {
+                                double e2 = 0.0;
+                                bool fin = true;
+                                for (int k = 0; k < NTAPS; k++) {
+                                    if (!std::isfinite(t[k])) {
+                                        fin = false;
+                                        break;
+                                    }
+                                    e2 += (double)t[k] * (double)t[k];
+                                }
+                                if (fin && e2 > 0.01 && e2 < 2500.0) {
+                                    for (int k = 0; k < NTAPS; k++)
+                                        d_taps[k] = t[k];
+                                    reseeded = true;
+                                }
+                            }
+                            std::fclose(f);
+                        }
+                    }
+                }
+                if (!reseeded)
+                    for (int k = 0; k < NTAPS; k++) d_taps[k] = d_taps_lkg[k];
                 d_last_quality_reset = _now;
                 static uint64_t quality_resets = 0;
                 quality_resets++;
