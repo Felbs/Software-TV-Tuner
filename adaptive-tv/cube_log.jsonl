@@ -607,3 +607,261 @@
 {"event": "trim", "rf": 7, "ant": "rabbit", "ifgr": 26, "mer_med": 13.49, "t": "16:47:00"}
 {"event": "trim", "rf": 7, "ant": "rabbit", "ifgr": 38, "mer_med": 13.55, "t": "16:47:21"}
 {"event": "end", "cycles": 24, "t": "17:00:00"}
+{"event": "dawn-score", "score": 6.0, "verdict": "decent dawn \u2014 normal window likely", "temp_c": 27.0, "dew_c": 23.0, "wind_kt": 4.0, "sky": "BKN", "press_hpa": 1014.2, "t": "21:23:00"}
+{"event": "SHERIFF", "action": "dfe0+lkg", "reason": "confidently-wrong: MER 16.9 with 100% RS fail", "t": "21:37:32"}
+{"event": "SHERIFF", "action": "dfe0+lkg", "reason": "confidently-wrong: MER 16.7 with 100% RS fail", "t": "21:38:45"}
+{"event": "SHERIFF", "action": "dfe0+lkg", "reason": "confidently-wrong: MER 16.8 with 100% RS fail", "t": "21:38:55"}
+{"event": "SHERIFF", "action": "dfe0+lkg", "reason": "confidently-wrong: MER 16.8 with 100% RS fail", "t": "21:39:06"}
+{"event": "SHERIFF", "action": "dfe0+lkg", "reason": "confidently-wrong: MER 16.8 with 100% RS fail", "t": "21:39:24"}
+{"event": "SHERIFF", "action": "dfe0+lkg", "reason": "confidently-wrong: MER 16.9 with 100% RS fail", "t": "21:39:35"}
+{"event": "SHERIFF", "action": "dfe0+lkg", "reason": "confidently-wrong: MER 16.6 with 100% RS fail", "t": "21:40:09"}
+{"event": "SHERIFF", "action": "dfe0+lkg", "reason": "confidently-wrong: MER 16.5 with 100% RS fail", "t": "21:40:20"}
+{"event": "SHERIFF", "action": "dfe0+lkg", "reason": "confidently-wrong: MER 16.9 with 100% RS fail", "t": "21:40:30"}
+{"event": "SHERIFF", "action": "dfe0+lkg", "reason": "confidently-wrong: MER 16.9 with 100% RS fail", "t": "21:40:41"}
+{"event": "SHERIFF", "action": "dfe0+lkg", "reason": "confidently-wrong: MER 17.1 with 100% RS fail", "t": "21:40:59"}
+{"event": "SHERIFF", "action": "dfe0+lkg", "reason": "confidently-wrong: MER 16.8 with 100% RS fail", "t": "21:41:10"}
+{"event": "SHERIFF", "action": "dfe0+lkg", "reason": "confidently-wrong: MER 16.7 with 100% RS fail", "t": "21:43:42"}
+{"event": "SHERIFF", "action": "dfe0+lkg", "reason": "confidently-wrong: MER 16.7 with 100% RS fail", "t": "21:44:01"}
+{"event": "SHERIFF", "action": "dfe0+lkg", "reason": "confidently-wrong: MER 16.8 with 100% RS fail", "t": "21:44:11"}
+{"event": "SHERIFF", "action": "dfe0+lkg", "reason": "confidently-wrong: MER 17.0 with 100% RS fail", "t": "21:49:45"}
+{"event": "SHERIFF", "action": "dfe0+lkg", "reason": "confidently-wrong: MER 17.0 with 100% RS fail", "t": "22:47:00"}
+{"event": "SHERIFF", "action": "SCALPEL (viterbi reset)", "reason": "tap surgery failed, still 100% RS fail", "t": "22:47:10"}
+{"event": "SHERIFF", "action": "CHAIN-KILL", "reason": "tap surgery failed, still 100% RS fail", "t": "22:47:20"}
+{"event": "flutter-probe", "rf": 34, "ant": "rabbit", "mer_med": 16.99, "n": 385, "peak_hz": 0.4, "peak_db": 15.1, "t": "23:16:48"}
+{"event": "flutter-probe", "rf": 34, "ant": "discone", "mer_med": 9.74, "n": 193, "peak_hz": 0.23, "peak_db": 26.6, "t": "23:18:04"}
+{"event": "flutter-probe", "rf": 7, "ant": "rabbit", "mer_med": 15.3, "n": 338, "peak_hz": 0.21, "peak_db": 10.1, "t": "23:19:19"}
+{"event": "start", "until": "2026-07-07 05:00:00.965869", "t": "23:19:19"}
+{"fs_n": 103, "mer_med": 15.12, "mer_p90": 15.39, "mean_x": 0.0397, "hdr": 92, "vit": 2974.263, "vit_max": 4914.772, "cyc": 1, "rf": 7, "ant": "rabbit", "rfg": 5, "ifgr": 32, "verdict": "DECODE", "t": "23:19:48"}
+{"fs_n": 93, "mer_med": 13.17, "mer_p90": 13.57, "mean_x": 0.0408, "hdr": 0, "vit": 3534.783, "vit_max": 9508.3, "cyc": 1, "rf": 9, "ant": "rabbit", "rfg": 5, "ifgr": 32, "verdict": "CLOSE", "t": "23:20:16"}
+{"fs_n": 41, "mer_med": 10.94, "mer_p90": 15.74, "mean_x": 0.0363, "hdr": 0, "vit": 2776.89, "vit_max": 4647.898, "cyc": 1, "rf": 15, "ant": "rabbit", "rfg": 1, "ifgr": 26, "verdict": "FLOOR", "t": "23:20:44"}
+{"fs_n": 97, "mer_med": 16.0, "mer_p90": 16.34, "mean_x": 0.0399, "hdr": 67, "vit": 4042.978, "vit_max": 9764.183, "cyc": 1, "rf": 21, "ant": "rabbit", "rfg": 2, "ifgr": 26, "verdict": "DECODE", "t": "23:21:13"}
+{"fs_n": 95, "mer_med": 16.98, "mer_p90": 17.23, "mean_x": 0.0377, "hdr": 85, "vit": 2280.213, "vit_max": 9371.386, "cyc": 1, "rf": 34, "ant": "rabbit", "rfg": 2, "ifgr": 32, "verdict": "DECODE", "t": "23:21:41"}
+{"fs_n": 99, "mer_med": 16.83, "mer_p90": 17.42, "mean_x": 0.0352, "hdr": 136, "vit": 5103.672, "vit_max": 9722.692, "cyc": 1, "rf": 36, "ant": "rabbit", "rfg": 3, "ifgr": 40, "verdict": "DECODE", "t": "23:22:09"}
+{"fs_n": 101, "mer_med": 14.55, "mer_p90": 14.95, "mean_x": 0.04, "hdr": 29, "vit": 5216.768, "vit_max": 9612.059, "cyc": 1, "rf": 7, "ant": "discone", "rfg": 5, "ifgr": 32, "verdict": "CLOSE", "t": "23:22:37"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0708, "hdr": 0, "cyc": 1, "rf": 9, "ant": "discone", "rfg": 5, "ifgr": 32, "verdict": "PILOT-ONLY", "t": "23:23:05"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0281, "hdr": 0, "cyc": 1, "rf": 15, "ant": "discone", "rfg": 1, "ifgr": 32, "verdict": "PILOT-ONLY", "t": "23:23:34"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0, "hdr": 0, "cyc": 1, "rf": 21, "ant": "discone", "rfg": 2, "ifgr": 32, "verdict": "NO-FS", "t": "23:24:02"}
+{"fs_n": 16, "mer_med": 8.9, "mer_p90": 9.39, "mean_x": 0.0102, "hdr": 0, "vit": 3945.456, "vit_max": 5012.646, "cyc": 1, "rf": 34, "ant": "discone", "rfg": 2, "ifgr": 32, "verdict": "FLOOR", "t": "23:24:30"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0, "hdr": 0, "cyc": 1, "rf": 36, "ant": "discone", "rfg": 3, "ifgr": 40, "verdict": "NO-FS", "t": "23:24:58"}
+{"fs_n": 104, "mer_med": 15.94, "mer_p90": 16.21, "mean_x": 0.0406, "hdr": 163, "vit": 6152.785, "vit_max": 9401.278, "cyc": 2, "rf": 7, "ant": "rabbit", "rfg": 5, "ifgr": 32, "verdict": "DECODE", "t": "23:39:48"}
+{"event": "TROPO-CATCH", "rf": 7, "ant": "rabbit", "mer": 15.94, "t": "23:39:48"}
+{"fs_n": 102, "mer_med": 13.48, "mer_p90": 13.85, "mean_x": 0.0415, "hdr": 0, "vit": 5576.157, "vit_max": 9579.142, "cyc": 2, "rf": 9, "ant": "rabbit", "rfg": 5, "ifgr": 32, "verdict": "CLOSE", "t": "23:40:16"}
+{"fs_n": 50, "mer_med": 11.95, "mer_p90": 15.7, "mean_x": 0.0395, "hdr": 0, "vit": 5337.184, "vit_max": 9714.265, "cyc": 2, "rf": 15, "ant": "rabbit", "rfg": 1, "ifgr": 26, "verdict": "FLOOR", "t": "23:40:44"}
+{"fs_n": 91, "mer_med": 15.99, "mer_p90": 16.52, "mean_x": 0.0353, "hdr": 53, "vit": 6757.491, "vit_max": 8852.662, "cyc": 2, "rf": 21, "ant": "rabbit", "rfg": 2, "ifgr": 26, "verdict": "DECODE", "t": "23:41:12"}
+{"fs_n": 94, "mer_med": 17.03, "mer_p90": 17.43, "mean_x": 0.0317, "hdr": 81, "vit": 4350.175, "vit_max": 7422.564, "cyc": 2, "rf": 34, "ant": "rabbit", "rfg": 2, "ifgr": 32, "verdict": "DECODE", "t": "23:41:41"}
+{"fs_n": 94, "mer_med": 15.74, "mer_p90": 16.31, "mean_x": 0.0342, "hdr": 128, "vit": 7853.156, "vit_max": 9893.242, "cyc": 2, "rf": 36, "ant": "rabbit", "rfg": 3, "ifgr": 40, "verdict": "DECODE", "t": "23:42:09"}
+{"fs_n": 101, "mer_med": 14.6, "mer_p90": 15.01, "mean_x": 0.0411, "hdr": 23, "vit": 5813.61, "vit_max": 9617.516, "cyc": 2, "rf": 7, "ant": "discone", "rfg": 5, "ifgr": 32, "verdict": "CLOSE", "t": "23:42:37"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0621, "hdr": 0, "cyc": 2, "rf": 9, "ant": "discone", "rfg": 5, "ifgr": 32, "verdict": "PILOT-ONLY", "t": "23:43:05"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0314, "hdr": 0, "cyc": 2, "rf": 15, "ant": "discone", "rfg": 1, "ifgr": 32, "verdict": "PILOT-ONLY", "t": "23:43:34"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0, "hdr": 0, "vit": 317.503, "vit_max": 435.724, "cyc": 2, "rf": 21, "ant": "discone", "rfg": 2, "ifgr": 32, "verdict": "NO-FS", "t": "23:44:02"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0, "hdr": 0, "cyc": 2, "rf": 34, "ant": "discone", "rfg": 2, "ifgr": 32, "verdict": "NO-FS", "t": "23:44:30"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0, "hdr": 0, "vit": 750.565, "vit_max": 759.461, "cyc": 2, "rf": 36, "ant": "discone", "rfg": 3, "ifgr": 40, "verdict": "NO-FS", "t": "23:44:58"}
+{"fs_n": 103, "mer_med": 16.44, "mer_p90": 16.87, "mean_x": 0.0418, "hdr": 214, "vit": 7480.132, "vit_max": 9827.349, "cyc": 3, "rf": 7, "ant": "rabbit", "rfg": 5, "ifgr": 32, "verdict": "DECODE", "t": "23:59:48"}
+{"event": "TROPO-CATCH", "rf": 7, "ant": "rabbit", "mer": 16.44, "t": "23:59:48"}
+{"fs_n": 93, "mer_med": 15.06, "mer_p90": 15.46, "mean_x": 0.0389, "hdr": 29, "vit": 4148.219, "vit_max": 7463.738, "cyc": 3, "rf": 9, "ant": "rabbit", "rfg": 5, "ifgr": 32, "verdict": "DECODE", "t": "00:00:16"}
+{"fs_n": 70, "mer_med": 15.87, "mer_p90": 16.56, "mean_x": 0.0354, "hdr": 19, "vit": 5593.633, "vit_max": 8948.89, "cyc": 3, "rf": 15, "ant": "rabbit", "rfg": 1, "ifgr": 26, "verdict": "DECODE", "t": "00:00:44"}
+{"fs_n": 85, "mer_med": 14.96, "mer_p90": 15.49, "mean_x": 0.0354, "hdr": 48, "vit": 5691.639, "vit_max": 9538.295, "cyc": 3, "rf": 21, "ant": "rabbit", "rfg": 2, "ifgr": 26, "verdict": "DECODE", "t": "00:01:12"}
+{"fs_n": 88, "mer_med": 16.27, "mer_p90": 17.04, "mean_x": 0.0347, "hdr": 73, "vit": 2781.184, "vit_max": 8633.757, "cyc": 3, "rf": 34, "ant": "rabbit", "rfg": 2, "ifgr": 32, "verdict": "DECODE", "t": "00:01:41"}
+{"fs_n": 67, "mer_med": 14.81, "mer_p90": 15.65, "mean_x": 0.036, "hdr": 23, "vit": 3911.405, "vit_max": 9529.995, "cyc": 3, "rf": 36, "ant": "rabbit", "rfg": 3, "ifgr": 40, "verdict": "DECODE", "t": "00:02:09"}
+{"fs_n": 92, "mer_med": 12.25, "mer_p90": 12.82, "mean_x": 0.0456, "hdr": 0, "vit": 4228.065, "vit_max": 6739.051, "cyc": 3, "rf": 7, "ant": "discone", "rfg": 5, "ifgr": 32, "verdict": "CLOSE", "t": "00:02:37"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0584, "hdr": 0, "cyc": 3, "rf": 9, "ant": "discone", "rfg": 5, "ifgr": 32, "verdict": "PILOT-ONLY", "t": "00:03:05"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0, "hdr": 0, "cyc": 3, "rf": 15, "ant": "discone", "rfg": 1, "ifgr": 32, "verdict": "NO-FS", "t": "00:03:34"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0, "hdr": 0, "cyc": 3, "rf": 21, "ant": "discone", "rfg": 2, "ifgr": 32, "verdict": "NO-FS", "t": "00:04:02"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0044, "hdr": 0, "vit": 727.409, "vit_max": 740.435, "cyc": 3, "rf": 34, "ant": "discone", "rfg": 2, "ifgr": 32, "verdict": "NO-FS", "t": "00:04:30"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0, "hdr": 0, "cyc": 3, "rf": 36, "ant": "discone", "rfg": 3, "ifgr": 40, "verdict": "NO-FS", "t": "00:04:58"}
+{"event": "trim", "rf": 7, "ant": "discone", "ifgr": 26, "mer_med": 12.66, "t": "00:05:18"}
+{"event": "trim", "rf": 7, "ant": "discone", "ifgr": 38, "mer_med": 12.82, "t": "00:05:38"}
+{"event": "trim-adopt", "key": "rf7|discone", "gains": [5, 38], "mer": 12.82, "t": "00:05:38"}
+{"fs_n": 103, "mer_med": 16.31, "mer_p90": 16.59, "mean_x": 0.0398, "hdr": 176, "vit": 5248.102, "vit_max": 9480.589, "cyc": 4, "rf": 7, "ant": "rabbit", "rfg": 5, "ifgr": 32, "verdict": "DECODE", "t": "00:19:48"}
+{"event": "TROPO-CATCH", "rf": 7, "ant": "rabbit", "mer": 16.31, "t": "00:19:48"}
+{"fs_n": 94, "mer_med": 15.55, "mer_p90": 15.93, "mean_x": 0.0381, "hdr": 57, "vit": 5912.84, "vit_max": 8800.099, "cyc": 4, "rf": 9, "ant": "rabbit", "rfg": 5, "ifgr": 32, "verdict": "DECODE", "t": "00:20:16"}
+{"event": "TROPO-CATCH", "rf": 9, "ant": "rabbit", "mer": 15.55, "t": "00:20:16"}
+{"fs_n": 96, "mer_med": 17.26, "mer_p90": 17.76, "mean_x": 0.0368, "hdr": 59, "vit": 3957.764, "vit_max": 9752.422, "cyc": 4, "rf": 15, "ant": "rabbit", "rfg": 1, "ifgr": 26, "verdict": "DECODE", "t": "00:20:44"}
+{"fs_n": 92, "mer_med": 16.77, "mer_p90": 17.25, "mean_x": 0.0375, "hdr": 109, "vit": 3425.671, "vit_max": 9735.032, "cyc": 4, "rf": 21, "ant": "rabbit", "rfg": 2, "ifgr": 26, "verdict": "DECODE", "t": "00:21:13"}
+{"fs_n": 93, "mer_med": 17.01, "mer_p90": 17.47, "mean_x": 0.037, "hdr": 75, "vit": 5521.453, "vit_max": 7781.875, "cyc": 4, "rf": 34, "ant": "rabbit", "rfg": 2, "ifgr": 32, "verdict": "DECODE", "t": "00:21:41"}
+{"fs_n": 92, "mer_med": 15.89, "mer_p90": 16.36, "mean_x": 0.0341, "hdr": 115, "vit": 7740.017, "vit_max": 10000.171, "cyc": 4, "rf": 36, "ant": "rabbit", "rfg": 3, "ifgr": 40, "verdict": "DECODE", "t": "00:22:09"}
+{"fs_n": 90, "mer_med": 14.09, "mer_p90": 14.54, "mean_x": 0.0416, "hdr": 0, "vit": 4703.267, "vit_max": 9973.545, "cyc": 4, "rf": 7, "ant": "discone", "rfg": 5, "ifgr": 38, "verdict": "CLOSE", "t": "00:22:37"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0748, "hdr": 0, "cyc": 4, "rf": 9, "ant": "discone", "rfg": 5, "ifgr": 32, "verdict": "PILOT-ONLY", "t": "00:23:05"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0263, "hdr": 0, "cyc": 4, "rf": 15, "ant": "discone", "rfg": 1, "ifgr": 32, "verdict": "PILOT-ONLY", "t": "00:23:34"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0, "hdr": 0, "cyc": 4, "rf": 21, "ant": "discone", "rfg": 2, "ifgr": 32, "verdict": "NO-FS", "t": "00:24:02"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0284, "hdr": 0, "cyc": 4, "rf": 34, "ant": "discone", "rfg": 2, "ifgr": 32, "verdict": "PILOT-ONLY", "t": "00:24:30"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0, "hdr": 0, "cyc": 4, "rf": 36, "ant": "discone", "rfg": 3, "ifgr": 40, "verdict": "NO-FS", "t": "00:24:58"}
+{"fs_n": 104, "mer_med": 16.73, "mer_p90": 16.98, "mean_x": 0.0395, "hdr": 183, "vit": 4241.724, "vit_max": 9514.828, "cyc": 5, "rf": 7, "ant": "rabbit", "rfg": 5, "ifgr": 32, "verdict": "DECODE", "t": "00:39:48"}
+{"event": "TROPO-CATCH", "rf": 7, "ant": "rabbit", "mer": 16.73, "t": "00:39:48"}
+{"fs_n": 95, "mer_med": 16.29, "mer_p90": 16.69, "mean_x": 0.0375, "hdr": 73, "vit": 5220.358, "vit_max": 8915.788, "cyc": 5, "rf": 9, "ant": "rabbit", "rfg": 5, "ifgr": 32, "verdict": "DECODE", "t": "00:40:16"}
+{"event": "TROPO-CATCH", "rf": 9, "ant": "rabbit", "mer": 16.29, "t": "00:40:16"}
+{"fs_n": 64, "mer_med": 15.82, "mer_p90": 17.33, "mean_x": 0.0382, "hdr": 3, "vit": 3608.982, "vit_max": 6476.021, "cyc": 5, "rf": 15, "ant": "rabbit", "rfg": 1, "ifgr": 26, "verdict": "AT-CLIFF", "t": "00:40:44"}
+{"fs_n": 88, "mer_med": 16.36, "mer_p90": 16.77, "mean_x": 0.0391, "hdr": 74, "vit": 7240.131, "vit_max": 8866.769, "cyc": 5, "rf": 21, "ant": "rabbit", "rfg": 2, "ifgr": 26, "verdict": "DECODE", "t": "00:41:12"}
+{"fs_n": 93, "mer_med": 15.88, "mer_p90": 16.23, "mean_x": 0.0346, "hdr": 73, "vit": 5746.246, "vit_max": 9499.216, "cyc": 5, "rf": 34, "ant": "rabbit", "rfg": 2, "ifgr": 32, "verdict": "DECODE", "t": "00:41:41"}
+{"fs_n": 94, "mer_med": 15.45, "mer_p90": 15.76, "mean_x": 0.0353, "hdr": 128, "vit": 5319.632, "vit_max": 8507.253, "cyc": 5, "rf": 36, "ant": "rabbit", "rfg": 3, "ifgr": 40, "verdict": "DECODE", "t": "00:42:09"}
+{"fs_n": 90, "mer_med": 13.66, "mer_p90": 14.09, "mean_x": 0.0446, "hdr": 0, "vit": 4082.052, "vit_max": 9751.073, "cyc": 5, "rf": 7, "ant": "discone", "rfg": 5, "ifgr": 38, "verdict": "CLOSE", "t": "00:42:37"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.064, "hdr": 0, "cyc": 5, "rf": 9, "ant": "discone", "rfg": 5, "ifgr": 32, "verdict": "PILOT-ONLY", "t": "00:43:05"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0227, "hdr": 0, "cyc": 5, "rf": 15, "ant": "discone", "rfg": 1, "ifgr": 32, "verdict": "PILOT-ONLY", "t": "00:43:34"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0, "hdr": 0, "cyc": 5, "rf": 21, "ant": "discone", "rfg": 2, "ifgr": 32, "verdict": "NO-FS", "t": "00:44:02"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0028, "hdr": 0, "cyc": 5, "rf": 34, "ant": "discone", "rfg": 2, "ifgr": 32, "verdict": "NO-FS", "t": "00:44:30"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0, "hdr": 0, "cyc": 5, "rf": 36, "ant": "discone", "rfg": 3, "ifgr": 40, "verdict": "NO-FS", "t": "00:44:58"}
+{"fs_n": 104, "mer_med": 16.21, "mer_p90": 16.59, "mean_x": 0.0399, "hdr": 215, "vit": 5713.83, "vit_max": 7827.599, "cyc": 6, "rf": 7, "ant": "rabbit", "rfg": 5, "ifgr": 32, "verdict": "DECODE", "t": "00:59:48"}
+{"event": "TROPO-CATCH", "rf": 7, "ant": "rabbit", "mer": 16.21, "t": "00:59:48"}
+{"fs_n": 94, "mer_med": 15.35, "mer_p90": 15.8, "mean_x": 0.0388, "hdr": 65, "vit": 3703.745, "vit_max": 9893.165, "cyc": 6, "rf": 9, "ant": "rabbit", "rfg": 5, "ifgr": 32, "verdict": "DECODE", "t": "01:00:16"}
+{"fs_n": 61, "mer_med": 15.98, "mer_p90": 17.1, "mean_x": 0.036, "hdr": 1, "vit": 5580.435, "vit_max": 8031.016, "cyc": 6, "rf": 15, "ant": "rabbit", "rfg": 1, "ifgr": 26, "verdict": "AT-CLIFF", "t": "01:00:44"}
+{"fs_n": 91, "mer_med": 17.02, "mer_p90": 17.36, "mean_x": 0.0381, "hdr": 89, "vit": 4570.659, "vit_max": 9947.86, "cyc": 6, "rf": 21, "ant": "rabbit", "rfg": 2, "ifgr": 26, "verdict": "DECODE", "t": "01:01:12"}
+{"fs_n": 94, "mer_med": 15.91, "mer_p90": 16.38, "mean_x": 0.0324, "hdr": 87, "vit": 4754.256, "vit_max": 8915.845, "cyc": 6, "rf": 34, "ant": "rabbit", "rfg": 2, "ifgr": 32, "verdict": "DECODE", "t": "01:01:41"}
+{"fs_n": 95, "mer_med": 15.06, "mer_p90": 15.41, "mean_x": 0.0331, "hdr": 95, "vit": 4119.091, "vit_max": 9909.217, "cyc": 6, "rf": 36, "ant": "rabbit", "rfg": 3, "ifgr": 40, "verdict": "DECODE", "t": "01:02:09"}
+{"fs_n": 89, "mer_med": 13.09, "mer_p90": 13.49, "mean_x": 0.0473, "hdr": 0, "vit": 6699.412, "vit_max": 8697.562, "cyc": 6, "rf": 7, "ant": "discone", "rfg": 5, "ifgr": 38, "verdict": "CLOSE", "t": "01:02:37"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0617, "hdr": 0, "cyc": 6, "rf": 9, "ant": "discone", "rfg": 5, "ifgr": 32, "verdict": "PILOT-ONLY", "t": "01:03:05"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0042, "hdr": 0, "cyc": 6, "rf": 15, "ant": "discone", "rfg": 1, "ifgr": 32, "verdict": "NO-FS", "t": "01:03:34"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0, "hdr": 0, "cyc": 6, "rf": 21, "ant": "discone", "rfg": 2, "ifgr": 32, "verdict": "NO-FS", "t": "01:04:02"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.012, "hdr": 0, "cyc": 6, "rf": 34, "ant": "discone", "rfg": 2, "ifgr": 32, "verdict": "NO-FS", "t": "01:04:30"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0, "hdr": 0, "cyc": 6, "rf": 36, "ant": "discone", "rfg": 3, "ifgr": 40, "verdict": "NO-FS", "t": "01:04:58"}
+{"event": "trim", "rf": 15, "ant": "rabbit", "ifgr": 20, "mer_med": 14.08, "t": "01:05:18"}
+{"event": "trim", "rf": 15, "ant": "rabbit", "ifgr": 32, "mer_med": 15.93, "t": "01:05:38"}
+{"fs_n": 104, "mer_med": 16.21, "mer_p90": 16.5, "mean_x": 0.0399, "hdr": 187, "vit": 4747.845, "vit_max": 9452.535, "cyc": 7, "rf": 7, "ant": "rabbit", "rfg": 5, "ifgr": 32, "verdict": "DECODE", "t": "01:19:48"}
+{"event": "TROPO-CATCH", "rf": 7, "ant": "rabbit", "mer": 16.21, "t": "01:19:48"}
+{"fs_n": 95, "mer_med": 15.22, "mer_p90": 15.54, "mean_x": 0.0389, "hdr": 41, "vit": 4267.473, "vit_max": 9629.398, "cyc": 7, "rf": 9, "ant": "rabbit", "rfg": 5, "ifgr": 32, "verdict": "DECODE", "t": "01:20:16"}
+{"fs_n": 69, "mer_med": 15.14, "mer_p90": 17.35, "mean_x": 0.0363, "hdr": 0, "vit": 7553.832, "vit_max": 9889.967, "cyc": 7, "rf": 15, "ant": "rabbit", "rfg": 1, "ifgr": 26, "verdict": "CLOSE", "t": "01:20:44"}
+{"fs_n": 88, "mer_med": 16.77, "mer_p90": 17.16, "mean_x": 0.039, "hdr": 67, "vit": 5021.486, "vit_max": 9857.585, "cyc": 7, "rf": 21, "ant": "rabbit", "rfg": 2, "ifgr": 26, "verdict": "DECODE", "t": "01:21:13"}
+{"fs_n": 94, "mer_med": 16.63, "mer_p90": 17.06, "mean_x": 0.0348, "hdr": 80, "vit": 5925.079, "vit_max": 9970.552, "cyc": 7, "rf": 34, "ant": "rabbit", "rfg": 2, "ifgr": 32, "verdict": "DECODE", "t": "01:21:41"}
+{"fs_n": 95, "mer_med": 15.85, "mer_p90": 16.15, "mean_x": 0.0396, "hdr": 128, "vit": 5498.495, "vit_max": 8892.961, "cyc": 7, "rf": 36, "ant": "rabbit", "rfg": 3, "ifgr": 40, "verdict": "DECODE", "t": "01:22:09"}
+{"fs_n": 91, "mer_med": 13.29, "mer_p90": 13.74, "mean_x": 0.0442, "hdr": 0, "vit": 2727.7, "vit_max": 8708.894, "cyc": 7, "rf": 7, "ant": "discone", "rfg": 5, "ifgr": 38, "verdict": "CLOSE", "t": "01:22:37"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0689, "hdr": 0, "cyc": 7, "rf": 9, "ant": "discone", "rfg": 5, "ifgr": 32, "verdict": "PILOT-ONLY", "t": "01:23:05"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0331, "hdr": 0, "cyc": 7, "rf": 15, "ant": "discone", "rfg": 1, "ifgr": 32, "verdict": "PILOT-ONLY", "t": "01:23:34"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0, "hdr": 0, "vit": 803.134, "vit_max": 828.521, "cyc": 7, "rf": 21, "ant": "discone", "rfg": 2, "ifgr": 32, "verdict": "NO-FS", "t": "01:24:02"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0415, "hdr": 0, "cyc": 7, "rf": 34, "ant": "discone", "rfg": 2, "ifgr": 32, "verdict": "PILOT-ONLY", "t": "01:24:30"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0, "hdr": 0, "cyc": 7, "rf": 36, "ant": "discone", "rfg": 3, "ifgr": 40, "verdict": "NO-FS", "t": "01:24:58"}
+{"fs_n": 104, "mer_med": 16.24, "mer_p90": 16.46, "mean_x": 0.0396, "hdr": 182, "vit": 2750.573, "vit_max": 9011.071, "cyc": 8, "rf": 7, "ant": "rabbit", "rfg": 5, "ifgr": 32, "verdict": "DECODE", "t": "01:39:48"}
+{"event": "TROPO-CATCH", "rf": 7, "ant": "rabbit", "mer": 16.24, "t": "01:39:48"}
+{"fs_n": 99, "mer_med": 15.23, "mer_p90": 15.62, "mean_x": 0.0393, "hdr": 40, "vit": 5428.843, "vit_max": 8860.555, "cyc": 8, "rf": 9, "ant": "rabbit", "rfg": 5, "ifgr": 32, "verdict": "DECODE", "t": "01:40:16"}
+{"fs_n": 51, "mer_med": 13.15, "mer_p90": 16.45, "mean_x": 0.0381, "hdr": 2, "vit": 5175.015, "vit_max": 6865.146, "cyc": 8, "rf": 15, "ant": "rabbit", "rfg": 1, "ifgr": 26, "verdict": "CLOSE", "t": "01:40:44"}
+{"fs_n": 95, "mer_med": 16.55, "mer_p90": 16.95, "mean_x": 0.0389, "hdr": 65, "vit": 6687.99, "vit_max": 9306.931, "cyc": 8, "rf": 21, "ant": "rabbit", "rfg": 2, "ifgr": 26, "verdict": "DECODE", "t": "01:41:13"}
+{"fs_n": 94, "mer_med": 16.25, "mer_p90": 16.65, "mean_x": 0.0354, "hdr": 75, "vit": 4046.518, "vit_max": 6642.334, "cyc": 8, "rf": 34, "ant": "rabbit", "rfg": 2, "ifgr": 32, "verdict": "DECODE", "t": "01:41:41"}
+{"fs_n": 95, "mer_med": 15.21, "mer_p90": 15.47, "mean_x": 0.0363, "hdr": 102, "vit": 4012.628, "vit_max": 9518.394, "cyc": 8, "rf": 36, "ant": "rabbit", "rfg": 3, "ifgr": 40, "verdict": "DECODE", "t": "01:42:09"}
+{"fs_n": 100, "mer_med": 14.09, "mer_p90": 14.51, "mean_x": 0.0433, "hdr": 3, "vit": 6272.779, "vit_max": 9792.422, "cyc": 8, "rf": 7, "ant": "discone", "rfg": 5, "ifgr": 38, "verdict": "CLOSE", "t": "01:42:37"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0693, "hdr": 0, "cyc": 8, "rf": 9, "ant": "discone", "rfg": 5, "ifgr": 32, "verdict": "PILOT-ONLY", "t": "01:43:05"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0315, "hdr": 0, "cyc": 8, "rf": 15, "ant": "discone", "rfg": 1, "ifgr": 32, "verdict": "PILOT-ONLY", "t": "01:43:34"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0, "hdr": 0, "cyc": 8, "rf": 21, "ant": "discone", "rfg": 2, "ifgr": 32, "verdict": "NO-FS", "t": "01:44:02"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.033, "hdr": 0, "cyc": 8, "rf": 34, "ant": "discone", "rfg": 2, "ifgr": 32, "verdict": "PILOT-ONLY", "t": "01:44:30"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0, "hdr": 0, "cyc": 8, "rf": 36, "ant": "discone", "rfg": 3, "ifgr": 40, "verdict": "NO-FS", "t": "01:44:58"}
+{"fs_n": 105, "mer_med": 16.64, "mer_p90": 16.92, "mean_x": 0.0388, "hdr": 182, "vit": 5761.278, "vit_max": 9230.68, "cyc": 9, "rf": 7, "ant": "rabbit", "rfg": 5, "ifgr": 32, "verdict": "DECODE", "t": "01:59:48"}
+{"event": "TROPO-CATCH", "rf": 7, "ant": "rabbit", "mer": 16.64, "t": "01:59:48"}
+{"fs_n": 94, "mer_med": 15.61, "mer_p90": 15.93, "mean_x": 0.0389, "hdr": 69, "vit": 6875.498, "vit_max": 9482.733, "cyc": 9, "rf": 9, "ant": "rabbit", "rfg": 5, "ifgr": 32, "verdict": "DECODE", "t": "02:00:16"}
+{"event": "TROPO-CATCH", "rf": 9, "ant": "rabbit", "mer": 15.61, "t": "02:00:16"}
+{"fs_n": 54, "mer_med": 14.74, "mer_p90": 17.18, "mean_x": 0.036, "hdr": 0, "vit": 6171.2, "vit_max": 9746.1, "cyc": 9, "rf": 15, "ant": "rabbit", "rfg": 1, "ifgr": 26, "verdict": "CLOSE", "t": "02:00:44"}
+{"fs_n": 84, "mer_med": 15.68, "mer_p90": 16.08, "mean_x": 0.0397, "hdr": 31, "vit": 5082.718, "vit_max": 8664.157, "cyc": 9, "rf": 21, "ant": "rabbit", "rfg": 2, "ifgr": 26, "verdict": "DECODE", "t": "02:01:12"}
+{"fs_n": 94, "mer_med": 16.13, "mer_p90": 16.53, "mean_x": 0.0365, "hdr": 78, "vit": 3482.392, "vit_max": 9246.5, "cyc": 9, "rf": 34, "ant": "rabbit", "rfg": 2, "ifgr": 32, "verdict": "DECODE", "t": "02:01:41"}
+{"fs_n": 95, "mer_med": 15.0, "mer_p90": 15.21, "mean_x": 0.0358, "hdr": 126, "vit": 5905.123, "vit_max": 9898.222, "cyc": 9, "rf": 36, "ant": "rabbit", "rfg": 3, "ifgr": 40, "verdict": "DECODE", "t": "02:02:09"}
+{"fs_n": 90, "mer_med": 14.56, "mer_p90": 14.89, "mean_x": 0.0416, "hdr": 30, "vit": 4091.135, "vit_max": 9144.073, "cyc": 9, "rf": 7, "ant": "discone", "rfg": 5, "ifgr": 38, "verdict": "CLOSE", "t": "02:02:37"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0645, "hdr": 0, "cyc": 9, "rf": 9, "ant": "discone", "rfg": 5, "ifgr": 32, "verdict": "PILOT-ONLY", "t": "02:03:05"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0219, "hdr": 0, "cyc": 9, "rf": 15, "ant": "discone", "rfg": 1, "ifgr": 32, "verdict": "PILOT-ONLY", "t": "02:03:34"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0, "hdr": 0, "cyc": 9, "rf": 21, "ant": "discone", "rfg": 2, "ifgr": 32, "verdict": "NO-FS", "t": "02:04:02"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0176, "hdr": 0, "cyc": 9, "rf": 34, "ant": "discone", "rfg": 2, "ifgr": 32, "verdict": "NO-FS", "t": "02:04:30"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0, "hdr": 0, "cyc": 9, "rf": 36, "ant": "discone", "rfg": 3, "ifgr": 40, "verdict": "NO-FS", "t": "02:04:58"}
+{"event": "trim", "rf": 15, "ant": "rabbit", "ifgr": 20, "mer_med": 10.62, "t": "02:05:18"}
+{"event": "trim", "rf": 15, "ant": "rabbit", "ifgr": 32, "mer_med": 13.93, "t": "02:05:38"}
+{"fs_n": 104, "mer_med": 16.21, "mer_p90": 16.47, "mean_x": 0.0396, "hdr": 184, "vit": 4619.236, "vit_max": 9889.48, "cyc": 10, "rf": 7, "ant": "rabbit", "rfg": 5, "ifgr": 32, "verdict": "DECODE", "t": "02:19:48"}
+{"event": "TROPO-CATCH", "rf": 7, "ant": "rabbit", "mer": 16.21, "t": "02:19:48"}
+{"fs_n": 104, "mer_med": 15.06, "mer_p90": 15.38, "mean_x": 0.0392, "hdr": 36, "vit": 4309.778, "vit_max": 9417.705, "cyc": 10, "rf": 9, "ant": "rabbit", "rfg": 5, "ifgr": 32, "verdict": "DECODE", "t": "02:20:16"}
+{"fs_n": 61, "mer_med": 14.55, "mer_p90": 16.83, "mean_x": 0.0357, "hdr": 5, "vit": 3037.48, "vit_max": 9965.533, "cyc": 10, "rf": 15, "ant": "rabbit", "rfg": 1, "ifgr": 26, "verdict": "CLOSE", "t": "02:20:44"}
+{"fs_n": 88, "mer_med": 16.36, "mer_p90": 16.88, "mean_x": 0.0375, "hdr": 48, "vit": 2751.317, "vit_max": 9291.285, "cyc": 10, "rf": 21, "ant": "rabbit", "rfg": 2, "ifgr": 26, "verdict": "DECODE", "t": "02:21:13"}
+{"fs_n": 92, "mer_med": 15.48, "mer_p90": 15.87, "mean_x": 0.0361, "hdr": 75, "vit": 4234.86, "vit_max": 9181.422, "cyc": 10, "rf": 34, "ant": "rabbit", "rfg": 2, "ifgr": 32, "verdict": "DECODE", "t": "02:21:41"}
+{"fs_n": 92, "mer_med": 14.8, "mer_p90": 15.2, "mean_x": 0.0358, "hdr": 71, "vit": 5015.515, "vit_max": 8433.172, "cyc": 10, "rf": 36, "ant": "rabbit", "rfg": 3, "ifgr": 40, "verdict": "DECODE", "t": "02:22:09"}
+{"fs_n": 90, "mer_med": 13.61, "mer_p90": 13.91, "mean_x": 0.0449, "hdr": 0, "vit": 6500.862, "vit_max": 8802.575, "cyc": 10, "rf": 7, "ant": "discone", "rfg": 5, "ifgr": 38, "verdict": "CLOSE", "t": "02:22:37"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0731, "hdr": 0, "cyc": 10, "rf": 9, "ant": "discone", "rfg": 5, "ifgr": 32, "verdict": "PILOT-ONLY", "t": "02:23:05"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0251, "hdr": 0, "cyc": 10, "rf": 15, "ant": "discone", "rfg": 1, "ifgr": 32, "verdict": "PILOT-ONLY", "t": "02:23:34"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0, "hdr": 0, "cyc": 10, "rf": 21, "ant": "discone", "rfg": 2, "ifgr": 32, "verdict": "NO-FS", "t": "02:24:02"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0016, "hdr": 0, "cyc": 10, "rf": 34, "ant": "discone", "rfg": 2, "ifgr": 32, "verdict": "NO-FS", "t": "02:24:30"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0, "hdr": 0, "cyc": 10, "rf": 36, "ant": "discone", "rfg": 3, "ifgr": 40, "verdict": "NO-FS", "t": "02:24:58"}
+{"fs_n": 104, "mer_med": 15.94, "mer_p90": 16.3, "mean_x": 0.0396, "hdr": 176, "vit": 4809.267, "vit_max": 9583.537, "cyc": 11, "rf": 7, "ant": "rabbit", "rfg": 5, "ifgr": 32, "verdict": "DECODE", "t": "02:39:48"}
+{"event": "TROPO-CATCH", "rf": 7, "ant": "rabbit", "mer": 15.94, "t": "02:39:48"}
+{"fs_n": 104, "mer_med": 15.35, "mer_p90": 15.7, "mean_x": 0.0386, "hdr": 70, "vit": 3082.005, "vit_max": 8882.326, "cyc": 11, "rf": 9, "ant": "rabbit", "rfg": 5, "ifgr": 32, "verdict": "DECODE", "t": "02:40:16"}
+{"fs_n": 63, "mer_med": 14.21, "mer_p90": 17.4, "mean_x": 0.036, "hdr": 3, "vit": 8397.167, "vit_max": 9696.608, "cyc": 11, "rf": 15, "ant": "rabbit", "rfg": 1, "ifgr": 26, "verdict": "CLOSE", "t": "02:40:44"}
+{"fs_n": 86, "mer_med": 17.07, "mer_p90": 17.34, "mean_x": 0.0366, "hdr": 59, "vit": 7424.32, "vit_max": 9271.016, "cyc": 11, "rf": 21, "ant": "rabbit", "rfg": 2, "ifgr": 26, "verdict": "DECODE", "t": "02:41:12"}
+{"fs_n": 94, "mer_med": 16.43, "mer_p90": 17.06, "mean_x": 0.0379, "hdr": 73, "vit": 5644.618, "vit_max": 9734.021, "cyc": 11, "rf": 34, "ant": "rabbit", "rfg": 2, "ifgr": 32, "verdict": "DECODE", "t": "02:41:41"}
+{"fs_n": 92, "mer_med": 15.2, "mer_p90": 15.54, "mean_x": 0.0362, "hdr": 92, "vit": 4617.446, "vit_max": 8629.749, "cyc": 11, "rf": 36, "ant": "rabbit", "rfg": 3, "ifgr": 40, "verdict": "DECODE", "t": "02:42:09"}
+{"fs_n": 90, "mer_med": 13.7, "mer_p90": 14.11, "mean_x": 0.0434, "hdr": 0, "vit": 5085.247, "vit_max": 9236.365, "cyc": 11, "rf": 7, "ant": "discone", "rfg": 5, "ifgr": 38, "verdict": "CLOSE", "t": "02:42:37"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0694, "hdr": 0, "cyc": 11, "rf": 9, "ant": "discone", "rfg": 5, "ifgr": 32, "verdict": "PILOT-ONLY", "t": "02:43:05"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0294, "hdr": 0, "cyc": 11, "rf": 15, "ant": "discone", "rfg": 1, "ifgr": 32, "verdict": "PILOT-ONLY", "t": "02:43:33"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0, "hdr": 0, "cyc": 11, "rf": 21, "ant": "discone", "rfg": 2, "ifgr": 32, "verdict": "NO-FS", "t": "02:44:02"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0014, "hdr": 0, "cyc": 11, "rf": 34, "ant": "discone", "rfg": 2, "ifgr": 32, "verdict": "NO-FS", "t": "02:44:30"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0, "hdr": 0, "cyc": 11, "rf": 36, "ant": "discone", "rfg": 3, "ifgr": 40, "verdict": "NO-FS", "t": "02:44:58"}
+{"fs_n": 104, "mer_med": 15.97, "mer_p90": 16.27, "mean_x": 0.0396, "hdr": 198, "vit": 4603.668, "vit_max": 9265.484, "cyc": 12, "rf": 7, "ant": "rabbit", "rfg": 5, "ifgr": 32, "verdict": "DECODE", "t": "02:59:48"}
+{"event": "TROPO-CATCH", "rf": 7, "ant": "rabbit", "mer": 15.97, "t": "02:59:48"}
+{"fs_n": 94, "mer_med": 15.23, "mer_p90": 15.55, "mean_x": 0.0388, "hdr": 38, "vit": 7317.512, "vit_max": 9434.993, "cyc": 12, "rf": 9, "ant": "rabbit", "rfg": 5, "ifgr": 32, "verdict": "DECODE", "t": "03:00:16"}
+{"fs_n": 53, "mer_med": 12.15, "mer_p90": 16.27, "mean_x": 0.0365, "hdr": 1, "vit": 5454.208, "vit_max": 9779.715, "cyc": 12, "rf": 15, "ant": "rabbit", "rfg": 1, "ifgr": 26, "verdict": "FLOOR", "t": "03:00:44"}
+{"fs_n": 91, "mer_med": 16.7, "mer_p90": 17.06, "mean_x": 0.0385, "hdr": 79, "vit": 4601.56, "vit_max": 5932.233, "cyc": 12, "rf": 21, "ant": "rabbit", "rfg": 2, "ifgr": 26, "verdict": "DECODE", "t": "03:01:12"}
+{"fs_n": 94, "mer_med": 15.93, "mer_p90": 16.33, "mean_x": 0.0362, "hdr": 80, "vit": 5984.292, "vit_max": 9448.979, "cyc": 12, "rf": 34, "ant": "rabbit", "rfg": 2, "ifgr": 32, "verdict": "DECODE", "t": "03:01:41"}
+{"fs_n": 93, "mer_med": 14.34, "mer_p90": 14.61, "mean_x": 0.0367, "hdr": 29, "vit": 6710.624, "vit_max": 9950.883, "cyc": 12, "rf": 36, "ant": "rabbit", "rfg": 3, "ifgr": 40, "verdict": "CLOSE", "t": "03:02:09"}
+{"fs_n": 91, "mer_med": 13.9, "mer_p90": 14.31, "mean_x": 0.0423, "hdr": 2, "vit": 3261.158, "vit_max": 8288.332, "cyc": 12, "rf": 7, "ant": "discone", "rfg": 5, "ifgr": 38, "verdict": "CLOSE", "t": "03:02:37"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0666, "hdr": 0, "cyc": 12, "rf": 9, "ant": "discone", "rfg": 5, "ifgr": 32, "verdict": "PILOT-ONLY", "t": "03:03:05"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0201, "hdr": 0, "cyc": 12, "rf": 15, "ant": "discone", "rfg": 1, "ifgr": 32, "verdict": "PILOT-ONLY", "t": "03:03:33"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0, "hdr": 0, "cyc": 12, "rf": 21, "ant": "discone", "rfg": 2, "ifgr": 32, "verdict": "NO-FS", "t": "03:04:02"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0073, "hdr": 0, "cyc": 12, "rf": 34, "ant": "discone", "rfg": 2, "ifgr": 32, "verdict": "NO-FS", "t": "03:04:30"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0, "hdr": 0, "cyc": 12, "rf": 36, "ant": "discone", "rfg": 3, "ifgr": 40, "verdict": "NO-FS", "t": "03:04:58"}
+{"event": "trim", "rf": 36, "ant": "rabbit", "ifgr": 34, "mer_med": 14.68, "t": "03:05:18"}
+{"event": "trim", "rf": 36, "ant": "rabbit", "ifgr": 46, "mer_med": 10.17, "t": "03:05:38"}
+{"event": "trim-adopt", "key": "rf36|rabbit", "gains": [3, 34], "mer": 14.68, "t": "03:05:38"}
+{"fs_n": 104, "mer_med": 16.37, "mer_p90": 16.74, "mean_x": 0.0387, "hdr": 183, "vit": 4757.198, "vit_max": 9509.114, "cyc": 13, "rf": 7, "ant": "rabbit", "rfg": 5, "ifgr": 32, "verdict": "DECODE", "t": "03:19:48"}
+{"event": "TROPO-CATCH", "rf": 7, "ant": "rabbit", "mer": 16.37, "t": "03:19:48"}
+{"fs_n": 104, "mer_med": 15.45, "mer_p90": 15.8, "mean_x": 0.0388, "hdr": 68, "vit": 5789.125, "vit_max": 8433.503, "cyc": 13, "rf": 9, "ant": "rabbit", "rfg": 5, "ifgr": 32, "verdict": "DECODE", "t": "03:20:16"}
+{"fs_n": 59, "mer_med": 11.98, "mer_p90": 16.35, "mean_x": 0.0374, "hdr": 0, "vit": 3025.936, "vit_max": 8985.708, "cyc": 13, "rf": 15, "ant": "rabbit", "rfg": 1, "ifgr": 26, "verdict": "FLOOR", "t": "03:20:44"}
+{"fs_n": 86, "mer_med": 16.64, "mer_p90": 17.16, "mean_x": 0.0394, "hdr": 37, "vit": 4965.788, "vit_max": 7117.586, "cyc": 13, "rf": 21, "ant": "rabbit", "rfg": 2, "ifgr": 26, "verdict": "DECODE", "t": "03:21:13"}
+{"fs_n": 94, "mer_med": 16.14, "mer_p90": 16.55, "mean_x": 0.0371, "hdr": 80, "vit": 4316.121, "vit_max": 6451.018, "cyc": 13, "rf": 34, "ant": "rabbit", "rfg": 2, "ifgr": 32, "verdict": "DECODE", "t": "03:21:41"}
+{"fs_n": 95, "mer_med": 14.5, "mer_p90": 14.89, "mean_x": 0.0395, "hdr": 51, "vit": 4790.288, "vit_max": 8639.398, "cyc": 13, "rf": 36, "ant": "rabbit", "rfg": 3, "ifgr": 34, "verdict": "CLOSE", "t": "03:22:09"}
+{"fs_n": 91, "mer_med": 13.93, "mer_p90": 14.32, "mean_x": 0.043, "hdr": 3, "vit": 5810.118, "vit_max": 9085.338, "cyc": 13, "rf": 7, "ant": "discone", "rfg": 5, "ifgr": 38, "verdict": "CLOSE", "t": "03:22:37"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0701, "hdr": 0, "cyc": 13, "rf": 9, "ant": "discone", "rfg": 5, "ifgr": 32, "verdict": "PILOT-ONLY", "t": "03:23:05"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0175, "hdr": 0, "cyc": 13, "rf": 15, "ant": "discone", "rfg": 1, "ifgr": 32, "verdict": "NO-FS", "t": "03:23:34"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0, "hdr": 0, "vit": 804.223, "vit_max": 840.433, "cyc": 13, "rf": 21, "ant": "discone", "rfg": 2, "ifgr": 32, "verdict": "NO-FS", "t": "03:24:02"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0068, "hdr": 0, "cyc": 13, "rf": 34, "ant": "discone", "rfg": 2, "ifgr": 32, "verdict": "NO-FS", "t": "03:24:30"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0, "hdr": 0, "cyc": 13, "rf": 36, "ant": "discone", "rfg": 3, "ifgr": 40, "verdict": "NO-FS", "t": "03:24:58"}
+{"event": "TRIPWIRE", "rf9_mer": 15.45, "note": "rising edge \u2014 ambush starts early", "t": "03:30:20"}
+{"event": "night-cube-done", "tripped": true, "t": "03:30:24"}
+{"event": "SHERIFF", "action": "CHAIN-KILL", "reason": "MOD12 SLIP announced by viterbi", "t": "03:30:34"}
+{"fs_n": 18, "mer_med": 14.96, "mer_p90": 15.35, "mean_x": 0.0388, "hdr": 24, "vit": 3389.16, "vit_max": 4803.59, "event": "rf9-ambush", "ant": "rabbit", "t": "03:30:36"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.066, "hdr": 0, "event": "rf9-ambush", "ant": "discone", "t": "03:35:37"}
+{"event": "SHERIFF", "action": "CHAIN-KILL", "reason": "MOD12 SLIP announced by viterbi", "t": "03:36:06"}
+{"fs_n": 94, "mer_med": 15.35, "mer_p90": 15.65, "mean_x": 0.0387, "hdr": 54, "vit": 3860.174, "vit_max": 8786.625, "event": "rf9-ambush", "ant": "rabbit", "t": "03:36:08"}
+{"event": "ambush2-start", "note": "guard-armed hot-swap", "t": "03:37:38"}
+{"fs_n": 1137, "mer_med": 15.42, "mer_p90": 15.74, "mean_x": 0.0387, "hdr": 817, "vit": 4758.271, "vit_max": 9225.853, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 37, "t": "03:42:40"}
+{"fs_n": 0, "mer_med": null, "mer_p90": null, "mean_x": 0.0662, "hdr": 0, "event": "rf9-ambush", "ant": "discone", "guard_fires": 0, "t": "03:47:41"}
+{"fs_n": 1315, "mer_med": 15.46, "mer_p90": 15.79, "mean_x": 0.0388, "hdr": 907, "vit": 5470.392, "vit_max": 9486.65, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 6, "t": "03:52:41"}
+{"event": "ambush2-start", "note": "guard-armed hot-swap", "t": "03:53:34"}
+{"fs_n": 1331, "mer_med": 15.47, "mer_p90": 15.79, "mean_x": 0.0388, "hdr": 959, "vit": 5048.105, "vit_max": 9256.724, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 1, "t": "03:58:35"}
+{"event": "ambush2-start", "note": "guard-armed hot-swap", "t": "03:59:24"}
+{"fs_n": 1313, "mer_med": 15.44, "mer_p90": 15.77, "mean_x": 0.0383, "hdr": 960, "vit": 5848.051, "vit_max": 9965.743, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 3, "t": "04:04:25"}
+{"fs_n": 1279, "mer_med": 15.45, "mer_p90": 15.79, "mean_x": 0.0389, "hdr": 855, "vit": 4659.191, "vit_max": 9909.565, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 3, "t": "04:09:26"}
+{"fs_n": 1288, "mer_med": 15.35, "mer_p90": 15.7, "mean_x": 0.0391, "hdr": 885, "vit": 5087.359, "vit_max": 9819.961, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 11, "t": "04:14:27"}
+{"fs_n": 1327, "mer_med": 15.45, "mer_p90": 15.82, "mean_x": 0.0387, "hdr": 912, "vit": 3976.211, "vit_max": 8184.224, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 6, "t": "04:19:28"}
+{"fs_n": 1325, "mer_med": 15.47, "mer_p90": 15.81, "mean_x": 0.0392, "hdr": 967, "vit": 4817.542, "vit_max": 9357.074, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 3, "t": "04:24:29"}
+{"fs_n": 1323, "mer_med": 15.48, "mer_p90": 15.8, "mean_x": 0.0384, "hdr": 945, "vit": 4630.397, "vit_max": 8200.328, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 11, "t": "04:29:30"}
+{"fs_n": 1249, "mer_med": 15.47, "mer_p90": 15.81, "mean_x": 0.0382, "hdr": 926, "vit": 5002.703, "vit_max": 9213.956, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 9, "t": "04:34:31"}
+{"fs_n": 1283, "mer_med": 15.38, "mer_p90": 15.7, "mean_x": 0.0386, "hdr": 839, "vit": 5219.078, "vit_max": 9793.114, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 4, "t": "04:39:33"}
+{"fs_n": 1270, "mer_med": 15.43, "mer_p90": 15.73, "mean_x": 0.038, "hdr": 928, "vit": 3798.874, "vit_max": 9008.396, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 3, "t": "04:44:34"}
+{"fs_n": 1317, "mer_med": 15.43, "mer_p90": 15.75, "mean_x": 0.0387, "hdr": 835, "vit": 4497.014, "vit_max": 8775.255, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 11, "t": "04:49:35"}
+{"fs_n": 1258, "mer_med": 15.41, "mer_p90": 15.75, "mean_x": 0.0386, "hdr": 913, "vit": 5690.841, "vit_max": 9858.997, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 3, "t": "04:54:36"}
+{"fs_n": 1202, "mer_med": 15.46, "mer_p90": 15.77, "mean_x": 0.0384, "hdr": 885, "vit": 4307.794, "vit_max": 6462.004, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 17, "t": "04:59:37"}
+{"fs_n": 1270, "mer_med": 15.38, "mer_p90": 15.72, "mean_x": 0.0385, "hdr": 888, "vit": 5409.361, "vit_max": 9922.099, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 2, "t": "05:04:38"}
+{"fs_n": 1209, "mer_med": 15.32, "mer_p90": 15.67, "mean_x": 0.0386, "hdr": 805, "vit": 4907.28, "vit_max": 9579.19, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 34, "t": "05:09:39"}
+{"fs_n": 1172, "mer_med": 15.33, "mer_p90": 15.66, "mean_x": 0.0387, "hdr": 771, "vit": 3871.454, "vit_max": 8993.754, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 1, "t": "05:14:41"}
+{"fs_n": 1220, "mer_med": 15.41, "mer_p90": 15.74, "mean_x": 0.0385, "hdr": 857, "vit": 4447.61, "vit_max": 9629.726, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 4, "t": "05:19:42"}
+{"fs_n": 1315, "mer_med": 15.43, "mer_p90": 15.75, "mean_x": 0.0387, "hdr": 896, "vit": 4007.483, "vit_max": 7715.231, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 6, "t": "05:24:43"}
+{"fs_n": 1120, "mer_med": 15.37, "mer_p90": 15.7, "mean_x": 0.0385, "hdr": 787, "vit": 4437.184, "vit_max": 9934.936, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 46, "t": "05:29:44"}
+{"fs_n": 1130, "mer_med": 15.45, "mer_p90": 15.79, "mean_x": 0.0388, "hdr": 791, "vit": 3864.891, "vit_max": 7780.176, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 38, "t": "05:34:45"}
+{"fs_n": 1274, "mer_med": 15.46, "mer_p90": 15.8, "mean_x": 0.038, "hdr": 815, "vit": 4939.418, "vit_max": 8759.565, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 4, "t": "05:39:46"}
+{"fs_n": 1329, "mer_med": 15.5, "mer_p90": 15.82, "mean_x": 0.0384, "hdr": 949, "vit": 5946.515, "vit_max": 9389.141, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 2, "t": "05:44:48"}
+{"fs_n": 1326, "mer_med": 15.49, "mer_p90": 15.82, "mean_x": 0.038, "hdr": 997, "vit": 4289.853, "vit_max": 7543.773, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 5, "t": "05:49:48"}
+{"fs_n": 1206, "mer_med": 15.46, "mer_p90": 15.78, "mean_x": 0.0381, "hdr": 876, "vit": 5220.353, "vit_max": 8491.966, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 38, "t": "05:54:49"}
+{"fs_n": 1302, "mer_med": 15.46, "mer_p90": 15.79, "mean_x": 0.038, "hdr": 871, "vit": 5199.882, "vit_max": 8987.709, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 1, "t": "05:59:50"}
+{"fs_n": 1324, "mer_med": 15.55, "mer_p90": 15.89, "mean_x": 0.0383, "hdr": 895, "vit": 5630.491, "vit_max": 9967.846, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 6, "t": "06:04:51"}
+{"fs_n": 1296, "mer_med": 15.52, "mer_p90": 15.85, "mean_x": 0.0386, "hdr": 870, "vit": 5221.582, "vit_max": 9604.149, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 13, "t": "06:09:51"}
+{"fs_n": 1269, "mer_med": 15.49, "mer_p90": 15.83, "mean_x": 0.0391, "hdr": 871, "vit": 4615.446, "vit_max": 9934.295, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 5, "t": "06:14:53"}
+{"fs_n": 1201, "mer_med": 15.47, "mer_p90": 15.79, "mean_x": 0.0385, "hdr": 773, "vit": 3431.758, "vit_max": 8660.327, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 31, "t": "06:19:54"}
+{"fs_n": 1260, "mer_med": 15.51, "mer_p90": 15.82, "mean_x": 0.0381, "hdr": 885, "vit": 5948.914, "vit_max": 9909.82, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 5, "t": "06:24:55"}
+{"fs_n": 1112, "mer_med": 15.72, "mer_p90": 16.07, "mean_x": 0.0382, "hdr": 731, "vit": 5492.698, "vit_max": 9970.643, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 27, "t": "06:29:56"}
+{"fs_n": 1262, "mer_med": 15.87, "mer_p90": 16.2, "mean_x": 0.0377, "hdr": 779, "vit": 6792.82, "vit_max": 9546.381, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 4, "t": "06:34:57"}
+{"fs_n": 1205, "mer_med": 15.76, "mer_p90": 16.09, "mean_x": 0.0387, "hdr": 757, "vit": 6065.375, "vit_max": 9799.807, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 16, "t": "06:39:58"}
+{"fs_n": 1210, "mer_med": 15.67, "mer_p90": 16.0, "mean_x": 0.0382, "hdr": 876, "vit": 4553.008, "vit_max": 9621.85, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 19, "t": "06:44:59"}
+{"fs_n": 1184, "mer_med": 15.66, "mer_p90": 16.01, "mean_x": 0.0382, "hdr": 719, "vit": 4792.259, "vit_max": 8729.608, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 4, "t": "06:50:00"}
+{"fs_n": 1274, "mer_med": 15.52, "mer_p90": 15.86, "mean_x": 0.0386, "hdr": 922, "vit": 5255.71, "vit_max": 8896.862, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 2, "t": "06:55:01"}
+{"fs_n": 1322, "mer_med": 15.57, "mer_p90": 15.88, "mean_x": 0.0381, "hdr": 840, "vit": 7042.777, "vit_max": 9531.207, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 11, "t": "07:00:01"}
+{"fs_n": 1277, "mer_med": 15.54, "mer_p90": 15.87, "mean_x": 0.0387, "hdr": 879, "vit": 4289.424, "vit_max": 9779.692, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 2, "t": "07:05:03"}
+{"fs_n": 1214, "mer_med": 15.51, "mer_p90": 15.81, "mean_x": 0.0383, "hdr": 835, "vit": 4918.939, "vit_max": 9804.373, "event": "rf9-ambush", "ant": "rabbit", "guard_fires": 2, "t": "07:10:04"}
+{"event": "ambush-done", "best_hdr": 997, "dwells": 38, "t": "07:10:04"}
