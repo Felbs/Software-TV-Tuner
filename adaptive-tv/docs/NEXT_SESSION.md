@@ -31,6 +31,20 @@ data-e small = the signature); or E5's RS-fail discipline (below).
 Same failure CLASS as v1.2's anchor mirage and (suspected) RF15 DEAF:
 adaptation graded by a reference it can influence.
 
+## DEAF/corruption forensics state (23:45 close — READ BEFORE E5 WORK)
+Bred on demand (DFE=1, RF34, strikes in 1-3 x 60s tries). Facts:
+- IQ is CLEAN-RF; same IQ replays fine with DFE off (specimen 212651).
+- Deinterleaver EXONERATED: realigns steady 481/window THROUGH the
+  corruption (field_syncs= in its telemetry line, new).
+- Pre-RS sync-byte probe was INVALID (data still randomizer-whitened
+  before RS — 0x47 only exists post-derand; control windows caught it).
+- Tap surgery (dfe0+lkg) "didn't cure" — BUT command-ack lines in the
+  corrupted samples' logs were NEVER verified. FIRST 2-MIN CHECK
+  TOMORROW: breed + sheriff + grep "SHERIFF cmd" in the same log.
+  If acks missing -> surgery never ran -> the simple theory wins (DFE
+  confidently-wrong equilibrium sustains itself; dfe0 WOULD cure it).
+  If acks present -> remaining suspect = viterbi 12-decoder mux/state.
+
 ## Build queue (ranked)
 1. E5 — RS-fail-disciplined adaptation: ground truth for the DFE anchor
    (v1.2's mirage: self-referential fs_err; see memory + DFE_BLUEPRINT).

@@ -218,6 +218,12 @@ int atsc_rs_decoder_erasure_impl::decode_block(const unsigned char* in207,
     std::memset(tmp, 0, PAD_BYTES);
     std::memcpy(tmp + PAD_BYTES, in207, CODE_LEN);
 
+    // 2026-07-06 DEAF forensics: is the INPUT still framed? Sync byte
+    // 0x47 present pre-decode = deinterleaver alignment survived; absent
+    // = the commutator slipped (persistent-state suspect). Printed as
+    // sync5s in the telemetry line.
+    if (in207[0] == 0x47) d_log_syncok++;
+
     // First attempt: hard decode (no erasures).
     int n = decode_rs_char(d_rs, tmp, nullptr, 0);
     if (n >= 0) {
@@ -463,7 +469,7 @@ int atsc_rs_decoder_erasure_impl::work(int noutput_items,
         std::fprintf(stderr,
                      "[rs_erasure t=%6.1fs] pkts=%d ec=%d era_dec=%d "
                      "era_ok=%d miscorr=%d bad=%d "
-                     "(last5s: pkts=%d era_dec=%d era_ok=%d bad=%d)  "
+                     "(last5s: pkts=%d era_dec=%d era_ok=%d bad=%d sync=%d)  "
                      "weak_pos[%d:%d,%d:%d,%d:%d]  "
                      "vit_metric=%.3f vit_max=%.3f tags=%d eff_eras=%d "
                      "g2rej=%d\n",
@@ -472,6 +478,7 @@ int atsc_rs_decoder_erasure_impl::work(int noutput_items,
                      d_erasure_decodes, d_erasure_successes, d_miscorrections,
                      d_bad_packets,
                      d_log_packets, d_log_eras_dec, d_log_eras_ok, d_log_bad,
+                     d_log_syncok,
                      top3[0], top3v[0], top3[1], top3v[1], top3[2], top3v[2],
                      d_recent_metric, d_recent_metric_max,
                      d_metric_tag_count, d_effective_max_erasures,
@@ -481,6 +488,8 @@ int atsc_rs_decoder_erasure_impl::work(int noutput_items,
         d_log_eras_dec = 0;
         d_log_eras_ok  = 0;
         d_log_bad      = 0;
+        d_log_syncok   = 0;
+        d_log_syncok   = 0;
     }
 
     return noutput_items;
