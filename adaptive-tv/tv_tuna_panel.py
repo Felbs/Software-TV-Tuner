@@ -1428,14 +1428,14 @@ if(SC.e7.includes('replay ready'))sc+='<div style="margin:4px 0"><button onclick
 if(SC.oracle&&SC.oracle.paths)sc+=card('BEACON ORACLE',Object.entries(SC.oracle.paths).map(([k,v])=>k.slice(0,4)+':'+(v===null?'—':v)).join(' '),'path dB vs baseline · '+SC.oracle.t);
 document.getElementById('sciencecards').innerHTML=sc;
 document.getElementById('scinotes').innerHTML=
-'<b>Survival curve</b>: measured on this rig 7/06-07 — packet survival vs MER is an S-curve (50% at 15.2, watchable TV needs 16+). '+
-'<b>Time knob</b>: channel ownership flips by hour (discone owns RF7 in daylight, rabbits at dawn) — the map picks the antenna. '+
+'<b>Survival curve</b>: packet survival vs MER is an S-curve (50% at 15.2 dB, watchable TV needs 16+) — measured live on YOUR rig, not copied from a datasheet. '+
+'<b>Time knob</b>: which antenna owns which channel flips by hour (ionosphere, foliage, temperature inversions) — the map learns YOUR hours and picks accordingly. '+
 '<b>Mod-12 guard</b>: a stream hiccup rotates the viterbi\\'s 12-decoder grid (was: minutes of garbage); the guard drops ≤11 segments and heals it in one field. '+
 '<b>FEC sheriff</b>: Reed-Solomon truth polices the adaptive layers — surgery, then the viterbi scalpel, then restart. '+
-'<b>Dawn forecast</b>: the Sterling VA weather balloon\\'s refractivity profile predicts tropo windows. '+
-'<b>Beacon oracle</b>: FM stations as free path-sounders — a hot Baltimore path says go fish Baltimore TV. '+
-'<b>DFE anchor</b> (7/07): the echo-canceller\\'s feedback taps trained against the pilot anchor — on canyon multipath it halves bad packets (46%→21%) and adds +51% frames; rides automatically in cliff mode. '+
-'<b>GMD ladder</b> (7/07): Forney\\'s 1966 iterate-between-the-codes algorithm, powered by the viterbi\\'s own per-byte doubt (SOVA) — tries 2,4,…16 erasures and keeps the first answer that passes four independent truth checks. '+
+'<b>Dawn forecast</b>: the nearest weather balloon\\'s refractivity profile predicts tropospheric-ducting windows — distant towers can appear at sunrise. '+
+'<b>Beacon oracle</b>: strong local FM stations double as free path-sounders — a hot path toward a distant city says go fish for that city\\'s TV. '+
+'<b>DFE anchor</b>: the echo-canceller\\'s feedback taps trained against the pilot anchor — on multipath-torn channels it halved bad packets and added +51% frames in replay trials; rides automatically in cliff mode. '+
+'<b>GMD ladder</b>: Forney\\'s 1966 iterate-between-the-codes algorithm, powered by the viterbi\\'s own per-byte doubt (SOVA) — tries 2,4,…16 erasures and keeps the first answer that passes four independent truth checks. '+
 '<b>E7 second opinion</b>: decode the same airwaves twice with different equalizer trajectories and each pass rescues DIFFERENT picture groups — the healed merge splices clean twins over damage (never drops a frame).';
 }catch(e){}}
 // ── waterfall v2: client row buffer + pan/zoom + channel overlay ──
