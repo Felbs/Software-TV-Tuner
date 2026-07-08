@@ -25,7 +25,7 @@ RE_RS = re.compile(r"pkts=(\d+) ec=\d+ era_dec=\d+ era_ok=\d+ "
                    r"miscorr=\d+ bad=(\d+)")
 
 
-def base_env(rf, ant, ring):
+def base_env(rf, ant, ring, arsenal=False):
     env = dict(os.environ)
     env["PATH"] = r"C:\Program Files\SDRplay\API\x64;" + env.get("PATH", "")
     env.update({
@@ -42,10 +42,17 @@ def base_env(rf, ant, ring):
         "STVT_IQ_RING": "35" if ring else "0",
         "STVT_IQ_RING_DIR": str(HERE / "lab" / "e7_ring"),
     })
+    if arsenal:
+        # the full marginal-signal arsenal, deliberately fired at a
+        # STRONG channel: does it help, wash, or hurt? (user question
+        # 7/07 late — data over doctrine)
+        env.update({"STVT_RS_ERASURES": "14", "STVT_SOVA": "1",
+                    "STVT_EQ_DFE": "1", "STVT_EQ_DFE_ANCHOR": "1",
+                    "STVT_EQ_RESEED": "1"})
     return env
 
 
-def run_arm(rf, ant, ring, secs, log_path):
+def run_arm(rf, ant, ring, secs, log_path, arsenal=False):
     try:
         LIVE.unlink()
     except OSError:
@@ -53,7 +60,7 @@ def run_arm(rf, ant, ring, secs, log_path):
     lf = open(log_path, "w", encoding="utf-8", errors="replace")
     p = subprocess.Popen([PY, "-u", str(TOOLS / "tv_live.py"),
                           "--rf", str(rf)],
-                         env=base_env(rf, ant, ring),
+                         env=base_env(rf, ant, ring, arsenal),
                          stdout=lf, stderr=subprocess.STDOUT)
     time.sleep(secs)
     p.kill()
@@ -77,7 +84,7 @@ def run_arm(rf, ant, ring, secs, log_path):
             if data[i] == 0x47 and data[i + 1] & 0x80:
                 tei += 1
     out = {
-        "ring": ring,
+        "ring": ring, "arsenal": arsenal,
         "mer_med": round(sorted(mers)[len(mers) // 2], 2) if mers else None,
         "mer_min": round(min(mers), 2) if mers else None,
         "n_mer": len(mers),
@@ -95,6 +102,9 @@ def main():
     ap.add_argument("--rf", type=int, default=9)
     ap.add_argument("--ant", default="Antenna B")
     ap.add_argument("--secs", type=int, default=110)
+    ap.add_argument("--arsenal-arm", action="store_true",
+                    help="add a 5th arm: full cliff arsenal on this "
+                         "channel (help/wash/hurt on strong signals?)")
     args = ap.parse_args()
 
     lab = HERE / "lab"
@@ -103,6 +113,9 @@ def main():
     for i, ring in enumerate([True, False, False, True]):
         arms.append(run_arm(args.rf, args.ant, ring,
                             args.secs, lab / f"reg_{i}_{int(ring)}.log"))
+    if args.arsenal_arm:
+        arms.append(run_arm(args.rf, args.ant, True, args.secs,
+                            lab / "reg_4_arsenal.log", arsenal=True))
 
     on = [a for a in arms if a["ring"]]
     off = [a for a in arms if not a["ring"]]
