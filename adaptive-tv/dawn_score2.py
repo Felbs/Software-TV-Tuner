@@ -2,8 +2,9 @@
 
 v0 read surface METAR and underpredicted a monster (6.0 on the night
 channel 9 ran 3h40m above the cliff): the duct was ALOFT, invisible to
-a surface thermometer. v1 reads the Sterling VA radiosonde (station
-72403 IAD — the balloon that samples our exact airspace at 00Z/12Z)
+a surface thermometer. v1 reads the nearest radiosonde (weather balloon) sounding — set
+STVT_RADIOSONDE to your closest station's WMO id (find it on the
+University of Wyoming sounding page; default 72403 is an example) —
 and computes the radio refractivity profile:
 
     N = 77.6 P/T + 3.73e5 e/T^2        (P hPa, T K, e vapor pressure)
@@ -20,10 +21,14 @@ v0 surface score. Logged to cube_log.jsonl for morning calibration.
     python dawn_score2.py            # latest sounding + latest METAR
 """
 import json
+import os
 import re
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+# WMO station id of YOUR nearest radiosonde launch site
+_STATION = os.environ.get("STVT_RADIOSONDE", "72403")
 
 HERE = Path(__file__).parent
 UA = {"User-Agent": "tv-tuna-p2 (hobby radio science)"}
@@ -61,12 +66,12 @@ def latest_sounding_times():
 
 
 def get_profile():
-    """(z_m, P_hPa, T_C, Td_C) lists from Wyoming text for 72403 (IAD)."""
+    """(z_m, P_hPa, T_C, Td_C) lists from the Wyoming sounding text."""
     for t in latest_sounding_times():
         # 2026: Wyoming moved to the WSGI endpoint (old cgi-bin 404s)
         url = ("https://weather.uwyo.edu/wsgi/sounding?"
                f"datetime={t.year}-{t.month:02d}-{t.day:02d}%20"
-               f"{t.hour:02d}:00:00&id=72403&type=TEXT:LIST")
+               f"{t.hour:02d}:00:00&id={_STATION}&type=TEXT:LIST")
         try:
             txt = fetch(url)
         except Exception:
@@ -156,7 +161,7 @@ def main():
     else:
         layers, ducts, supers, invs = duct_analysis(rows)
         aloft, anotes = score_aloft(ducts, supers, invs)
-        print(f"sounding 72403 IAD @ {t:%Y-%m-%d %HZ}: "
+        print(f"sounding {_STATION} @ {t:%Y-%m-%d %HZ}: "
               f"{len(rows)} levels, {len(ducts)} duct / "
               f"{len(supers)} superrefractive layers below 4 km")
     surf, snotes = surface_score()

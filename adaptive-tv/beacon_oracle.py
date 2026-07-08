@@ -24,10 +24,15 @@ import numpy as np
 HERE = Path(__file__).parent
 BASE = HERE / "beacon_baseline.json"
 
-PATHS = {
-    "dc": [88.5, 90.9, 103.5],
-    "baltimore": [97.9, 101.9],
-    "fredericksburg": [93.3],
+# Example market (replace with YOUR strong local + distant-city FM
+# stations, or set STVT_BEACONS='{"cityA": [88.5], "cityB": [97.9]}').
+# Roadmap: auto-discover beacons from an FM band sweep.
+import json as _json
+import os as _os
+PATHS = _json.loads(_os.environ.get("STVT_BEACONS", "null")) or {
+    "local": [88.5, 90.9, 103.5],
+    "city_ne": [97.9, 101.9],
+    "city_sw": [93.3],
 }
 FS = 8_000_000
 
