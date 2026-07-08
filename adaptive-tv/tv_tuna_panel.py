@@ -1423,7 +1423,8 @@ if(SC.guard_fires!==undefined)sc+=card('MOD-12 GUARD',SC.guard_fires,'slips heal
 if(SC.sheriff)sc+=card('FEC SHERIFF',SC.sheriff.action,'last action · '+SC.sheriff.t);
 if(SC.dawn)sc+=card('DAWN FORECAST',SC.dawn.score,SC.dawn.verdict);
 if(SC.e7){sc+=card('E7 SECOND OPINION',SC.e7.length>34?SC.e7.slice(0,34)+'…':SC.e7,SC.e7,SC.e7.startsWith('done')?'good':(SC.e7.startsWith('error')?'bad':'warn'));
-if(SC.e7.includes('replay ready'))sc+='<div style="margin:4px 0"><button onclick="fetch(\'/api/e7/play\',{method:\'POST\',headers:{\'Content-Type\':\'application/json\'},body:\'{}\'})">▶ watch healed replay (recording, not live)</button></div>'}
+window.e7play=function(){fetch("/api/e7/play",{method:"POST"})};
+if(SC.e7.includes('replay ready'))sc+='<div style="margin:4px 0"><button onclick="e7play()">▶ watch healed replay (recording, not live)</button></div>'}
 if(SC.oracle&&SC.oracle.paths)sc+=card('BEACON ORACLE',Object.entries(SC.oracle.paths).map(([k,v])=>k.slice(0,4)+':'+(v===null?'—':v)).join(' '),'path dB vs baseline · '+SC.oracle.t);
 document.getElementById('sciencecards').innerHTML=sc;
 document.getElementById('scinotes').innerHTML=
