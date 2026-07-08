@@ -1155,9 +1155,14 @@ def run_scan(region: dict | None = None,
                 # STVT_VITERBI=soft from CHAIN_DEFAULTS. The "soft" branch
                 # routes to tv_live_softvit.py, an older fork that ignores
                 # env vars — do not use it here, it strips our chain config.
+                # log_fh=None so each RF gets its own readable log —
+                # that is what arms the MER-floor / NCO-pilot early
+                # verdicts and the per-channel mer_med in the map
+                # (2026-07-07: passing the shared handle disabled all
+                # of it silently)
                 res = scan_one_rf_with_retry(rf, dwell_sec=dwell_sec,
                                               viterbi="stock",
-                                              log_fh=log_fh, retries=2)
+                                              log_fh=None, retries=2)
                 # Preserve phase-1 metrics into the post-lock record so
                 # the picker can show signal strength %.
                 res["rms_dbfs"] = rec["rms_dbfs"]

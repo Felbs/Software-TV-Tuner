@@ -378,6 +378,22 @@ def main():
             last_cc = time.time()
     if ex: ex.kill()
     log("mpv exited")
+    # PLAYER WATCHDOG (2026-07-07 night): mpv dying while the stream is
+    # still growing left "watching X" in the panel with NO window (hit
+    # twice live). Relaunch with a retry cap + success condition — the
+    # unbounded-respawn disease killed a GPU once; never again.
+    tries = int(os.environ.get("STVT_WATCH_RETRY", "0"))
+    try:
+        _sz = target.stat().st_size
+        time.sleep(3)
+        growing = target.stat().st_size > _sz
+    except OSError:
+        growing = False
+    if growing and tries < 2:
+        os.environ["STVT_WATCH_RETRY"] = str(tries + 1)
+        log(f"watchdog: stream still growing, player gone — relaunching "
+            f"(retry {tries + 1}/2)")
+        os.execv(sys.executable, [sys.executable, __file__] + sys.argv[1:])
 
 if __name__ == "__main__":
     main()
