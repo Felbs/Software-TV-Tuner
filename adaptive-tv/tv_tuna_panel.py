@@ -102,6 +102,10 @@ def run_scan():
         env = base_env(36)
         env["STVT_DABNOTCH"] = "0"   # scans must hear VHF-hi (RF7-13)
         env["STVT_IQ_RING"] = "0"    # no 1.1 GB E7 ring per lock-test chain
+        # say WHICH antenna is being scanned — a sticky picker silently
+        # produced a 12-minute discone scan the user thought was Philips
+        _scan_ant = env.get("STVT_ANTENNA", "?")
+        SCAN["line"] = f"scanning on {_scan_ant}…"
         p = subprocess.Popen([PY, "-u", str(TOOLS / "tv_tuner.py"), "--scan"],
                              env=env, stdin=subprocess.PIPE,
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -115,7 +119,7 @@ def run_scan():
             line = raw.strip()
             if not line:
                 continue
-            SCAN["line"] = line[:160]
+            SCAN["line"] = f"[{_scan_ant}] " + line[:145]
             if "phase 1" in line:
                 SCAN["pct"] = 8
             m = re.search(r"full lock test on (\d+)", line)
@@ -1088,7 +1092,7 @@ canvas{width:100%;image-rendering:pixelated;display:block;border-radius:4px}
 <div id="status">loading…</div>
 <div id="pageG">
 <div style="margin:4px 0 8px;font-size:12px">📡 antenna:
-<select id="antpick" style="background:#123;color:#cde;border:1px solid #356;padding:2px 6px">
+<select id="antpick" onchange="fetch('/api/antenna',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({antenna:this.value})})" style="background:#123;color:#cde;border:1px solid #356;padding:2px 6px">
 <option value="auto">auto (belief map)</option>
 <option value="Antenna B">Philips (B)</option>
 <option value="Antenna A">rabbit ears (A)</option>
@@ -1705,6 +1709,11 @@ class H(BaseHTTPRequestHandler):
         elif self.path == "/api/e7":
             e7_run(int(req.get("secs", 30)))
             self._send('"second opinion started"')
+        elif self.path == "/api/antenna":
+            ant = req.get("antenna")
+            STATE["ant_override"] = ant if ant and ant != "auto" else None
+            self._send(json.dumps(f"antenna: {ant or 'auto'} (applies to "
+                                  "next tune/scan)"))
         elif self.path == "/api/e7/play":
             hp = HERE / "lab" / "e7_healed.ts"
             if hp.exists() and hp.stat().st_size > 500_000:
