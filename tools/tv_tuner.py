@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -336,6 +337,54 @@ def spawn_tv_live(rf: int, log_fh, viterbi: str = "stock") -> subprocess.Popen:
         stderr=subprocess.STDOUT,
         creationflags=NEW_PROCESS_GROUP,
     )
+
+
+_RE_FS_ERR = re.compile(r"fs_err_rms=([\d.]+)")
+_RE_NCO = re.compile(r"nco_freq_hz=([+-]?[\d.]+)")
+
+
+def ncos_from_log(path, tail_bytes=8000):
+    """Recent FPLL NCO frequencies (Hz). Pilot-lock detector: a locked
+    pilot pins the NCO within a few hundred Hz; on noise it wanders by
+    thousands. Unlike in_rms this survives the hardware AGC (which
+    gain-pumps dead channels up to the setpoint)."""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            f.seek(max(0, size - tail_bytes))
+            vals = _RE_NCO.findall(f.read())
+    except OSError:
+        return []
+    out = []
+    for v in vals[-8:]:
+        try:
+            out.append(float(v))
+        except ValueError:
+            pass
+    return out
+
+
+def mers_from_log(path, tail_bytes=20000):
+    """Recent MER readings (dB) from a chain log's equalizer telemetry.
+    fs_err_rms IS the MER dial: MER = 20*log10(5/err) (see science.md
+    §12.5). Returns [] when the log has no telemetry yet."""
+    import math
+    try:
+        size = os.path.getsize(path)
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            f.seek(max(0, size - tail_bytes))
+            vals = _RE_FS_ERR.findall(f.read())
+    except OSError:
+        return []
+    out = []
+    for v in vals[-12:]:
+        try:
+            e = float(v)
+            if e > 0:
+                out.append(20.0 * math.log10(5.0 / e))
+        except ValueError:
+            pass
+    return out
 
 
 def wait_for_live_ts(timeout_sec: float = 30.0) -> bool:
@@ -720,8 +769,23 @@ def scan_one_rf(rf: int, dwell_sec: float = 12.0,
     except (FileNotFoundError, PermissionError, OSError):
         pass
 
-    fh = log_fh if log_fh is not None else subprocess.DEVNULL
+    # MER EARLY VERDICT (2026-07-07): keep the chain log readable so the
+    # equalizer's fs_err_rms telemetry — the MER dial — can call dead
+    # candidates in ~9 s instead of burning the full 25 s + dwell, and
+    # so every scanned channel gets a quality number in the map.
+    own_log = log_fh is None
+    log_path = LIVE_TS.parent / f"scan_rf{rf}.log"
+    if own_log:
+        os.environ.setdefault("STVT_EQ_TELEM", "1")
+        fh = open(log_path, "w", encoding="utf-8", errors="replace")
+    else:
+        fh = log_fh
     proc = None
+
+    def mer_med():
+        m = mers_from_log(log_path) if own_log else []
+        return round(sorted(m)[len(m) // 2], 1) if m else None
+
     try:
         proc = spawn_tv_live(rf, fh, viterbi=viterbi)
     except Exception as e:
@@ -732,8 +796,44 @@ def scan_one_rf(rf: int, dwell_sec: float = 12.0,
         # cold-starts 4-6s slower than the old softvit fork, especially
         # on VHF and marginal UHF carriers. 15s was too tight and cut
         # off legitimately-locking channels (RF 7 WJLA, RF 24, RF 27).
-        if not wait_for_live_ts(timeout_sec=25.0):
-            return {"rf": rf, "lock": False, "reason": "no live.ts growth"}
+        # MER-aware wait: growth check as before, plus the early verdict.
+        t_spawn = time.time()
+        grew = False
+        last_size = -1
+        while time.time() - t_spawn < 25.0:
+            if proc.poll() is not None:
+                return {"rf": rf, "lock": False, "reason": "tv_live died"}
+            try:
+                sz = LIVE_TS.stat().st_size
+            except FileNotFoundError:
+                sz = 0
+            if sz > 1_000_000 and sz != last_size and last_size >= 0:
+                grew = True
+                break
+            last_size = sz
+            if own_log and (time.time() - t_spawn) > 9.0:
+                mers = mers_from_log(log_path)
+                if len(mers) >= 3 and max(mers) < 11.5:
+                    return {"rf": rf, "lock": False, "mer_med": mer_med(),
+                            "reason": f"MER floor {max(mers):.1f} dB "
+                                      "(cliff is 15.2 — nothing here)"}
+                # no equalizer telemetry yet (it starts at field sync):
+                # judge the pilot by NCO stability instead
+                if not mers:
+                    ncos = ncos_from_log(log_path)
+                    if len(ncos) >= 5:
+                        mid = sorted(ncos)[len(ncos) // 2]
+                        spread = max(abs(x - mid) for x in ncos)
+                        if spread > 3000.0:
+                            return {"rf": rf, "lock": False,
+                                    "reason": "no pilot (NCO wandering "
+                                              f"±{spread:.0f} Hz)"}
+            time.sleep(0.5)
+        if not grew:
+            r = {"rf": rf, "lock": False, "reason": "no live.ts growth"}
+            if mer_med() is not None:
+                r["mer_med"] = mer_med()
+            return r
         # Wait for the equalizer to converge.
         deadline = time.time() + dwell_sec
         while time.time() < deadline:
@@ -752,6 +852,11 @@ def scan_one_rf(rf: int, dwell_sec: float = 12.0,
             "pat_count": pat,
             "programs": progs,
         }
+        # channel quality + provenance for the map (belief map / panel
+        # ranking / time-knob science all eat this)
+        if mer_med() is not None:
+            result["mer_med"] = mer_med()
+        result["antenna"] = os.environ.get("STVT_ANTENNA", "?")
         # ATSC PSIP: virtual-channel labels + the next ~12 hours of EIT
         # show titles, decoded directly from the captured TS via our
         # stdlib-only parser. Events are stored with GPS start_time so
@@ -772,6 +877,11 @@ def scan_one_rf(rf: int, dwell_sec: float = 12.0,
         return result
     finally:
         kill_proc(proc, "scan_tv_live")
+        if own_log:
+            try:
+                fh.close()
+            except OSError:
+                pass
         # SDRplay driver needs ~4 s to fully release between back-to-back
         # tunes. 3s was sometimes too tight on this rig and the next
         # channel's SDR open would fail silently (presents as
