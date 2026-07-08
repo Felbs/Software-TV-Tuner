@@ -828,6 +828,15 @@ def scan_one_rf(rf: int, dwell_sec: float = 12.0,
                             return {"rf": rf, "lock": False,
                                     "reason": "no pilot (NCO wandering "
                                               f"±{spread:.0f} Hz)"}
+                        # THIRD VERDICT (2026-07-07 bench finding): a
+                        # STABLE pilot with no field sync by 15 s is the
+                        # discone-class signature — carrier present,
+                        # data unreachable. The full 25 s adds nothing.
+                        if (time.time() - t_spawn) > 15.0 \
+                                and spread <= 3000.0:
+                            return {"rf": rf, "lock": False,
+                                    "reason": "pilot, no field sync "
+                                              "(carrier without data)"}
             time.sleep(0.5)
         if not grew:
             r = {"rf": rf, "lock": False, "reason": "no live.ts growth"}
@@ -903,6 +912,13 @@ def scan_one_rf_with_retry(rf: int, dwell_sec: float = 12.0,
         last = res
         if res.get("lock"):
             res["lock_attempt"] = attempt + 1
+            return res
+        # carrier-without-data earns ONE cold-start retry (equalizer
+        # luck is real) but never a third attempt — the 7/07 discone
+        # benchmark burned ~12 min on 3x25s for channels physics had
+        # already answered
+        if attempt >= 1 and str(res.get("reason", "")).startswith(
+                ("pilot, no field sync", "no pilot", "MER floor")):
             return res
     return last or {"rf": rf, "lock": False, "reason": "all retries failed"}
 
