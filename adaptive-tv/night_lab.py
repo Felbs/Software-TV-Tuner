@@ -212,6 +212,14 @@ def main():
     if not stopped():
         log_event({"event": "AMBUSH-HANDOFF"})
         subprocess.run([PY, "-u", str(HERE / "ambush3.py")])
+    # morning: hand the rig back — panel up, ready for the user
+    try:
+        subprocess.Popen([PY, "-u", str(HERE / "tv_tuna_panel.py")],
+                         stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+        log_event({"event": "PANEL-RESTORED"})
+    except Exception as e:
+        log_event({"event": "panel-restore-error", "err": str(e)[:80]})
     log_event({"event": "NIGHT-LAB-END"})
 
 
