@@ -164,6 +164,9 @@ def sample(rf, antenna, rfg, ifgr, secs=SAMPLE_SECS):
         "fs_n": n,
         "mer_med": round(mers[n // 2], 2) if n else None,
         "mer_p90": round(mers[int(n * 0.9)], 2) if n else None,
+        # low tail (2026-07-08): the dips ARE the disease — a channel
+        # with median 17 and p10 14 tears frames while looking healthy
+        "mer_p10": round(mers[n // 10], 2) if n else None,
         "mean_x": round(mx, 4),
         "hdr": hdr,
     }

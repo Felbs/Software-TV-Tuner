@@ -106,7 +106,20 @@ def main():
                 log_event(dict(s))
                 mer = s.get("mer_med")
                 key = f"{ant}_rf{rf}"
-                if (mer is not None and MID_CLIFF[0] <= mer < MID_CLIFF[1]
+                # H-DIP (2026-07-08, from the night's zero-specimen
+                # result): the mid-cliff MEDIAN band was empty all
+                # night — marginality lives in the DIPS. A breather
+                # (healthy median, cliff-diving low tail or high bad%)
+                # is specimen-worthy: that's the RF9-evening disease.
+                p10 = s.get("mer_p10")
+                badpct = (100 * s.get("rs_bad", 0) /
+                          max(1, s.get("rs_pkts", 0)))
+                breather = (mer is not None and mer >= 15.5 and
+                            ((p10 is not None and p10 <= 15.2)
+                             or badpct >= 1.5))
+                midcliff = (mer is not None
+                            and MID_CLIFF[0] <= mer < MID_CLIFF[1])
+                if ((midcliff or breather)
                         and len(specimens) < MAX_SPECIMENS
                         and per_key.get(key, 0) < 2):
                     out = CAPS / (f"day_{key}_mer{mer:.1f}_"
