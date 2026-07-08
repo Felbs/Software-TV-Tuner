@@ -43,7 +43,7 @@ SCAN_ROTATION = [("Antenna B", "philips"), ("Antenna A", "rabbit"),
                  ("Antenna C", "discone")]
 MID_CLIFF = (12.5, 16.2)
 MAX_SPECIMENS = 6
-END_AT = "17:00"
+END_AT = os.environ.get("DAY_LAB_END", "18:00")
 
 
 def log_event(o):
