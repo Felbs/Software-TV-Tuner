@@ -101,6 +101,7 @@ def run_scan():
         time.sleep(5)               # give a balance sweep time to release
         env = base_env(36)
         env["STVT_DABNOTCH"] = "0"   # scans must hear VHF-hi (RF7-13)
+        env["STVT_IQ_RING"] = "0"    # no 1.1 GB E7 ring per lock-test chain
         p = subprocess.Popen([PY, "-u", str(TOOLS / "tv_tuner.py"), "--scan"],
                              env=env, stdin=subprocess.PIPE,
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
