@@ -106,6 +106,53 @@ def dump_segments(iq_path, secs, sps=1.1):
     return segs, flags[:n], segno[:n]
 
 
+def coherence_time(segs, fs_idx, ref):
+    """Track the main tap's COMPLEX gain per field sync (plain complex
+    correlation at the peak lag — no PHAT, no |.|) and autocorrelate the
+    series. Field syncs are 24.2 ms apart, so the series samples the
+    channel at 41.3 Hz. Returns dict with coherence time (lag where
+    |rho| drops below 0.5), implied Doppler spread (Tc ≈ 0.423/fd), and
+    the fade depth statistics of |gain|."""
+    FS_HZ = 41.32                       # field syncs per second
+    gains = []
+    for i in fs_idx:
+        seg = segs[i].astype(np.float64)
+        # complex-free real correlation at symbol alignment: dot at the
+        # known offset (ref starts at segment start; timing already
+        # locked by the sync loop, so lag 0 ± 2 symbols)
+        best, bidx = 0.0, 0
+        for lag in range(-2, 3):
+            a = seg[max(0, lag): max(0, lag) + len(ref)]
+            if len(a) < len(ref):
+                continue
+            v = float(np.dot(a, ref))
+            if abs(v) > abs(best):
+                best, bidx = v, lag
+        gains.append(best)
+    g = np.array(gains, dtype=np.float64)
+    g -= 0  # (real-valued path gain series; sign flips = deep events)
+    if len(g) < 20:
+        return {"error": "too few field syncs"}
+    gn = (g - g.mean())
+    ac = np.correlate(gn, gn, "full")[len(gn) - 1:]
+    ac /= (ac[0] + 1e-12)
+    below = np.where(np.abs(ac) < 0.5)[0]
+    tc_ms = (below[0] / FS_HZ * 1000.0) if len(below) else None
+    mag = np.abs(g) / (np.median(np.abs(g)) + 1e-12)
+    return {
+        "n_fs": int(len(g)),
+        "span_s": round(len(g) / FS_HZ, 1),
+        "coherence_time_ms": round(tc_ms, 1) if tc_ms else "> span",
+        "implied_doppler_hz": round(423.0 / tc_ms, 2) if tc_ms else None,
+        "gain_p10_db": round(20 * np.log10(np.percentile(mag, 10)), 1),
+        "gain_p1_db": round(20 * np.log10(np.percentile(mag, 1)), 1),
+        "gain_min_db": round(20 * np.log10(mag.min() + 1e-9), 1),
+        "note": ("Tc < 24ms means fading outpaces the field-sync "
+                 "trainer entirely" if tc_ms and tc_ms < 24 else
+                 "trainer sees the fade but adapts only at 41 Hz"),
+    }
+
+
 # ── GCC estimators ───────────────────────────────────────────────────
 def gcc(window, ref, beta=1.0, upsample=16):
     """Generalized cross-correlation of known ref against window.
@@ -228,6 +275,9 @@ def main():
                     help="single beta; default compares 0 / 0.7 / 1.0")
     ap.add_argument("--upsample", type=int, default=16)
     ap.add_argument("--json", default=None)
+    ap.add_argument("--coherence", action="store_true",
+                    help="track main-tap gain per field sync -> "
+                         "coherence time / Doppler of the breathing")
     args = ap.parse_args()
 
     ref = training_reference()
@@ -246,6 +296,14 @@ def main():
         print("[phat] NO FIELD SYNCS — specimen too damaged for this "
               "estimator (it needs at least sync lock)")
         sys.exit(1)
+
+    if args.coherence:
+        c = coherence_time(segs, fs_idx, ref)
+        print(f"[coherence] {json.dumps(c, indent=1)}")
+        if args.json:
+            Path(args.json).write_text(json.dumps(
+                {"file": Path(args.iq).name, "coherence": c}, indent=1))
+        return
 
     betas = [args.beta] if args.beta is not None else [0.0, 0.7, 1.0]
     out = {"file": Path(args.iq).name, "n_fs": int(len(fs_idx)),
