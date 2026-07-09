@@ -42,6 +42,7 @@ os.environ.update({
     "STVT_EQ_TAP_CACHE": str(CACHE),
     "STVT_EQ_DFE": "1",
     "STVT_EQ_DFE_ANCHOR": "1",   # 7/07: halves bad pkts on canyon replay
+    "STVT_EQ_DD_MU": "1e-2",     # 7/10: -31% bad on RF9 breather replay
     "STVT_EQ_RESEED": "1",
     "STVT_EQ_QUALITY_BAD_RMS": "8",
     "STVT_EQ_CMD_FILE": str(HERE / "eq_cmd.txt"),

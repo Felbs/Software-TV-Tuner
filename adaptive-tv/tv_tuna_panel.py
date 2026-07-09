@@ -859,6 +859,13 @@ def tune(rf, prog, virtual, name):
                             # DFE+anchor halves bad pkts (46%->21%) and
                             # adds +51% frames vs no-DFE; inert elsewhere
                             "STVT_EQ_DFE_ANCHOR": "1",
+                            # DD tracking promoted 7/10: symbol-rate
+                            # NLMS on data segments; on the RF9 breather
+                            # replay bad -31%, frames +13% at mu=1e-2;
+                            # zero regression on the clean control.
+                            # Kills the flat-fading disease the anchor
+                            # can't (fades alias past 41 Hz training).
+                            "STVT_EQ_DD_MU": "1e-2",
                             "STVT_EQ_RESEED": "1",
                             "STVT_EQ_QUALITY_BAD_RMS": "8"})
                 if GEN[0] != my_gen: return
