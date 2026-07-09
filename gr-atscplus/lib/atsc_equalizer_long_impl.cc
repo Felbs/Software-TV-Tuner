@@ -138,6 +138,57 @@ void atsc_equalizer_long_impl::filterN(const float* input_samples,
                                   float* output_samples,
                                   int nsamples)
 {
+    // ── FFT overlap-save path (STVT_EQ_FFT=1, 2026-07-10, PySDR
+    // filters ch.) ── one 2048-pt real FFT round trip replaces
+    // nsamples x NTAPS dot products. Mathematically the same
+    // correlation (conjugated tap spectrum), differing only in float
+    // rounding order. Tap spectrum cached; a 4-value fingerprint
+    // (energy + 3 sentinels) invalidates it on ANY tap change, so no
+    // mutation site (adapt/leak/restore/reseed/DD) can be missed.
+    static const bool FFTC = []() {
+        const char* p = std::getenv("STVT_EQ_FFT");
+        return p && p[0] == '1';
+    }();
+    if (FFTC && nsamples + NTAPS - 1 <= FFT_N) {
+        if (!d_ffwd) {
+            d_ffwd = std::make_unique<gr::fft::fft_real_fwd>(FFT_N);
+            d_frev = std::make_unique<gr::fft::fft_real_rev>(FFT_N);
+            d_tap_spec.resize(FFT_N / 2 + 1);
+        }
+        float energy = 0.0f;
+        volk_32f_x2_dot_prod_32f(&energy, &d_taps[0], &d_taps[0], NTAPS);
+        if (!d_tap_spec_valid || energy != d_tap_fp[0] ||
+            d_taps[0] != d_tap_fp[1] || d_taps[NTAPS / 2] != d_tap_fp[2] ||
+            d_taps[NTAPS - 1] != d_tap_fp[3]) {
+            float* tb = d_ffwd->get_inbuf();
+            std::memset(tb, 0, FFT_N * sizeof(float));
+            std::memcpy(tb, &d_taps[0], NTAPS * sizeof(float));
+            d_ffwd->execute();
+            const gr_complex* ts = d_ffwd->get_outbuf();
+            for (int k = 0; k < FFT_N / 2 + 1; k++)
+                d_tap_spec[k] = std::conj(ts[k]);   // correlation form
+            d_tap_fp[0] = energy;
+            d_tap_fp[1] = d_taps[0];
+            d_tap_fp[2] = d_taps[NTAPS / 2];
+            d_tap_fp[3] = d_taps[NTAPS - 1];
+            d_tap_spec_valid = true;
+        }
+        const int span = nsamples + NTAPS - 1;
+        float* ib = d_ffwd->get_inbuf();
+        std::memcpy(ib, input_samples, span * sizeof(float));
+        std::memset(ib + span, 0, (FFT_N - span) * sizeof(float));
+        d_ffwd->execute();
+        const gr_complex* X = d_ffwd->get_outbuf();
+        gr_complex* Y = d_frev->get_inbuf();
+        for (int k = 0; k < FFT_N / 2 + 1; k++)
+            Y[k] = X[k] * d_tap_spec[k];
+        d_frev->execute();
+        const float* ob = d_frev->get_outbuf();
+        const float inv = 1.0f / (float)FFT_N;      // FFTW unnormalized
+        for (int j = 0; j < nsamples; j++)
+            output_samples[j] = ob[j] * inv;
+        return;
+    }
     for (int j = 0; j < nsamples; j++) {
         output_samples[j] = 0;
         volk_32f_x2_dot_prod_32f(

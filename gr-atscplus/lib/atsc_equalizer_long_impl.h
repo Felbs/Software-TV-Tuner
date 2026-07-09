@@ -14,6 +14,9 @@
 #include "atsc_syminfo_impl.h"
 #include <gnuradio/dtv/atsc_consts.h>
 #include <gnuradio/atscplus/atsc_equalizer_long.h>
+#include <gnuradio/fft/fft.h>
+#include <memory>
+#include <vector>
 
 namespace gr {
 namespace atscplus {
@@ -41,6 +44,19 @@ private:
     // a contiguous slice (write at h and h+NFB). Data segments only in
     // v1; field syncs refill the history with KNOWN training symbols.
     static constexpr int NFB_MAX = 384;
+
+    // ── FFT-convolution path (STVT_EQ_FFT=1, 2026-07-10) ──
+    // Overlap-save replaces the 832 x NTAPS dot products per segment on
+    // the passive (lean) path. Tap spectrum cached and invalidated by a
+    // cheap fingerprint (energy + 3 sentinels) so no mutation site can
+    // ever be missed. 2048 >= 832 + NTAPS - 1 for all NTAPS variants
+    // up to 512 (832+511=1343).
+    static constexpr int FFT_N = 2048;
+    std::unique_ptr<gr::fft::fft_real_fwd> d_ffwd;
+    std::unique_ptr<gr::fft::fft_real_rev> d_frev;
+    std::vector<gr_complex> d_tap_spec;
+    float d_tap_fp[4] = {0, 0, 0, 0};   // energy, first, mid, last
+    bool d_tap_spec_valid = false;
     std::vector<float> d_fb;          // feedback taps (NFB long)
     std::vector<float> d_hist;        // decided symbols, 2*NFB ring
     int d_hpos = 0;
