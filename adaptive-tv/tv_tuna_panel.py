@@ -78,6 +78,27 @@ STATE = {"rf": None, "prog": None, "virtual": None, "name": None,
 LOCK = threading.Lock()
 GEN = [0]
 
+# antenna-picker persistence (2026-07-09 bug fix): the picker reset to
+# auto on every panel restart, so an overnight restart silently pointed
+# the next scan at the wrong antenna (a rabbit scan ran on the discone).
+# Remember the last pick across restarts.
+ANT_FILE = HERE / "lab" / "last_antenna.txt"
+
+
+def set_antenna(ant):
+    STATE["ant_override"] = ant if ant and ant != "auto" else None
+    try:
+        ANT_FILE.write_text(ant or "auto", encoding="utf-8")
+    except OSError:
+        pass
+
+
+try:
+    _saved = ANT_FILE.read_text(encoding="utf-8").strip()
+    STATE["ant_override"] = _saved if _saved and _saved != "auto" else None
+except OSError:
+    STATE["ant_override"] = None
+
 # ── channel scan (SCAN button) ─────────────────────────────────────
 SCAN = {"running": False, "line": "", "pct": 0, "t0": None}
 
@@ -1184,6 +1205,9 @@ toast('📡 channel scan starting — TV stops, takes ~3-6 min, guide refreshes 
 await fetch('/api/scan',{method:'POST'})}
 let BUSY=false, WAS_SCANNING=false;
 async function refreshStatus(){try{const s=await (await fetch('/api/status')).json();
+// reflect the persisted antenna in the picker (unless you're mid-select)
+const ap=document.getElementById('antpick');
+if(ap&&s.ant&&document.activeElement!==ap&&ap.value!==s.ant)ap.value=s.ant;
 const scanning=s.scan&&s.scan.running;
 BUSY=s.tuning||scanning;
 document.getElementById('scanBtn').disabled=BUSY;
@@ -1211,9 +1235,18 @@ if(r.rf!==lastRf){lastRf=r.rf;
 const s=r.snr||0,pct=Math.max(0,Math.min(100,Math.round((s-20)/35*100)));
 const col=pct>=70?'#67d18a':(pct>=45?'#e7c96a':'#e77');
 const blocks='█'.repeat(Math.round(pct/10))+'░'.repeat(10-Math.round(pct/10));
+// decode QUALITY from measured MER — the honest "will it look good?",
+// separate from raw signal strength (the % bar). Only shown when the
+// scan actually measured it. Thresholds = the survival curve.
+let mtag='';
+if(r.mer!=null){const m=r.mer;
+const mc=m>=16.5?'#67d18a':(m>=15.2?'#e7c96a':'#e77');
+const mw=m>=16.5?'flawless':(m>=16?'watchable':(m>=15.2?'marginal · glitchy':'below cliff'));
+mtag=`&nbsp;<span style="color:${mc};font-weight:700">◉ ${mw}</span>`+
+`<span style="color:#5f7591;font-size:11px"> (MER ${m.toFixed(1)} dB)</span>`;}
 h+=`<tr><td colspan="${g.slots.length+2}" style="background:#0d1626;border-top:2px solid #26436b;padding:7px 6px">`+
 `📡 <b>tower RF${r.rf}</b> &nbsp;<span style="color:${col};font-family:monospace">${blocks}</span> `+
-`<span style="color:${col};font-weight:700">${pct}%</span>`+
+`<span style="color:${col};font-weight:700">${pct}%</span>`+mtag+
 `<span style="color:#5f7591;font-size:11px"> · pilot ${s?s.toFixed(0):'—'} dB over the noise floor`+
 (s?` = <b>${Math.round(Math.pow(10,s/10)).toLocaleString()}×</b> the static`:'')+
 (r.rms!=null&&g.floor!=null?` · level ${r.rms.toFixed(1)} dBFS / floor ${g.floor.toFixed(1)} dBFS`:'')+
@@ -1233,8 +1266,10 @@ h+='<div class="edu" style="margin-top:10px"><b>Reading the tower meters:</b> ev
 '<span style="color:#e77">25 dB — carrier barely detectable</span> · '+
 '<span style="color:#e7c96a">35 dB — lock sometimes possible</span> · '+
 '<span style="color:#67d18a">45 dB+ — solid television</span>. '+
-'Note the pilot only proves the tower is <i>reaching</i> us — whether the data survives the trip is what '+
-'MER measures (🎯 SIGNAL FINDER / NERD tab). Absolute levels are in <b>dBFS</b> — decibels below the '+
+'Note the pilot % is signal <i>strength</i> only — it proves the tower is <i>reaching</i> us, but whether the '+
+'data survives the trip is <b>decode quality</b>, shown by the <b>◉ tag</b> (from measured MER when a scan '+
+'captured it: green ≥16.5 dB flawless, yellow marginal, red below the ~15.2 dB cliff). A tower can read a '+
+'middling strength % yet still be flawless to watch — quality is the honest number. Absolute levels are in <b>dBFS</b> — decibels below the '+
 'receiver\\'s full-scale ceiling (0 dBFS = the loudest sound the converter can hear; −60 is quiet static). '+
 'Diagnostic gold: if the <b>floor itself</b> rises from one scan to the next, the noise came to <i>you</i> '+
 '(new interference, a powered amp, USB hash) — the towers didn\\'t get weaker.</div>';
@@ -1583,6 +1618,7 @@ def grid_json():
         rows.append({"rf": ch["rf"], "prog": ch["program"],
                      "virtual": ch["virtual"], "callsign": ch["callsign"],
                      "tune": ch.get("tune", " "), "snr": ch.get("snr_db"),
+                     "mer": ch.get("mer_med"),
                      "rms": rms_by_rf.get(ch["rf"]),
                      "cells": cells})
     return {"slots": slot_labels, "rows": rows, "floor": floor}
@@ -1604,6 +1640,7 @@ class H(BaseHTTPRequestHandler):
             self._send(json.dumps(grid_json()))
         elif self.path == "/api/status":
             st = {k: STATE[k] for k in ("rf", "prog", "virtual", "name", "tuning")}
+            st["ant"] = STATE.get("ant_override") or "auto"
             st["tuned"] = STATE["rf"] is not None and not STATE["tuning"]
             st["stage"] = STATE.get("stage") or ""
             st["stage_pct"] = STATE.get("stage_pct") or 0
@@ -1669,7 +1706,7 @@ class H(BaseHTTPRequestHandler):
         req = json.loads(self.rfile.read(n) or b"{}")
         if self.path == "/api/tune":
             ant = req.get("antenna")
-            STATE["ant_override"] = ant if ant and ant != "auto" else None
+            set_antenna(ant)
             threading.Thread(target=tune,
                              args=(req["rf"], req["prog"], req["virt"],
                                    req.get("name", "")), daemon=True).start()
@@ -1711,9 +1748,9 @@ class H(BaseHTTPRequestHandler):
             self._send('"second opinion started"')
         elif self.path == "/api/antenna":
             ant = req.get("antenna")
-            STATE["ant_override"] = ant if ant and ant != "auto" else None
-            self._send(json.dumps(f"antenna: {ant or 'auto'} (applies to "
-                                  "next tune/scan)"))
+            set_antenna(ant)
+            self._send(json.dumps(f"antenna: {ant or 'auto'} (saved; "
+                                  "applies to next tune/scan)"))
         elif self.path == "/api/e7/play":
             hp = HERE / "lab" / "e7_healed.ts"
             if hp.exists() and hp.stat().st_size > 500_000:

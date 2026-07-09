@@ -131,6 +131,7 @@ def load_epg() -> tuple[list[dict], int | None]:
                 "network":  network_hint,
                 "tune":     tune,
                 "snr_db":   c.get("pilot_snr_db"),
+                "mer_med":  c.get("mer_med"),   # decode quality (dB)
                 "events":   events,
             })
 
