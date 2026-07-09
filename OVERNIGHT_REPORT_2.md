@@ -117,7 +117,7 @@ regression test. Full test suite: **161 passing** (was ~76 before;
 - `859c26f tests: add tools/tests/test_psip.py (28 unit tests for atsc_psip)`
   — **THIS WAS NOT CREATED BY THIS AGENT.** It appeared on the branch
   with timestamp 02:03:13 between my Task 1 and Task 2 commits, with
-  the same author identity (Felbs / Felbs@users.noreply.github.com). Most
+  the same git author identity as the repo owner. Most
   likely a parallel agent or auto-process. The test file is well-
   scoped (covers atsc_psip's pure helpers), the tests pass, and it
   doesn't conflict with anything I added. Worth eyeballing in the
