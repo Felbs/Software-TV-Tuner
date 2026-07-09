@@ -106,6 +106,46 @@ At the interactive prompt: row number or `5.1` tunes, `g` refreshes
 the guide, `i 7` inspects a row, `c` cycles captions
 (OFF → English → Spanish), `q` quits.
 
+## The web UI — TV Tuna panel
+
+Prefer clicking to typing? There's a browser dashboard that wraps the
+whole tuner. Start it and open the page:
+
+```powershell
+python adaptive-tv\tv_tuna_panel.py
+# then open http://localhost:8642 in any browser
+```
+
+**Guide tab** — a channel grid built from your last scan; click a
+station to tune, and the video opens in its own player window. An
+**antenna picker** lets you tell the tuner which antenna is connected
+(it decodes whatever you point it at — you choose the antenna, the code
+adapts). **📡 SCAN CHANNELS** re-surveys the airwaves and refreshes the
+guide; **REC** records the current channel.
+
+**NERD tab (Stats for Nerds)** — the live instrument panel, all reading
+straight off the decoder:
+
+- **Live MER + signal telemetry** — the decodability dial in dB, updated
+  ~1 Hz, plus FPLL lock and equalizer state.
+- **🎯 SIGNAL FINDER** — aim-by-ear: a tone whose pitch tracks MER, so
+  you can rotate an antenna and hear it lock (Bluetooth-headphone safe).
+- **📏 FLATNESS** — in-band ripple meter; a flat band means clean
+  multipath, a rippled one means reflections to aim out.
+- **🌐 ALL TOWERS** — hops every tower and plays a chord so you can find
+  the aim that's fair to all of them at once.
+- **📡 ECHO X-RAY** — the channel's impulse response: the main path plus
+  every reflection, so you can see multipath instead of guessing.
+- **🩺 SECOND OPINION (E7)** — snapshots the last ~30 s you just watched
+  from the decoder's own IQ ring and re-decodes it several ways, splicing
+  the best of each pass — a rescue pass for a glitchy moment, with no
+  interruption to live TV.
+- **🔬 TUNA SCIENCE** — plain-language cards explaining each invented
+  instrument, with your own rig's live numbers.
+
+Everything the panel reports is measured on *your* signal, at *your*
+location — nothing is hardcoded to a market.
+
 ## Tune ANY antenna — the universal layer (`adaptive-tv/`)
 
 The core problem with SDR TV is that every antenna + amp + cable
