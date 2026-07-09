@@ -1736,7 +1736,12 @@ class H(BaseHTTPRequestHandler):
             threading.Thread(target=run_scan, daemon=True).start()
             self._send('"scanning"')
         elif self.path == "/api/meter":
-            threading.Thread(target=meter_start, args=(req["rf"],),
+            try:
+                rf = int(req["rf"])
+            except (KeyError, TypeError, ValueError):
+                self._send('"bad request: meter needs a numeric rf"')
+                return
+            threading.Thread(target=meter_start, args=(rf,),
                              daemon=True).start()
             self._send('"metering"')
         elif self.path == "/api/meter/stop":
@@ -1751,18 +1756,32 @@ class H(BaseHTTPRequestHandler):
                 BAL["on"] = False
                 self._send('"balance off"')
         elif self.path == "/api/flat":
-            if req.get("rf"):
-                threading.Thread(target=flat_start, args=(req["rf"],),
+            rf = req.get("rf")
+            if rf:
+                try:
+                    rf = int(rf)
+                except (TypeError, ValueError):
+                    self._send('"bad request: flat needs a numeric rf"')
+                    return
+                threading.Thread(target=flat_start, args=(rf,),
                                  daemon=True).start()
                 self._send('"flatness on"')
             else:
                 FLAT["on"] = False
                 self._send('"flatness off"')
         elif self.path == "/api/record":
-            out = record(req["virt"], req["title"])
+            virt, title = req.get("virt"), req.get("title")
+            if not virt or not title:
+                self._send('"bad request: record needs virt and title"')
+                return
+            out = record(virt, title)
             self._send(out or "scheduled", "text/plain; charset=utf-8")
         elif self.path == "/api/e7":
-            e7_run(int(req.get("secs", 30)))
+            try:
+                secs = int(req.get("secs", 30))
+            except (TypeError, ValueError):
+                secs = 30
+            e7_run(secs)
             self._send('"second opinion started"')
         elif self.path == "/api/antenna":
             ant = req.get("antenna")
@@ -1783,8 +1802,18 @@ class H(BaseHTTPRequestHandler):
             self.send_error(404)
 
 
+class Panel(ThreadingHTTPServer):
+    # default backlog of 5 refused connections under a burst (stress-test
+    # finding 2026-07-09: 57/244 concurrent requests got WinError 10061).
+    request_queue_size = 128
+    daemon_threads = True
+
+
 if __name__ == "__main__":
-    threading.Thread(target=sweeper, daemon=True).start()
+    # STVT_PANEL_NOSWEEP=1: skip the spectrum sweeper (which opens the
+    # SDR) so the API can be tested without contending for the radio.
+    if not os.environ.get("STVT_PANEL_NOSWEEP"):
+        threading.Thread(target=sweeper, daemon=True).start()
     threading.Thread(target=flight_recorder, daemon=True).start()
     print(f"TV Tuna panel: http://localhost:{PORT}", flush=True)
-    ThreadingHTTPServer(("127.0.0.1", PORT), H).serve_forever()
+    Panel(("127.0.0.1", PORT), H).serve_forever()
