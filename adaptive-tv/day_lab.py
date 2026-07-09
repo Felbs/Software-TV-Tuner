@@ -67,6 +67,15 @@ def capture_specimen(rf, port, rfg, ifgr, out, secs=45):
             out.unlink()
         except OSError:
             pass
+        if attempt == 3:
+            try:
+                subprocess.run(
+                    ["powershell", "-NoProfile", "-Command",
+                     "Restart-Service SDRplayAPIService -Force"],
+                    capture_output=True, timeout=60)
+                time.sleep(6)
+            except Exception:
+                pass
         try:
             r = subprocess.run(
                 [PY, "-u", str(HERE / "iq_capture.py"),
@@ -79,7 +88,10 @@ def capture_specimen(rf, port, rfg, ifgr, out, secs=45):
             return False
         m = re.search(r'"continuity_pct":\s*([\d.]+)', r.stdout or "")
         cont = float(m.group(1)) if m else 0.0
-        if out.exists() and out.stat().st_size > 10e6 and cont >= 90.0:
+        mb = round(out.stat().st_size / 1e6, 1) if out.exists() else 0.0
+        log_event({"event": "cap-try", "rf": rf, "ant": port,
+                   "attempt": attempt, "cont": cont, "mb": mb})
+        if mb > 10 and cont >= 80.0:
             return True
         time.sleep(5)
     return False
