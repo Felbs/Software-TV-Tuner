@@ -62,6 +62,38 @@ def stopped():
     return STOP.exists()
 
 
+def capture_specimen(rf, port, rfg, ifgr, out, secs=45):
+    """Capture IQ with the DUD-EATER discipline. oc.sample() just killed
+    the chain, so the SDR needs a beat to release and attempt #1 after a
+    kill is a near-guaranteed wedge. BUG FOUND 2026-07-08: the old
+    immediate subprocess.run fired into the un-released SDR, failed to
+    open in ~1s, wrote no file, and was silently skipped -> THREE nights
+    of zero specimens while marginal signals were plainly present
+    (RF7 discone 14.54 dB @ 20:08). Settle, then retry."""
+    time.sleep(8)                       # let the SDR fully release
+    for attempt in (1, 2, 3):
+        try:
+            out.unlink()
+        except OSError:
+            pass
+        try:
+            r = subprocess.run(
+                [PY, "-u", str(HERE / "iq_capture.py"),
+                 "--rf", str(rf), "--secs", str(secs),
+                 "--antenna", port, "--rfgain", str(rfg),
+                 "--ifgr", str(ifgr), "--out", str(out)],
+                capture_output=True, text=True, timeout=secs + 120)
+        except Exception as e:
+            log_event({"event": "specimen-error", "err": str(e)[:100]})
+            return False
+        m = re.search(r'"continuity_pct":\s*([\d.]+)', r.stdout or "")
+        cont = float(m.group(1)) if m else 0.0
+        if out.exists() and out.stat().st_size > 10e6 and cont >= 90.0:
+            return True
+        time.sleep(5)                   # SDR release before the retry
+    return False
+
+
 def hhmm_passed(hhmm):
     now = time.localtime()
     h, m = map(int, hhmm.split(":"))
@@ -149,28 +181,32 @@ def phase_cube():
                           "cycle": cycle})
                 s.pop("event", None)
                 log_event(dict(s))
-                # mid-cliff dwell -> specimen (the starving testbed class)
+                # specimen worth catching: classic mid-cliff median OR a
+                # BREATHER (healthy median, dips to the cliff / lossy) —
+                # the RF9-evening disease lives in the low tail (H-DIP)
                 key = f"{ant}_rf{rf}"
-                if (mer is not None and MID_CLIFF[0] <= mer < MID_CLIFF[1]
+                p10 = s.get("mer_p10")
+                badpct = (100 * s.get("rs_bad", 0) /
+                          max(1, s.get("rs_pkts", 0)))
+                breather = (mer is not None and mer >= 15.5 and
+                            ((p10 is not None and p10 <= 15.2)
+                             or badpct >= 1.5))
+                midcliff = (mer is not None
+                            and MID_CLIFF[0] <= mer < MID_CLIFF[1])
+                if ((midcliff or breather)
                         and len(specimens) < MAX_SPECIMENS
                         and per_key.get(key, 0) < 2):
                     out = CAPS / (f"night_{key}_mer{mer:.1f}_"
                                   f"{time.strftime('%H%M')}.cs16")
-                    try:
-                        subprocess.run(
-                            [PY, "-u", str(HERE / "iq_capture.py"),
-                             "--rf", str(rf), "--secs", "45",
-                             "--antenna", port, "--rfgain", str(rfg),
-                             "--ifgr", str(ifgr), "--out", str(out)],
-                            capture_output=True, timeout=200)
-                        if out.exists() and out.stat().st_size > 10e6:
-                            specimens.append(str(out))
-                            per_key[key] = per_key.get(key, 0) + 1
-                            log_event({"event": "SPECIMEN", "file": out.name,
-                                       "mer": mer})
-                    except Exception as e:
-                        log_event({"event": "specimen-error",
-                                   "err": str(e)[:100]})
+                    if capture_specimen(rf, port, rfg, ifgr, out):
+                        specimens.append(str(out))
+                        per_key[key] = per_key.get(key, 0) + 1
+                        log_event({"event": "SPECIMEN", "file": out.name,
+                                   "mer": mer, "p10": p10,
+                                   "bad_pct": round(badpct, 2)})
+                    else:
+                        log_event({"event": "specimen-miss", "rf": rf,
+                                   "ant": ant, "mer": mer})
         time.sleep(120)          # slow campaign: breathe between cycles
     (LAB / "specimens.json").write_text(json.dumps(specimens, indent=1),
                                         encoding="utf-8")
