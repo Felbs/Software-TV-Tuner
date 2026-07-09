@@ -57,6 +57,34 @@ def stopped():
     return STOP.exists()
 
 
+def capture_specimen(rf, port, rfg, ifgr, out, secs=45):
+    """Capture IQ with the dud-eater discipline — see night_lab.py: an
+    immediate capture after oc.sample() kills the chain hits the
+    un-released SDR and silently no-ops. Settle, then retry."""
+    time.sleep(8)
+    for attempt in (1, 2, 3):
+        try:
+            out.unlink()
+        except OSError:
+            pass
+        try:
+            r = subprocess.run(
+                [PY, "-u", str(HERE / "iq_capture.py"),
+                 "--rf", str(rf), "--secs", str(secs),
+                 "--antenna", port, "--rfgain", str(rfg),
+                 "--ifgr", str(ifgr), "--out", str(out)],
+                capture_output=True, text=True, timeout=secs + 120)
+        except Exception as e:
+            log_event({"event": "specimen-error", "err": str(e)[:100]})
+            return False
+        m = re.search(r'"continuity_pct":\s*([\d.]+)', r.stdout or "")
+        cont = float(m.group(1)) if m else 0.0
+        if out.exists() and out.stat().st_size > 10e6 and cont >= 90.0:
+            return True
+        time.sleep(5)
+    return False
+
+
 def past_end():
     now = time.localtime()
     h, m = map(int, END_AT.split(":"))
@@ -124,21 +152,14 @@ def main():
                         and per_key.get(key, 0) < 2):
                     out = CAPS / (f"day_{key}_mer{mer:.1f}_"
                                   f"{time.strftime('%H%M')}.cs16")
-                    try:
-                        subprocess.run(
-                            [PY, "-u", str(HERE / "iq_capture.py"),
-                             "--rf", str(rf), "--secs", "45",
-                             "--antenna", port, "--rfgain", str(rfg),
-                             "--ifgr", str(ifgr), "--out", str(out)],
-                            capture_output=True, timeout=200)
-                        if out.exists() and out.stat().st_size > 10e6:
-                            specimens.append(str(out))
-                            per_key[key] = per_key.get(key, 0) + 1
-                            log_event({"event": "SPECIMEN",
-                                       "file": out.name, "mer": mer})
-                    except Exception as e:
-                        log_event({"event": "specimen-error",
-                                   "err": str(e)[:100]})
+                    if capture_specimen(rf, port, rfg, ifgr, out):
+                        specimens.append(str(out))
+                        per_key[key] = per_key.get(key, 0) + 1
+                        log_event({"event": "SPECIMEN",
+                                   "file": out.name, "mer": mer})
+                    else:
+                        log_event({"event": "specimen-miss", "rf": rf,
+                                   "ant": ant, "mer": mer})
         # 4. rotating scan bench
         port, ant = SCAN_ROTATION[(cycle - 1) % len(SCAN_ROTATION)]
         t0 = time.time()
