@@ -1702,14 +1702,32 @@ class H(BaseHTTPRequestHandler):
         else:
             self.send_error(404)
     def do_POST(self):
-        n = int(self.headers.get("Content-Length", 0))
-        req = json.loads(self.rfile.read(n) or b"{}")
+        # robust input handling (2026-07-09 stress-test finding): a
+        # malformed body used to raise in json.loads and drop the
+        # connection. Validate first, answer 400 cleanly instead.
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+        except (TypeError, ValueError):
+            n = 0
+        raw = self.rfile.read(n) if n > 0 else b""
+        try:
+            req = json.loads(raw or b"{}")
+            if not isinstance(req, dict):
+                raise ValueError("body is not a JSON object")
+        except (ValueError, json.JSONDecodeError):
+            self._send('"bad request: body must be a JSON object"')
+            return
         if self.path == "/api/tune":
-            ant = req.get("antenna")
-            set_antenna(ant)
+            try:
+                rf, prog, virt = req["rf"], req["prog"], req["virt"]
+                int(rf); int(prog)          # type sanity
+            except (KeyError, TypeError, ValueError):
+                self._send('"bad request: tune needs numeric rf, prog, virt"')
+                return
+            set_antenna(req.get("antenna"))
             threading.Thread(target=tune,
-                             args=(req["rf"], req["prog"], req["virt"],
-                                   req.get("name", "")), daemon=True).start()
+                             args=(rf, prog, virt, req.get("name", "")),
+                             daemon=True).start()
             self._send('"tuning"')
         elif self.path == "/api/stop":
             threading.Thread(target=stop_tv, daemon=True).start()
