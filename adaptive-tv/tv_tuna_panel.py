@@ -695,7 +695,9 @@ _TK_CACHE = {"t": 0.0, "rows": []}
 _TK_LAST_REC = [0.0]
 
 def _tk_rows():
-    if time.time() - _TK_CACHE["t"] > 300:
+    # 60 s refresh: the NERD card shows the sample count ticking up
+    # live as the recorder appends — "watch it learn" (user ask 7/10)
+    if time.time() - _TK_CACHE["t"] > 60:
         try:
             _TK_CACHE["rows"] = tkn.load()
         except OSError:
@@ -725,15 +727,48 @@ def science_data():
     if STATE.get("rf") is not None:
         try:
             rows = _tk_rows()
-            bh = tkn.best_hours(STATE["rf"], rows)
+            rf_now = STATE["rf"]
+            bh = tkn.best_hours(rf_now, rows)
+            c = tkn.curve(rf_now, rows)
+            known = {h: b["mer"] for h, b in c.items()
+                     if b.get("mer") is not None
+                     and b.get("conf") in ("solid", "thin")}
+            spark = ""
+            if known:
+                lo, hi = min(known.values()), max(known.values())
+                span = max(hi - lo, 0.1)
+                blocks = "▁▂▃▄▅▆▇█"
+                spark = "".join(
+                    blocks[round((known[h] - lo) / span * 7)]
+                    if h in known else "·" for h in range(24))
+            hr = time.localtime().tm_hour
+            nowbin = c.get(hr, {})
             out["timeknob"] = {
                 "now_owner": STATE.get("ant_override") or "?",
                 "best_hour": bh[0][0] if bh else None,
                 "worst_hour": bh[1][0] if bh else None,
                 "swing_db": bh[2] if bh else None,
-                "hint": tkn.hint(STATE["rf"], rows)}
+                "hint": tkn.hint(rf_now, rows),
+                "spark": spark, "hour_now": hr,
+                "now_mer": nowbin.get("mer"),
+                "now_conf": nowbin.get("conf"),
+                # the live "watch it learn" number: total samples this
+                # channel has ever contributed — ticks up each minute
+                "n_samples": sum(1 for r in rows if r["rf"] == rf_now)}
         except (OSError, ValueError, KeyError):
             pass
+    # turbo + realtime-health telemetry for the science cards
+    try:
+        text = CHAIN_LOG.read_text(errors="ignore")[-60000:]
+        tb = re.findall(r"\[rs_turbo[^\n]*att=(\d+) retry=\d+ resc=(\d+)"
+                        r"[^\n]*skip=(\d+)[^\n]*fail_ema=([\d.]+)%", text)
+        if tb:
+            att, resc, skip, fema = tb[-1]
+            out["turbo"] = {"att": int(att), "resc": int(resc),
+                            "skip": int(skip), "fail_ema": float(fema)}
+        out["oso"] = len(re.findall(r"OsO|^O", text, re.M))
+    except OSError:
+        pass
     # guard saves this chain-session
     try:
         txt = CHAIN_LOG.read_text(errors="ignore")
@@ -1541,7 +1576,16 @@ let sc='';const SC=s.science||{};
 if(SC.survival){const p=SC.survival.pct;
 sc+=card('SURVIVAL CURVE',p+'%','packets that live · '+(SC.survival.watchable?'WATCHABLE':'below 16 = not watchable'),p>=85?'good':(p>=50?'warn':'bad'))}
 if(SC.timeknob){const tk=SC.timeknob;
-sc+=card('TIME KNOB',tk.now_owner||'?',(tk.best_hour!=null?'usually best ~'+tk.best_hour+'h, worst ~'+tk.worst_hour+'h ('+tk.swing_db+' dB swing)':'learning this channel\\'s hours')+(tk.hint?' · '+tk.hint:'')+' · antenna in use')}
+const tkv=(tk.now_mer!=null?tk.now_mer.toFixed(1)+' dB':(tk.spark?'—':'learning'));
+let tks=(tk.spark?'<span style="font-family:monospace;letter-spacing:1px">'+tk.spark+'</span> 24h curve · ':'');
+tks+=(tk.best_hour!=null?'best ~'+tk.best_hour+'h · worst ~'+tk.worst_hour+'h ('+tk.swing_db+' dB swing)':'learning this channel\\'s hours');
+if(tk.hint)tks+=' · '+tk.hint;
+tks+=' · <b>'+(tk.n_samples||0)+'</b> samples and counting (+1/min while you watch) · '+(tk.now_owner||'?');
+sc+=card('TIME KNOB — learned, this hour',tkv,tks)}
+if(SC.turbo){const tb=SC.turbo;
+const tbs=(tb.fail_ema>=4?'⚠ standing down — channel failing beyond rescue ('+tb.fail_ema+'%)':'fail rate '+tb.fail_ema+'% · '+tb.att+' attempted'+(tb.skip>0?' · '+tb.skip+' skipped (stampede gate)':''));
+sc+=card('TURBO RESCUE',tb.resc,tbs+' — packets brought back from the dead by pinned re-decode')}
+if(SC.oso!=null)sc+=card('REALTIME HEALTH',SC.oso===0?'✓ 0':'⚠ '+SC.oso,SC.oso===0?'sample overflows this session — the decoder is beating the deadline':'sample overflows — the decoder missed its realtime deadline; something is stealing CPU');
 if(SC.guard_fires!==undefined)sc+=card('MOD-12 GUARD',SC.guard_fires,'slips healed this session',SC.guard_fires>20?'warn':'good');
 if(SC.sheriff)sc+=card('FEC SHERIFF',SC.sheriff.action,'last action · '+SC.sheriff.t);
 if(SC.dawn)sc+=card('DAWN FORECAST',SC.dawn.score,SC.dawn.verdict);
