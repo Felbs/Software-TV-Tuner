@@ -24,6 +24,53 @@ SOLO = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live\live_solo.ts")
 IPC = r"\\.\pipe\mpv-tvtuna-super"
 MUXBPS = 19_392_658 / 8
 
+# MEMORY-TUNE (2026-07-10): PID/program-layout cache. Discovery (the 20 MB
+# ffprobe below) costs ~8-11 s per tune; the layout per (rf, prog) changes
+# rarely (broadcaster remaps). Cache it, start the extractor immediately on
+# a hit with small probe windows, and SELF-HEAL: if cached PIDs produce
+# nothing in ~8 s, invalidate the entry and redo full discovery.
+RF = os.environ.get("STVT_RF", "?")     # panel sets this; "?" disables cache
+PID_CACHE = Path(__file__).resolve().parent / "lab" / "pid_cache.json"
+
+def load_pid_cache():
+    try:
+        return json.loads(PID_CACHE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+def save_pid_cache(cache):
+    try:
+        PID_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        PID_CACHE.write_text(json.dumps(cache, indent=1), encoding="utf-8")
+    except OSError:
+        pass
+
+def pmt_pids(prog, timeout=5):
+    """Cheap PSI-only read: which PIDs does live.ts's PMT list for prog
+    right now? PSI tables repeat every ~100 ms, so a 3 MB probe is plenty
+    for the table itself (codec detail may be incomplete — not needed).
+    None = couldn't tell (young/thin file) — caller stays optimistic."""
+    try:
+        pr = subprocess.run(
+            ["ffprobe", "-v", "error", "-print_format", "json",
+             "-probesize", "3000000", "-analyzeduration", "1000000",
+             "-show_programs", str(LIVE)],
+            capture_output=True, text=True, timeout=timeout)
+        progs = json.loads(pr.stdout or "{}").get("programs", [])
+        mine = next((p for p in progs if p.get("program_id") == prog), None)
+        if not mine:
+            return None
+        pids = set()
+        for s in mine.get("streams", []):
+            pid_s = s.get("id")
+            if not pid_s:
+                continue
+            pids.add(int(str(pid_s), 16) if str(pid_s).startswith("0x")
+                     else int(pid_s))
+        return pids or None
+    except Exception:
+        return None
+
 def ipc(command, req=None):
     msg = {"command": command}
     if req is not None: msg["request_id"] = req
@@ -56,9 +103,10 @@ class Extractor:
     too. Mode ladder: full program -> video-only (silent TV beats a
     black screen). tv_watch's monitor loop restarts a dead extractor,
     so each restart tries the ladder afresh as the stream matures."""
-    def __init__(self, prog, mode="full"):
+    def __init__(self, prog, mode="full", pids=None):
         self.prog = prog
-        self.mode = mode          # "full" or "video"
+        self.mode = mode          # "cached", "full" or "video"
+        self.pids = pids          # ordered PID list (cached mode / discovered)
         self.stop = threading.Event()
         self.ff = None
 
@@ -100,8 +148,10 @@ class Extractor:
             if not vids or not auds:
                 return None
             auds.sort()
+            self.pids = vids[:1] + [a[1] for a in auds] + subs
+            self.n_subs = len(subs)
             maps = []
-            for pid in vids[:1] + [a[1] for a in auds] + subs:
+            for pid in self.pids:
                 maps += ["-map", f"0:i:{pid}"]
             return maps
         except Exception:
@@ -111,7 +161,15 @@ class Extractor:
         if SOLO.exists():
             try: SOLO.unlink()
             except OSError: pass
-        if self.mode == "full":
+        fast = False
+        if self.mode == "cached" and self.pids:
+            # layout known from a previous tune: no discovery probe, and
+            # the demuxer needs only a small window (stream shape known)
+            maps = []
+            for pid in self.pids:
+                maps += ["-map", f"0:i:{pid}"]
+            fast = True
+        elif self.mode == "full":
             maps = self._english_first_maps() or ["-map", f"0:p:{self.prog}"]
         else:
             maps = ["-map", f"0:p:{self.prog}:v:0", "-an"]
@@ -119,7 +177,8 @@ class Extractor:
             [FFMPEG, "-hide_banner", "-loglevel", "error",
              "-fflags", "+genpts+igndts+nobuffer",   # discardcorrupt removed 7/10: the I-frame killer (anti-mosh)
              "-err_detect", "ignore_err",
-             "-analyzeduration", "10000000", "-probesize", "20000000",
+             "-analyzeduration", "2000000" if fast else "10000000",
+             "-probesize", "3000000" if fast else "20000000",
              "-f", "mpegts", "-i", "-"]
             + maps +
             ["-c", "copy",
@@ -177,30 +236,85 @@ def main():
     marginal = "marginal" in args
     muxmode = "mux" in args
 
-    while not LIVE.exists() or LIVE.stat().st_size < 25_000_000:
+    # MEMORY-TUNE: on a PID-cache hit the discovery probe is skipped, so a
+    # smaller prebuffer suffices; cache-MISS keeps the 20 MB law (multi-
+    # program ffprobe needs a thick file to see every program).
+    cache = load_pid_cache()
+    key = f"{RF}:{prog}"
+    hit = cache.get(key) if RF != "?" else None
+    cached_pids = None
+    if hit:
+        cached_pids = ([hit["vpid"]] + list(hit.get("apids", []))
+                       + list(hit.get("spids", []))) if "vpid" in hit else None
+    min_live = 6_000_000 if cached_pids else 25_000_000
+    while not LIVE.exists() or LIVE.stat().st_size < min_live:
         time.sleep(2)
+
+    if cached_pids:
+        # VERIFY WHILE TUNING: a remapped-but-still-existing PID would
+        # extract the WRONG program and flow happily — the one stale case
+        # the no-output fallback can't catch. A PSI-only probe (~1 s)
+        # checks the cached PIDs are still this program's PIDs. Probe
+        # inconclusive (young file) -> stay optimistic; the 8 s output
+        # gate still guards vanished PIDs.
+        live_pids = pmt_pids(prog)
+        if live_pids is not None and not set(cached_pids) <= live_pids:
+            log(f"PID cache for {key} is STALE (PMT remapped: cached "
+                f"{cached_pids} vs live {sorted(live_pids)}) — "
+                "invalidating, full discovery")
+            cache.pop(key, None)
+            save_pid_cache(cache)
+            cached_pids = None
 
     ex = None
     video_only = False
     if not muxmode:
-        # extraction ladder: full program -> video-only -> mux fallback
-        for mode in ("full", "video"):
-            ex = Extractor(prog, mode=mode)
+        # extraction ladder: cached (if hit) -> full -> video -> mux fallback
+        # cached gets an ~8 s proof window and a lower launch threshold;
+        # a stale entry self-heals (invalidate + full discovery).
+        ladder = ([("cached", 8, 1_200_000)] if cached_pids else []) \
+            + [("full", 45, 3_000_000), ("video", 45, 3_000_000)]
+        for mode, patience, need in ladder:
+            if mode != "cached":
+                # discovery law: the 20 MB prebuffer for N-program ffprobe
+                while not LIVE.exists() or LIVE.stat().st_size < 25_000_000:
+                    time.sleep(2)
+            ex = Extractor(prog, mode=mode,
+                           pids=cached_pids if mode == "cached" else None)
             ex.start()
             t0 = time.time()
             ok = False
-            while time.time() - t0 < 45:
-                time.sleep(1)
-                if SOLO.exists() and SOLO.stat().st_size > 3_000_000:
+            while time.time() - t0 < patience:
+                time.sleep(0.5)
+                if SOLO.exists() and SOLO.stat().st_size > need:
                     ok = True
                     break
+                if not ex.alive() and time.time() - t0 > 2:
+                    break        # extractor died young — fail fast down the ladder
             if ok:
                 video_only = (mode == "video")
+                if mode == "cached":
+                    log(f"PID cache HIT for {key} — extractor started "
+                        "with known layout (discovery skipped)")
                 if video_only:
                     log("audio too damaged for extraction — VIDEO-ONLY mode "
                         "(silent TV beats a black screen)")
+                if mode == "full" and ex.pids and RF != "?":
+                    # proven discovery -> remember the layout for next time
+                    ns = getattr(ex, "n_subs", 0)
+                    cut = len(ex.pids) - ns
+                    cache[key] = {"vpid": ex.pids[0],
+                                  "apids": ex.pids[1:cut],
+                                  "spids": ex.pids[cut:],
+                                  "ts": time.strftime("%Y-%m-%dT%H:%M:%S")}
+                    save_pid_cache(cache)
                 break
-            log(f"extractor mode '{mode}' produced nothing in 45s")
+            log(f"extractor mode '{mode}' produced nothing in {patience}s")
+            if mode == "cached":
+                log(f"stale PID cache for {key} — invalidating, "
+                    "falling back to full discovery")
+                cache.pop(key, None)
+                save_pid_cache(cache)
             ex.kill(); ex = None
         if ex is None:
             log("all extraction modes failed — falling back to mux mode")
@@ -362,9 +476,9 @@ def main():
         time.sleep(5)
         if ex is not None and not ex.alive():
             log(f"extractor died — restarting it (mode={ex.mode})")
-            mode = ex.mode
+            mode, pids = ex.mode, ex.pids
             ex.kill()
-            ex = Extractor(prog, mode=mode); ex.start()
+            ex = Extractor(prog, mode=mode, pids=pids); ex.start()
             time.sleep(3)
         pos = ipc(["get_property", "time-pos"], req=5)
         eof = ipc(["get_property", "eof-reached"], req=5)

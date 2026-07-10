@@ -524,6 +524,10 @@ def base_env(rf):
     _ant = STATE.get("ant_override") or antenna_for(rf)
     env.update({"STVT_ANTENNA": _ant, "STVT_IFGR": str(ifgr),
                 "STVT_RFGAIN_SEL": str(rfsel),
+                # MEMORY-TUNE (2026-07-10): tv_watch keys its PID/program-
+                # layout cache on (rf, prog); rf rides the env like the
+                # other knobs (the chain ignores it)
+                "STVT_RF": str(rf),
                 # E7 second-opinion memory: the chain keeps its last ~35 s
                 # of IQ in RAM (~1.1 GB); the 🩺 button snapshots it —
                 # no second SDR session, no TV pause (7/07 v2)
@@ -903,15 +907,52 @@ def tune(rf, prog, virtual, name):
             # marginal signal gets one automatic chain restart with the
             # recovery recipe (erasure FEC + equalizer tap guard — the
             # config-shootout champion for signals riding the cliff).
-            set_stage(45, "phase locked — measuring decode margin")
+            #
+            # MEMORY-TUNE (2026-07-10): when the learned hour-curves say
+            # this RF is confidently healthy RIGHT NOW (solid/thin bin at
+            # >= 16.8, or recent same-antenna rows averaging >= 16.8), a
+            # ~3 s sanity read replaces the 12 s measurement. Any doubt —
+            # no samples yet, or the quick read lands below 16.8 — falls
+            # back to finishing the full 12 s window, so cliff decisions
+            # on genuinely marginal channels are byte-for-byte unchanged.
+            meas_s = 12
+            try:
+                _rows = _tk_rows()
+                _bin = tkn.curve(rf, _rows).get(time.localtime().tm_hour, {})
+                _ant = env.get("STVT_ANTENNA")
+                _recent = [r["mer"] for r in _rows
+                           if r["rf"] == rf and r["ant"] == _ant
+                           and r["mer"] is not None][-12:]
+                if ((_bin.get("conf") in ("solid", "thin")
+                     and (_bin.get("mer") or 0) >= 16.8)
+                        or (len(_recent) >= 5
+                            and sum(_recent) / len(_recent) >= 16.8)):
+                    meas_s = 3
+            except Exception:
+                pass
+            set_stage(45, "phase locked — measuring decode margin"
+                          + (" (memory: healthy history — quick check)"
+                             if meas_s < 12 else ""))
             t_m = time.time()
-            while time.time() - t_m < 12:
+            while time.time() - t_m < meas_s:
                 if GEN[0] != my_gen: return
-                time.sleep(2)
+                time.sleep(1)
             errs = [float(mm.group(1))
                     for mm in RE_FS.finditer(logtxt())][-40:]
             mers = [20 * math.log10(5.0 / e) for e in errs if e > 0]
             mer_now = sum(mers) / len(mers) if mers else 0.0
+            if meas_s < 12 and (not mers or mer_now < 16.8):
+                # memory said healthy, the quick read disagrees — finish
+                # the full measurement before any cliff-mode decision
+                set_stage(45, "quick check inconclusive — measuring the "
+                              "full decode margin")
+                while time.time() - t_m < 12:
+                    if GEN[0] != my_gen: return
+                    time.sleep(2)
+                errs = [float(mm.group(1))
+                        for mm in RE_FS.finditer(logtxt())][-40:]
+                mers = [20 * math.log10(5.0 / e) for e in errs if e > 0]
+                mer_now = sum(mers) / len(mers) if mers else 0.0
             cliff_mode = bool(mers) and mer_now < 16.5
             if cliff_mode:
                 set_stage(52, f"MER {mer_now:.1f} dB — engaging cliff-edge "
@@ -955,8 +996,23 @@ def tune(rf, prog, virtual, name):
                         break
                     time.sleep(1.5)
             t0 = time.time()          # fresh budget for the stream gates
+            # MEMORY-TUNE: on a healthy signal with a PID-cache hit,
+            # tv_watch enforces its own 6 MB live.ts gate before
+            # extracting — waiting here too is pure double-waiting.
+            # Cliff/harvest paths keep the full gate (conservative).
+            _pc_hit = False
+            try:
+                _pc = json.loads((HERE / "lab" / "pid_cache.json")
+                                 .read_text(encoding="utf-8"))
+                _pc_hit = f"{rf}:{prog}" in _pc
+            except (OSError, ValueError):
+                pass
+            skip_gate = (_pc_hit and not cliff_mode
+                         and not (mers and mer_now < 15.0))
             set_stage(60, "equalizer converging — buffering the "
-                          "transport stream")
+                          "transport stream"
+                          + (" (memory: layout cached — handing straight "
+                             "to the extractor)" if skip_gate else ""))
             # Gate on GROWTH since this chain started, not absolute size —
             # the previous tune's leftover live.ts is big and freshly
             # written, which used to pass this gate instantly (false 75%).
@@ -964,7 +1020,7 @@ def tune(rf, prog, virtual, name):
                 base_sz = LIVE.stat().st_size
             except OSError:
                 base_sz = 0
-            while time.time() - t0 < 110:
+            while not skip_gate and time.time() - t0 < 110:
                 if GEN[0] != my_gen: return
                 try:
                     stt = LIVE.stat()
@@ -1019,7 +1075,7 @@ def tune(rf, prog, virtual, name):
                 if "mpv.exe" in (r.stdout or ""):
                     player_up = True
                     break
-                time.sleep(2)
+                time.sleep(1)
             if player_up:
                 set_stage(100, "")
             else:
