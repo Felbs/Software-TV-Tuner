@@ -175,6 +175,12 @@ private:
     int d_turbo_pinz2 = 1;         // resolve Z2 chains through the postcoder
     int d_turbo_selftest = 0;      // no-pin re-decode agreement check only
     long d_turbo_maxsym = 250000;  // per-rescue symbol budget
+    // stampede gate (2026-07-10 RF15 lesson): on a >few-% failure-rate
+    // channel turbo's re-decodes blow the real-time budget (768k
+    // attempts/2min -> source overflows -> more failures). Above the
+    // gate turbo converts ~0% anyway (bimodal law), so stand down.
+    double d_turbo_failema = 0.0;      // EMA of failure indicator
+    double d_turbo_maxfail = 0.04;     // gate: skip rescues above this
     std::vector<float> d_soft_ring;      // TSOFT_RING * SEG_FLOATS
     std::vector<uint64_t> d_soft_abs;    // slot -> abs segment index
     std::vector<turbo_known> d_known;
