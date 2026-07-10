@@ -1581,7 +1581,7 @@ let tks=(tk.spark?'<span style="font-family:monospace;letter-spacing:1px">'+tk.s
 tks+=(tk.best_hour!=null?'best ~'+tk.best_hour+'h · worst ~'+tk.worst_hour+'h ('+tk.swing_db+' dB swing)':'learning this channel\\'s hours');
 if(tk.hint)tks+=' · '+tk.hint;
 tks+=' · <b>'+(tk.n_samples||0)+'</b> samples and counting (+1/min while you watch) · '+(tk.now_owner||'?');
-sc+=card('TIME KNOB — learned, this hour',tkv,tks)}
+sc+=card('🕰 KNOB OF TIME — learned, this hour',tkv,tks)}
 if(SC.turbo){const tb=SC.turbo;
 const tbs=(tb.fail_ema>=4?'⚠ standing down — channel failing beyond rescue ('+tb.fail_ema+'%)':'fail rate '+tb.fail_ema+'% · '+tb.att+' attempted'+(tb.skip>0?' · '+tb.skip+' skipped (stampede gate)':''));
 sc+=card('TURBO RESCUE',tb.resc,tbs+' — packets brought back from the dead by pinned re-decode')}

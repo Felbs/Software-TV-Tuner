@@ -941,6 +941,108 @@ by code:
    so plainly instead of pretending (our guide badges every station:
    tuneable, weak, or out-of-reach *on the current antenna*).
 
+## 15.5 The time dimension — teaching the tuner what hour it is
+
+Law 1 said *no stored configuration survives the sky*. This section is
+what we built once we accepted that — instead of fighting the sky's
+schedule, learn it.
+
+*Terminology, so nobody is confused about what's old and what's new:*
+the underlying effect is **diurnal variation** — a century-old term in
+radio propagation — driven at TV frequencies by **tropospheric
+ducting** and temperature-inversion enhancement, plus man-made
+impulse noise that follows human schedules. The idea of a receiver
+building a time-aware model of its RF environment also has an
+academic cousin (cognitive radio's *radio environment maps*). What we
+add is the practical, consumer-grade closing of the loop: a TV tuner
+that learns per-channel, per-antenna hour curves **from its own
+decoder telemetry**, at zero user effort, and turns them into honest
+viewing advice. We searched for an existing community name for that
+closed loop and found none — so this project names it: **the Knob of
+Time**. (The joke being that it's the one knob you can't turn, only
+consult.)
+
+### The phenomenon (measured, not folklore)
+
+Hold everything constant — antenna, gain, decoder — and a channel's
+MER still walks several dB over a day. Our multi-day logs (13,800+
+samples) show per-channel swings of 3–7+ dB with *stable, repeating
+shape*: one channel only crosses the decode cliff in the 17–21h block;
+another holds a 10–21h plateau and collapses after 22h; a third is
+inverted — best before dawn, worst in the evening; a fourth barely
+moves at all. The physics is ordinary: overnight temperature
+inversions duct VHF/UHF; foliage moisture changes path loss; and
+impulse noise follows *human* schedules (appliances, chargers, HVAC).
+The consequence is not ordinary: **for a marginal channel, the hour is
+worth more dB than any knob in the flowgraph.** You cannot buy this
+SNR — but you can schedule around it.
+
+### The free sensor
+
+If you have the equalizer, you already have the instrument. The
+long-equalizer's field-sync error (`fs_err_rms`, one reading per data
+field, ~41 Hz) converts directly:
+
+```
+MER_dB = 20 · log10(5 / fs_err_rms)
+```
+
+(5 is the mean |level| of the 8-VSB constellation; the derivation is
+in §12.5.) Packet truth comes from the Reed-Solomon block's windowed
+counters (`bad / pkts` per 5 s). One row per watched minute and one
+per scan dwell — `(timestamp, rf, antenna_label, mer, loss_pct,
+source)` — appended to a plain CSV. The file *is* the model; there is
+no training step, no database, no daemon.
+
+### The estimator
+
+For channel `c` at hour-of-day `h` (24 local bins), over history rows
+`i` with ages Δt_i:
+
+```
+weight     w_i = 0.5 ^ (Δt_i / 14 days)          (recency half-life)
+estimate   M̂(c,h) = weighted_median({mer_i, w_i : hour(ts_i) = h})
+```
+
+Design choices, each paid for by a failed experiment:
+
+- **Median, not mean.** Impulse bursts put heavy outliers in the
+  tail; the median answers "what does a *typical* minute at 19h look
+  like," and the loss column carries the burst story separately.
+- **Recency decay, because every calibration is a loan** (Law 1).
+  Gain recals, antenna moves, and decoder upgrades create *config
+  epochs*; a 14-day half-life lets a stale epoch fade in about a
+  month instead of haunting the curve forever.
+- **Confidence tiers, because single-day bins lie.** A bin is
+  **solid** only with n ≥ 8 samples spread over ≥ 2 distinct days —
+  one bad Tuesday must not define 3 AM. Below that: **thin** (n ≥ 3,
+  shown with a caveat), **borrowed** (neighbor bins h±1 at half
+  weight, labeled), else **unknown** — rendered as "?", never
+  guessed. The UI only says "usually better around 21h" when the
+  current bin is confidently known *and* a solid bin beats it by
+  ≥ 2 dB. Silence over guessing.
+- **The antenna is an opaque string.** Ownership ("rabbit ears win
+  this channel at dawn") is a *learned statistic over labels the
+  user's own rig has used* — no antenna name, market, or coordinate
+  appears in a code path, so the same code learns anyone's sky.
+
+### Two ways to train it (they compose)
+
+- **Watch-training** — free and automatic: 60 samples/hour flow into
+  the bins of whatever you watch. Deep where you live, blind where
+  you don't. A normal week of evening TV makes your channels' evening
+  bins solid.
+- **Sweep-training** — a scan measures *every* channel once, in the
+  current hour bin, but it *takes the tuner* (Law 7). So it belongs
+  to hours when nobody is watching: an overnight trainer that sweeps
+  once per hour fills eight channels × eight hour-bins in a single
+  night, and a weekend of idle hours completes curves that
+  watch-training alone would take months to reach.
+
+The counting is worth internalizing: solid = 8 samples over 2 days,
+so hourly sweeps solidify a full night's bins for the *entire* market
+in two nights — while the viewer does nothing but sleep.
+
 ## 16. Things the reader can now explain at parties
 
 - All of a market's stations usually ride a handful of transmitters:

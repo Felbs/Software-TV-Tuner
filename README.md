@@ -25,13 +25,22 @@ Latest additions:
   at ~1–4% CPU, with a full miscorrection guard battery (measured: 0
   false fixes). On by default in the panel (`STVT_TURBO=1`, needs the
   SOVA reliability plane `STVT_SOVA=1`).
-- **A learned "time knob"** — broadcast reception provably changes
-  with the hour (temperature inversions, foliage, human-schedule
-  interference). The panel now records a quality sample every minute
-  you watch and every time you scan, and learns each channel's 24-hour
+- **The Knob of Time** — a learned model of the one knob you can't
+  turn, only consult. Broadcast reception provably changes with the
+  hour (the classic *diurnal variation* of radio propagation:
+  temperature inversions, tropospheric ducting, foliage, and
+  human-schedule interference; we measured per-channel swings of
+  3–7 dB with stable daily shape). The panel records a quality sample every minute you
+  watch and every time you scan, and learns each channel's 24-hour
   curve for *your* rig — with recency decay and honest confidence
   tiers ("unknown" beats a guess). It tells you "usually better around
-  21h" only when the data backs it.
+  21h" only when the data backs it. Training is automatic — watching
+  TV *is* the training — and `adaptive-tv\time_trainer.py` adds
+  optional overnight sweep-training: one full-channel scan per hour
+  while the tuner is idle fills every channel's night bins in a
+  couple of nights (it stands down automatically if you tune in).
+  The estimator math is in
+  [`docs/science.md` §15.5](docs/science.md).
 - **Honest quality labels** — the guide and status bar are driven by
   *measured packet loss*, not signal-strength proxies: fast-fading
   channels alias any MER average and can read "flawless" while losing
