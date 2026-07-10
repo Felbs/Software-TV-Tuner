@@ -117,7 +117,7 @@ class Extractor:
             maps = ["-map", f"0:p:{self.prog}:v:0", "-an"]
         self.ff = subprocess.Popen(
             [FFMPEG, "-hide_banner", "-loglevel", "error",
-             "-fflags", "+genpts+igndts+nobuffer+discardcorrupt",
+             "-fflags", "+genpts+igndts+nobuffer",   # discardcorrupt removed 7/10: the I-frame killer (anti-mosh)
              "-err_detect", "ignore_err",
              "-analyzeduration", "10000000", "-probesize", "20000000",
              "-f", "mpegts", "-i", "-"]
@@ -221,17 +221,26 @@ def main():
            # broadcast AC-3 dialnorm runs quiet — start hot and let the
            # user go to 200% with the volume keys if a station needs it
            "--volume=130", "--volume-max=200",
-           # +discardcorrupt: never hand the 608 caption decoder the
-           # half-frames before the first keyframe (they render as stuck
-           # "HDHDHD…" garbage until the sub track is cycled)
-           "--demuxer-lavf-o=err_detect=ignore_err,fflags=+discardcorrupt",
-           "--vd-lavc-o=error_concealment=3,err_detect=ignore_err",
+           # ANTI-MOSH (2026-07-10, agent-measured on the bottled Fox
+           # impulse storm): the 7/04 +discardcorrupt captions fix was
+           # the datamosh AMPLIFIER — it drops whole pictures on one bad
+           # packet, killing I-frames first (11/100 survived), leaving
+           # P/B frames to smear against stale refs for up to 6.4 s.
+           # New set: keep 99%-intact pictures; +explode drops the truly
+           # unparseable ones individually (cost: ~7 frames/storm);
+           # favor_inter+deblock patch damaged blocks as static copies
+           # (freeze beats melt). Measured: mosh frames 67.5% -> 0.7%,
+           # frames shown +89%. All flags inert on clean streams.
+           "--demuxer-lavf-o=err_detect=ignore_err",
+           "--vd-lavc-o=err_detect=+crccheck+bitstream+buffer+explode,"
+           "error_concealment=deblock+favor_inter",
            "--sub-create-cc-track=yes",
            f"--title=TV Tuna — program {prog}" + (" (solo)" if not muxmode else ""),
            ]
     if marginal:
-        cmd += ["--vd-lavc-show-all=yes", "--vd-lavc-skipframe=none",
-                "--framedrop=no"]
+        # show-all removed 7/10: it forces pre-keyframe garbage frames
+        # onto the screen — the opposite of anti-mosh
+        cmd += ["--vd-lavc-skipframe=none", "--framedrop=no"]
     mpv = subprocess.Popen(cmd)
     time.sleep(6)
 
