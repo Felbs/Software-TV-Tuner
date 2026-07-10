@@ -786,6 +786,10 @@ def scan_one_rf(rf: int, dwell_sec: float = 12.0,
         m = mers_from_log(log_path) if own_log else []
         return round(sorted(m)[len(m) // 2], 1) if m else None
 
+    def mer_p10():
+        m = mers_from_log(log_path) if own_log else []
+        return round(sorted(m)[len(m) // 10], 1) if len(m) >= 10 else None
+
     try:
         proc = spawn_tv_live(rf, fh, viterbi=viterbi)
     except Exception as e:
@@ -865,6 +869,8 @@ def scan_one_rf(rf: int, dwell_sec: float = 12.0,
         # ranking / time-knob science all eat this)
         if mer_med() is not None:
             result["mer_med"] = mer_med()
+        if mer_p10() is not None:
+            result["mer_p10"] = mer_p10()   # low tail: impulse/breather flag
         result["antenna"] = os.environ.get("STVT_ANTENNA", "?")
         # ATSC PSIP: virtual-channel labels + the next ~12 hours of EIT
         # show titles, decoded directly from the captured TS via our

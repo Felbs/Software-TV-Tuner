@@ -132,6 +132,7 @@ def load_epg() -> tuple[list[dict], int | None]:
                 "tune":     tune,
                 "snr_db":   c.get("pilot_snr_db"),
                 "mer_med":  c.get("mer_med"),   # decode quality (dB)
+                "mer_p10":  c.get("mer_p10"),   # low tail (impulse flag)
                 "events":   events,
             })
 

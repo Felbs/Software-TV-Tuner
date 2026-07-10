@@ -1246,11 +1246,14 @@ const blocks='█'.repeat(Math.round(pct/10))+'░'.repeat(10-Math.round(pct/10)
 // separate from raw signal strength (the % bar). Only shown when the
 // scan actually measured it. Thresholds = the survival curve.
 let mtag='';
-if(r.mer!=null){const m=r.mer;
-const mc=m>=16.5?'#67d18a':(m>=15.2?'#e7c96a':'#e77');
-const mw=m>=16.5?'flawless':(m>=16?'watchable':(m>=15.2?'marginal · glitchy':'below cliff'));
+if(r.mer!=null){const m=r.mer,p10=r.mer_p10;
+// a healthy MEDIAN hides impulse/breather channels — if the low tail
+// plunges toward/past the cliff, say so (Fox RF31 lesson, 7/10)
+const bursty=(p10!=null&&m>=16&&(m-p10)>=1.2&&p10<16.2);
+const mc=bursty?'#e7c96a':(m>=16.5?'#67d18a':(m>=15.2?'#e7c96a':'#e77'));
+const mw=bursty?'⚡ bursty — glitches despite strong signal':(m>=16.5?'flawless':(m>=16?'watchable':(m>=15.2?'marginal · glitchy':'below cliff')));
 mtag=`&nbsp;<span style="color:${mc};font-weight:700">◉ ${mw}</span>`+
-`<span style="color:#5f7591;font-size:11px"> (MER ${m.toFixed(1)} dB)</span>`;}
+`<span style="color:#5f7591;font-size:11px"> (MER ${m.toFixed(1)}${p10!=null?' / dips '+p10.toFixed(1):''} dB)</span>`;}
 h+=`<tr><td colspan="${g.slots.length+2}" style="background:#0d1626;border-top:2px solid #26436b;padding:7px 6px">`+
 `📡 <b>tower RF${r.rf}</b> &nbsp;<span style="color:${col};font-family:monospace">${blocks}</span> `+
 `<span style="color:${col};font-weight:700">${pct}%</span>`+mtag+
@@ -1625,7 +1628,7 @@ def grid_json():
         rows.append({"rf": ch["rf"], "prog": ch["program"],
                      "virtual": ch["virtual"], "callsign": ch["callsign"],
                      "tune": ch.get("tune", " "), "snr": ch.get("snr_db"),
-                     "mer": ch.get("mer_med"),
+                     "mer": ch.get("mer_med"), "mer_p10": ch.get("mer_p10"),
                      "rms": rms_by_rf.get(ch["rf"]),
                      "cells": cells})
     return {"slots": slot_labels, "rows": rows, "floor": floor}

@@ -227,6 +227,10 @@ def main():
 
     work = Path(tempfile.mkdtemp(prefix="e7_"))
     passes = []
+    procs = []
+    # PARALLEL PASSES (2026-07-10, Healed Viewing build): the passes are
+    # independent decodes — run them concurrently so wall time is
+    # max(pass) not sum(pass). Near-realtime healing needs this.
     for k in range(args.passes):
         out = work / f"pass{k}.ts"
         log = work / f"pass{k}.log"
@@ -241,10 +245,13 @@ def main():
             env["STVT_EQ_DFE"] = "1"
         print(f"[e7] pass {k}: skip={env['STVT_IQ_SKIP']} "
               f"dfe={env.get('STVT_EQ_DFE', '0')}", flush=True)
-        subprocess.run([PY, "-u", str(REPLAY), "--iq", args.iq,
-                        "--out", str(out), "--log", str(log)],
-                       env=env, check=True)
+        procs.append(subprocess.Popen(
+            [PY, "-u", str(REPLAY), "--iq", args.iq,
+             "--out", str(out), "--log", str(log)], env=env))
         passes.append(out)
+    for pr in procs:
+        if pr.wait() != 0:
+            raise RuntimeError("replay pass failed")
 
     union = {}
     per_pass = []
