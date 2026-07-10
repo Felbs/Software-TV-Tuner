@@ -341,6 +341,7 @@ def spawn_tv_live(rf: int, log_fh, viterbi: str = "stock") -> subprocess.Popen:
 
 _RE_FS_ERR = re.compile(r"fs_err_rms=([\d.]+)")
 _RE_NCO = re.compile(r"nco_freq_hz=([+-]?[\d.]+)")
+_RE_RS5 = re.compile(r"last5s: pkts=(\d+) era_dec=\d+ era_ok=\d+ bad=(\d+)")
 
 
 def ncos_from_log(path, tail_bytes=8000):
@@ -790,6 +791,23 @@ def scan_one_rf(rf: int, dwell_sec: float = 12.0,
         m = mers_from_log(log_path) if own_log else []
         return round(sorted(m)[len(m) // 10], 1) if len(m) >= 10 else None
 
+    def loss_pct():
+        # measured packet loss over the dwell — the metric MER can't
+        # fake: fast faders (RF9) alias the 41 Hz MER sampling and read
+        # "flawless" by median while losing 10%/min (2026-07-10 lesson).
+        # Last 4 RS windows only: the first ones are EQ convergence.
+        if not own_log:
+            return None
+        try:
+            with open(log_path, "r", encoding="utf-8",
+                      errors="replace") as f:
+                rs = _RE_RS5.findall(f.read())[-4:]
+        except OSError:
+            return None
+        pk = sum(int(p) for p, _ in rs)
+        bd = sum(int(b) for _, b in rs)
+        return round(100.0 * bd / pk, 2) if pk else None
+
     try:
         proc = spawn_tv_live(rf, fh, viterbi=viterbi)
     except Exception as e:
@@ -871,6 +889,8 @@ def scan_one_rf(rf: int, dwell_sec: float = 12.0,
             result["mer_med"] = mer_med()
         if mer_p10() is not None:
             result["mer_p10"] = mer_p10()   # low tail: impulse/breather flag
+        if loss_pct() is not None:
+            result["loss_pct"] = loss_pct()  # measured loss during dwell
         result["antenna"] = os.environ.get("STVT_ANTENNA", "?")
         # ATSC PSIP: virtual-channel labels + the next ~12 hours of EIT
         # show titles, decoded directly from the captured TS via our

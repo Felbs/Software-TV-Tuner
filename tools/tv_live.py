@@ -584,6 +584,22 @@ class LiveTVTopBlock(gr.top_block):
                 self._rel_pl_sink = _rel_pl_sink
                 LOG.info("SOVA: reliability plane wired "
                          "(viterbi:2 -> twin deinterleaver -> rs:2)")
+                # ── TURBO 2B: trellis pinning (2026-07-10) ──
+                # rs port 3 takes the post-equalizer soft symbols (the
+                # exact viterbi input; sync blocks, so item indices
+                # coincide). When a codeword fails RS+GMD the block
+                # re-runs a pinned Viterbi over the affected trellis
+                # spans using bytes of DECODED codewords as branch
+                # constraints, then retries RS. Converts 54-70% of
+                # failed packets on marginal air (replay A/B 7/10).
+                # Opt-in: STVT_TURBO=1 (requires the SOVA plane above).
+                if int(os.environ.get("STVT_TURBO", "0")):
+                    self.connect((equalizer, 0), (rs, 3))
+                    # rs consumes the eq buffer ~lag+64 segments behind
+                    # the viterbi path reader — give the shared eq
+                    # output buffer comfortable headroom
+                    equalizer.set_min_output_buffer(512)
+                    LOG.info("TURBO 2B: soft-symbol plane wired (live)")
         else:
             for blk_in, blk_out in [(fs_check, equalizer),
                                      (equalizer, viterbi),
