@@ -124,6 +124,7 @@ atsc_rs_decoder_erasure_impl::atsc_rs_decoder_erasure_impl(int max_erasures)
         d_turbo_pinz2    = (int)env_int("STVT_TURBO_PINZ2", 1, 0, 1);
         d_turbo_selftest = (int)env_int("STVT_TURBO_SELFTEST", 0, 0, 1);
         d_turbo_maxsym   = env_int("STVT_TURBO_MAXSYM", 250000, 1000, 100000000);
+        d_turbo_maxfail  = env_int("STVT_TURBO_MAXFAIL_PCT", 4, 1, 100) / 100.0;
         d_soft_ring.assign((size_t)TSOFT_RING * SEG_FLOATS, 0.0f);
         d_soft_abs.assign(TSOFT_RING, ~0ull);
         d_known.assign(TKNOWN_RING, turbo_known());
@@ -1047,8 +1048,19 @@ int atsc_rs_decoder_erasure_impl::work(int noutput_items,
         if ((int)d_pending.size() > d_turbo_lag) {
             turbo_pending F = d_pending.front();
             d_pending.pop_front();
-            if (F.regular && F.rs == -1)
-                turbo_rescue(F);
+            // stampede gate: EMA (~1 s at 10k pkts/s) of the failure
+            // rate; above the gate turbo stands down — its re-decodes
+            // would blow the real-time budget (source overflows) for
+            // conversions the bimodal law says won't happen anyway.
+            if (F.regular)
+                d_turbo_failema += 1e-4 * ((F.rs == -1 ? 1.0 : 0.0)
+                                           - d_turbo_failema);
+            if (F.regular && F.rs == -1) {
+                if (d_turbo_failema < d_turbo_maxfail)
+                    turbo_rescue(F);
+                else
+                    d_turbo_skip++;
+            }
             std::memcpy(out_pkt, F.out188, PKT_LEN);
             plout[i] = F.pl;
         } else {
@@ -1121,11 +1133,13 @@ int atsc_rs_decoder_erasure_impl::work(int noutput_items,
         if (d_turbo || d_turbo_att) {
             std::fprintf(stderr,
                          "[rs_turbo t=%6.1fs] att=%ld retry=%ld resc=%ld "
-                         "bytes=%ld syms=%ld skip=%ld selftest=%ld/%ld\n",
+                         "bytes=%ld syms=%ld skip=%ld selftest=%ld/%ld "
+                         "fail_ema=%.1f%%\n",
                          elapsed_ms / 1000.0,
                          d_turbo_att, d_turbo_retry, d_turbo_resc,
                          d_turbo_repl, d_turbo_syms, d_turbo_skip,
-                         d_turbo_selfok, d_turbo_selftot);
+                         d_turbo_selfok, d_turbo_selftot,
+                         100.0 * d_turbo_failema);
         }
         d_last_log = now;
         d_log_packets  = 0;
