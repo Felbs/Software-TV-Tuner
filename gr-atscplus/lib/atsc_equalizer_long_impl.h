@@ -127,6 +127,11 @@ private:
     static constexpr int FS_ACC_LEN = gr::dtv::ATSC_DATA_SEGMENT_LENGTH + NTAPS;
     float d_fs_acc[FS_ACC_LEN];
     int   d_fs_count = 0;
+    // monotonic supervised-trainings-THIS-SESSION counter (never reset):
+    // the DD warm-up hold keys on this, not d_lkg_valid, because the tap
+    // cache pre-sets lkg_valid at load — before the AGC has settled or a
+    // single live field sync has been seen (2026-07-10 explosion lesson)
+    uint32_t d_fs_trained = 0;
 
 public:
     atsc_equalizer_long_impl();
