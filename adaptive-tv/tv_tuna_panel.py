@@ -19,6 +19,7 @@ TOOLS = Path(r"Z:\src\magic-tv-decoder\tools")
 sys.path.insert(0, str(TOOLS)); sys.path.insert(0, str(HERE))
 from stvt_epg import load_epg, SCAN_PATH
 from tv_lab import ts_metrics
+import time_knob as tkn   # learned hour-curves (2026-07-10, cube fossil's heir)
 
 PY = r"C:\Users\user\radioconda\python.exe"
 LIVE = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live\live.ts")
@@ -71,6 +72,7 @@ def antenna_for(rf):
     return DEFAULT_ANT
 RE_FS = re.compile(r"fs_err_rms=([\d.]+)")
 RE_FPLL = re.compile(r"mean\|x\|=([\d.]+).*?max\|x\|=([\d.]+)\s+in_rms=([\d.]+)")
+RE_RS5 = re.compile(r"last5s: pkts=(\d+) era_dec=\d+ era_ok=\d+ bad=(\d+)")
 RE_CIR = re.compile(r"\[cir t=[\d.]+\] (.+)")
 
 STATE = {"rf": None, "prog": None, "virtual": None, "name": None,
@@ -541,10 +543,25 @@ def base_env(rf):
                 # E4 (2026-07-06): erasure RS at 0 erasures = stock
                 # behavior + FEC telemetry (the formerly-dark region)
                 "STVT_RS": "erasure", "STVT_RS_ERASURES": "0",
+                # TURBO 2B trellis pinning on ALL tunes (2026-07-10):
+                # failed RS codewords get a pinned Viterbi re-decode —
+                # replay A/B: 54-70% of failed packets converted on
+                # marginal specimens, 0 miscorrections, ~1-4% CPU.
+                # Needs the SOVA reliability plane (erasures stay 0 in
+                # base: reliabilities flow, erasure budget unchanged).
+                "STVT_SOVA": "1", "STVT_TURBO": "1",
                 # MOD-12 GUARD (2026-07-07): the slip cure — 456 saves in
                 # one night carried channel 9 to 35,546 headers. Inert on
                 # clean streams by construction.
                 "STVT_EQ_MOD12_GUARD": "1",
+                # DD tracking EVICTED from live (2026-07-10 evening
+                # bisect): DD-alone = 54 source overflows / 1.02% loss
+                # vs 0 / 0.057% without — the equalizer misses the
+                # real-time deadline and the SDR drops samples (the
+                # "splice" glitches). DD stays OFFLINE-ONLY (e7_vote /
+                # replay, no deadline) where its -41.6% impulse win is
+                # real. Do NOT re-enable live without an overflow-gated
+                # A/B — replay CPU was already the tell (70s/45s).
                 "STVT_SPS": "1.1",
                 "STVT_RRC_SYMS": "8", "STVT_TEISCRUB": "1",
                 "STVT_EQ_LKG": "1", "STVT_EQ_LKG_RMS": "1.0",
@@ -552,7 +569,10 @@ def base_env(rf):
                 "STVT_EQ_CIR": "1",    # echo X-ray telemetry (H2)
                 # warm-start tap cache (lever #3): per-channel LKG taps
                 # persisted to disk; tune-in seeds from last good state
-                "STVT_EQ_TAP_CACHE": str(HERE / "lab" / "tapcache")})
+                "STVT_EQ_TAP_CACHE": str(HERE / "lab" / "tapcache"),
+                # time-knob v2: scans append quality samples here
+                "STVT_QUALITY_HISTORY": str(HERE / "lab"
+                                            / "quality_history.csv")})
     return env
 
 def kill_watch():
@@ -670,6 +690,18 @@ def e7_run(secs=30):
 
 # ── TUNA SCIENCE (2026-07-07): the invented instruments, served live ──
 _SCI_CACHE = {"t": 0.0, "data": {}}
+# time-knob wiring (2026-07-10): rows cache + 1-per-min telemetry recorder
+_TK_CACHE = {"t": 0.0, "rows": []}
+_TK_LAST_REC = [0.0]
+
+def _tk_rows():
+    if time.time() - _TK_CACHE["t"] > 300:
+        try:
+            _TK_CACHE["rows"] = tkn.load()
+        except OSError:
+            _TK_CACHE["rows"] = []
+        _TK_CACHE["t"] = time.time()
+    return _TK_CACHE["rows"]
 
 
 def science_data():
@@ -687,18 +719,21 @@ def science_data():
         surv = 100.0 / (1.0 + math.exp(-(mer - 15.25) / 0.55))
         out["survival"] = {"mer": mer, "pct": round(surv),
                            "watchable": mer >= 16.0}
-    # time knob: this channel's hour-resolved ownership from the cube map
-    try:
-        cmap = json.loads((HERE / "cube_map.json").read_text())
-        ch = cmap["channels"].get(str(STATE["rf"]))
-        if ch:
-            hr = str(time.localtime().tm_hour)
-            out["timeknob"] = {"now_owner": ch.get("owner_by_hour", {})
-                               .get(hr, ch["antenna"]),
-                               "best_hour": ch.get("best_hour"),
-                               "median": ch.get("median_mer")}
-    except (OSError, ValueError, KeyError):
-        pass
+    # time knob v2 (2026-07-10): LEARNED hour-curves from the quality
+    # history — replaces the 7/06 cube_map.json fossil (one night,
+    # hardcoded antenna names). Confidence-tiered: silence over guessing.
+    if STATE.get("rf") is not None:
+        try:
+            rows = _tk_rows()
+            bh = tkn.best_hours(STATE["rf"], rows)
+            out["timeknob"] = {
+                "now_owner": STATE.get("ant_override") or "?",
+                "best_hour": bh[0][0] if bh else None,
+                "worst_hour": bh[1][0] if bh else None,
+                "swing_db": bh[2] if bh else None,
+                "hint": tkn.hint(STATE["rf"], rows)}
+        except (OSError, ValueError, KeyError):
+            pass
     # guard saves this chain-session
     try:
         txt = CHAIN_LOG.read_text(errors="ignore")
@@ -859,13 +894,12 @@ def tune(rf, prog, virtual, name):
                             # DFE+anchor halves bad pkts (46%->21%) and
                             # adds +51% frames vs no-DFE; inert elsewhere
                             "STVT_EQ_DFE_ANCHOR": "1",
-                            # DD tracking promoted 7/10: symbol-rate
-                            # NLMS on data segments; on the RF9 breather
-                            # replay bad -31%, frames +13% at mu=1e-2;
-                            # zero regression on the clean control.
-                            # Kills the flat-fading disease the anchor
-                            # can't (fades alias past 41 Hz training).
-                            "STVT_EQ_DD_MU": "1e-2",
+                            # DD EVICTED from cliff too (7/10 evening):
+                            # live DD = 54 source overflows / +1% splice
+                            # loss (misses the real-time deadline). Its
+                            # replay wins (-31% RF9 breather) were
+                            # measured with no deadline; live the tax
+                            # exceeds the win. Offline E7/replay only.
                             "STVT_EQ_RESEED": "1",
                             "STVT_EQ_QUALITY_BAD_RMS": "8"})
                 if GEN[0] != my_gen: return
@@ -1061,6 +1095,16 @@ def live_math():
             mn, mx, ir = fp[-1]
             out.update({"mean_x": float(mn), "max_x": float(mx),
                         "in_rms": float(ir)})
+        # live packet loss (last ~30 s of RS windows) — the one metric
+        # that can't alias: RF9's fades breathe faster than the 41 Hz
+        # MER sampling, so median MER reads "flawless" while 10%/min of
+        # packets die (2026-07-10, the badge-lied-about-RF9 lesson)
+        rs5 = RE_RS5.findall(text)[-6:]
+        if rs5:
+            pk = sum(int(p) for p, _ in rs5)
+            bd = sum(int(b) for _, b in rs5)
+            if pk:
+                out["loss_pct"] = round(100.0 * bd / pk, 2)
     except OSError:
         pass
     m = ts_metrics(20) if STATE["rf"] is not None else None
@@ -1068,6 +1112,23 @@ def live_math():
         out.update({"hdrs_s": round(m["hdrs_s"], 1),
                     "gaps_min": round(m["gaps_min"], 1),
                     "real_pct": round(m["real_pct"])})
+    # feed the learned hour-curves: one row a minute while tuned — the
+    # model is just this file accruing (universality: ant is an opaque
+    # label from the user's own picker, never a name in code)
+    if (STATE.get("rf") is not None
+            and (out.get("mer_db") is not None
+                 or out.get("loss_pct") is not None)
+            and time.time() - _TK_LAST_REC[0] > 60):
+        _TK_LAST_REC[0] = time.time()
+        try:
+            tkn.record({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        "rf": STATE["rf"],
+                        "ant": STATE.get("ant_override") or "?",
+                        "mer": out.get("mer_db"),
+                        "loss_pct": out.get("loss_pct"),
+                        "source": "panel"})
+        except (OSError, ValueError):
+            pass
     return out
 
 # ── the page ───────────────────────────────────────────────────────
@@ -1227,8 +1288,16 @@ else{
  if(s.tuning) h='⏳ <b>tuning '+(s.virtual||'')+' '+(s.name||'')+'</b> — '+(s.stage||'starting…')+pbar(s.stage_pct);
  else if(s.tuned&&s.stage&&s.stage.startsWith('PLAYER')) h='🔴 <span class="failbanner">'+s.stage+'</span>'+
   ` <button class="stop" onclick="stopTv()">stop</button>`;
- else if(s.tuned){h=`watching <b>${s.virtual} ${s.name||''}</b> (RF${s.rf} p${s.prog})`+
-  ` · <b>${s.hdrs_s??'—'}</b> hdrs/s · <b>${s.gaps_min??'—'}</b> gaps/min · ${s.real_pct??'—'}% real`+
+ else if(s.tuned){
+  // live watchability from actual packet loss (last 30 s) — MER medians
+  // alias on fast faders (RF9 lesson 7/10: "flawless" badge, 10% loss)
+  const lp=s.loss_pct;
+  const lchip=lp==null?'':(lp<0.1?` · <b style="color:#67d18a">✓ clean stream</b>`
+   :lp<1?` · <b style="color:#e7c96a">⚡ occasional glitches — ${lp}% packets lost</b>`
+   :lp<5?` · <b style="color:#e77">📉 glitchy right now — ${lp}% packets lost</b>`
+   :` · <b style="color:#e77">📉 heavy glitching — ${lp}% packets lost (this channel breathes; try it again this evening)</b>`);
+  h=`watching <b>${s.virtual} ${s.name||''}</b> (RF${s.rf} p${s.prog})`+
+  ` · <b>${s.hdrs_s??'—'}</b> hdrs/s · <b>${s.gaps_min??'—'}</b> gaps/min · ${s.real_pct??'—'}% real`+lchip+
   ` <button class="stop" onclick="stopTv()">stop TV</button>`;
   if(s.hdrs_s===0&&(s.real_pct||0)<5) h+=' <span style="color:#e7c96a">⚠ locked but nothing decoding — signal is under the cliff, aim with 🎯</span>';}
  else if(s.stage&&s.stage.startsWith('RADIO FAILED')) h='🔴 <span class="failbanner">'+s.stage+'</span>';
@@ -1250,8 +1319,12 @@ if(r.mer!=null){const m=r.mer,p10=r.mer_p10;
 // a healthy MEDIAN hides impulse/breather channels — if the low tail
 // plunges toward/past the cliff, say so (Fox RF31 lesson, 7/10)
 const bursty=(p10!=null&&m>=16&&(m-p10)>=1.2&&p10<16.2);
-const mc=bursty?'#e7c96a':(m>=16.5?'#67d18a':(m>=15.2?'#e7c96a':'#e77'));
-const mw=bursty?'⚡ bursty — glitches despite strong signal':(m>=16.5?'flawless':(m>=16?'watchable':(m>=15.2?'marginal · glitchy':'below cliff')));
+// measured loss at scan time outranks any MER label: fast faders (RF9)
+// alias the MER sampling and read "flawless" while packets die (7/10)
+const lossy=(r.loss!=null&&r.loss>=0.3);
+const mc=lossy?(r.loss>=3?'#e77':'#e7c96a'):bursty?'#e7c96a':(m>=16.5?'#67d18a':(m>=15.2?'#e7c96a':'#e77'));
+const mw=lossy?(r.loss>=3?'📉 glitchy — '+r.loss+'% packets lost at scan':'⚡ some glitches — '+r.loss+'% lost at scan')
+ :bursty?'⚡ bursty — glitches despite strong signal':(m>=16.5?'flawless':(m>=16?'watchable':(m>=15.2?'marginal · glitchy':'below cliff')));
 mtag=`&nbsp;<span style="color:${mc};font-weight:700">◉ ${mw}</span>`+
 `<span style="color:#5f7591;font-size:11px"> (MER ${m.toFixed(1)}${p10!=null?' / dips '+p10.toFixed(1):''} dB)</span>`;}
 h+=`<tr><td colspan="${g.slots.length+2}" style="background:#0d1626;border-top:2px solid #26436b;padding:7px 6px">`+
@@ -1467,7 +1540,8 @@ document.getElementById('knobcards').innerHTML=kc;
 let sc='';const SC=s.science||{};
 if(SC.survival){const p=SC.survival.pct;
 sc+=card('SURVIVAL CURVE',p+'%','packets that live · '+(SC.survival.watchable?'WATCHABLE':'below 16 = not watchable'),p>=85?'good':(p>=50?'warn':'bad'))}
-if(SC.timeknob){sc+=card('TIME KNOB',SC.timeknob.now_owner||'?','best hour: '+(SC.timeknob.best_hour||'?')+'h · antenna now')}
+if(SC.timeknob){const tk=SC.timeknob;
+sc+=card('TIME KNOB',tk.now_owner||'?',(tk.best_hour!=null?'usually best ~'+tk.best_hour+'h, worst ~'+tk.worst_hour+'h ('+tk.swing_db+' dB swing)':'learning this channel\\'s hours')+(tk.hint?' · '+tk.hint:'')+' · antenna in use')}
 if(SC.guard_fires!==undefined)sc+=card('MOD-12 GUARD',SC.guard_fires,'slips healed this session',SC.guard_fires>20?'warn':'good');
 if(SC.sheriff)sc+=card('FEC SHERIFF',SC.sheriff.action,'last action · '+SC.sheriff.t);
 if(SC.dawn)sc+=card('DAWN FORECAST',SC.dawn.score,SC.dawn.verdict);
@@ -1629,6 +1703,7 @@ def grid_json():
                      "virtual": ch["virtual"], "callsign": ch["callsign"],
                      "tune": ch.get("tune", " "), "snr": ch.get("snr_db"),
                      "mer": ch.get("mer_med"), "mer_p10": ch.get("mer_p10"),
+                     "loss": ch.get("loss_pct"),
                      "rms": rms_by_rf.get(ch["rf"]),
                      "cells": cells})
     return {"slots": slot_labels, "rows": rows, "floor": floor}
