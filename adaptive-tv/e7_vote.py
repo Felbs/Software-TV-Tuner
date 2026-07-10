@@ -36,6 +36,10 @@ CLIFF_ENV = {
     "STVT_VITERBI": "soft", "STVT_RS": "erasure", "STVT_RS_ERASURES": "14",
     "STVT_SOVA": "1", "STVT_EQ": "long", "STVT_TEISCRUB": "0",
     "STVT_SPS": "1.1", "STVT_RRC_SYMS": "8",
+    # H-DD-E7 (2026-07-10 night): DD tracking in every voting pass —
+    # hypothesis: -31% loss per pass => more clean-GOP donors => better
+    # healing on breathers. First test: tonight's E7 batch.
+    "STVT_EQ_DD_MU": "1e-2",
     "STVT_EQ_LKG": "1", "STVT_EQ_LKG_RMS": "1.0",
     "STVT_EQ_MOD12_GUARD": "1",
 }
