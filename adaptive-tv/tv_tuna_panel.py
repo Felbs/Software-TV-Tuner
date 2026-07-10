@@ -1819,11 +1819,65 @@ class Panel(ThreadingHTTPServer):
     daemon_threads = True
 
 
+def chain_doctor():
+    """CHAIN AUTO-HEAL (2026-07-10): the SDRplay API service crashed 8x
+    in 7 days (Windows event log, 0xc0000005) — each crash silently
+    kills the live chain (no traceback; the service auto-restarts, so
+    everything looks normal afterward). This was the week's phantom:
+    dead chains -> looping/stalled players -> "glitchy TV". The doctor
+    converts each occurrence into a ~40 s self-heal with an honest
+    banner. Bounded retries per the recovery-loop law."""
+    import psutil
+    heals = []
+    misses = 0
+    while True:
+        time.sleep(20)
+        try:
+            if (STATE.get("rf") is None or STATE.get("tuning")
+                    or SCAN.get("running") or BAL.get("on")
+                    or FLAT.get("on")):
+                misses = 0
+                continue
+            alive = 0
+            for pr in psutil.process_iter(["name", "cmdline"]):
+                try:
+                    if pr.info["name"] == "python.exe" and any(
+                            "tv_live" in (c or "")
+                            for c in (pr.info["cmdline"] or [])):
+                        alive += 1
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            if alive > 0:
+                misses = 0
+                continue
+            misses += 1
+            if misses < 2:
+                continue                      # 40 s confirmation
+            misses = 0
+            now = time.time()
+            heals[:] = [h for h in heals if now - h < 3600]
+            if len(heals) >= 4:
+                set_stage(0, "chain keeps dying (SDRplay service "
+                             "crashing) — auto-heal limit reached; "
+                             "restart the SDRplay service or replug")
+                continue
+            heals.append(now)
+            rf, prog = STATE.get("rf"), STATE.get("prog")
+            virt, name = STATE.get("virtual"), STATE.get("name", "")
+            set_stage(5, "chain died (SDRplay service hiccup) — "
+                         "self-healing: retuning")
+            threading.Thread(target=tune, args=(rf, prog, virt, name),
+                             daemon=True).start()
+        except Exception:
+            pass
+
+
 if __name__ == "__main__":
     # STVT_PANEL_NOSWEEP=1: skip the spectrum sweeper (which opens the
     # SDR) so the API can be tested without contending for the radio.
     if not os.environ.get("STVT_PANEL_NOSWEEP"):
         threading.Thread(target=sweeper, daemon=True).start()
     threading.Thread(target=flight_recorder, daemon=True).start()
+    threading.Thread(target=chain_doctor, daemon=True).start()
     print(f"TV Tuna panel: http://localhost:{PORT}", flush=True)
     Panel(("127.0.0.1", PORT), H).serve_forever()
