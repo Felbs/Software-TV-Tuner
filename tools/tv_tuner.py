@@ -892,6 +892,26 @@ def scan_one_rf(rf: int, dwell_sec: float = 12.0,
         if loss_pct() is not None:
             result["loss_pct"] = loss_pct()  # measured loss during dwell
         result["antenna"] = os.environ.get("STVT_ANTENNA", "?")
+        # feed the learned hour-curves (time-knob v2): every scan is a
+        # timestamped quality sample. Env-gated; schema matches
+        # time_knob.FIELDS (ts,rf,ant,mer,loss_pct,source,date_known).
+        qh = os.environ.get("STVT_QUALITY_HISTORY")
+        if qh and (result.get("mer_med") is not None
+                   or result.get("loss_pct") is not None):
+            try:
+                import csv as _csv
+                _new = not os.path.exists(qh)
+                with open(qh, "a", newline="", encoding="utf-8") as _f:
+                    _w = _csv.writer(_f)
+                    if _new:
+                        _w.writerow(["ts", "rf", "ant", "mer", "loss_pct",
+                                     "source", "date_known"])
+                    _w.writerow([time.strftime("%Y-%m-%dT%H:%M:%S"), rf,
+                                 result["antenna"],
+                                 result.get("mer_med", ""),
+                                 result.get("loss_pct", ""), "scan", 1])
+            except OSError:
+                pass
         # ATSC PSIP: virtual-channel labels + the next ~12 hours of EIT
         # show titles, decoded directly from the captured TS via our
         # stdlib-only parser. Events are stored with GPS start_time so
