@@ -15,6 +15,28 @@ options, and tells you honestly — in dB — whether an antenna can
 decode at your location and what's limiting it if not. See
 [The science](#the-science) for how.
 
+Latest additions:
+
+- **Turbo decoding (stage 2b, "trellis pinning")** — when a packet
+  fails Reed-Solomon, the decoder goes *back* to the raw symbols and
+  re-runs the Viterbi pass over just that stretch with the
+  successfully-decoded neighboring bytes pinned as constraints, then
+  retries RS. On marginal signals it converts 50–70% of failed packets
+  at ~1–4% CPU, with a full miscorrection guard battery (measured: 0
+  false fixes). On by default in the panel (`STVT_TURBO=1`, needs the
+  SOVA reliability plane `STVT_SOVA=1`).
+- **A learned "time knob"** — broadcast reception provably changes
+  with the hour (temperature inversions, foliage, human-schedule
+  interference). The panel now records a quality sample every minute
+  you watch and every time you scan, and learns each channel's 24-hour
+  curve for *your* rig — with recency decay and honest confidence
+  tiers ("unknown" beats a guess). It tells you "usually better around
+  21h" only when the data backs it.
+- **Honest quality labels** — the guide and status bar are driven by
+  *measured packet loss*, not signal-strength proxies: fast-fading
+  channels alias any MER average and can read "flawless" while losing
+  10%/min. Loss can't lie.
+
 ---
 
 ## Install — Windows (~10 minutes)
@@ -141,7 +163,14 @@ straight off the decoder:
   the best of each pass — a rescue pass for a glitchy moment, with no
   interruption to live TV.
 - **🔬 TUNA SCIENCE** — plain-language cards explaining each invented
-  instrument, with your own rig's live numbers.
+  instrument, with your own rig's live numbers — including the TIME
+  KNOB card (this channel's learned best/worst hours) and a live
+  watchability chip fed by actual packet loss.
+
+The panel also runs a **chain doctor**: if the vendor SDR service
+crashes mid-watch (it happens), the doctor notices the silent chain
+death within ~40 s and retunes automatically, with honest banners and
+a heal-rate cap.
 
 Everything the panel reports is measured on *your* signal, at *your*
 location — nothing is hardcoded to a market.
@@ -227,7 +256,9 @@ gain ranges).
 | Pilot locks, zero data, gain doesn't help | signal below the 15.2 dB data cliff — antenna/aperture problem, measure with `mer_meter.py` |
 | Active antenna/LNA reads dead | it isn't powered. Bias-tee LNAs: right port (`--biast`, RSPdx = Antenna B), no DC-blocking filter between SDR and LNA, check orientation (IN = antenna side) |
 | Glitchy picture on strong signal | multipath. Try other channels (`ch_scan.py` + `mer_gain_cal.py` per channel), aim with `mer_meter.py --tone`, reposition antenna higher/outside |
-| Periodic glitches (every few s) despite clean MER and zero RS errors | impulse noise snapping sync — whole mux slices are never emitted (audit continuity-counter gaps AND confirm real video packets exist; a nulls-only stream shows zero gaps and zero errors while carrying nothing). The impulse blanker (`STVT_NB=1`, threshold 2.2–3.0) trims gap rate modestly. **Never set the threshold ≤2.0**: it silently replaces the whole output with null padding — full-rate file, zero content |
+| Steady drizzle of loss on EVERY channel and antenna, MER high, glitch every few seconds | grep the chain log for `OsO` — those are the SDR driver printing **overflow**: the decoder missed its real-time deadline and samples were dropped at the source. Each ~5 ms drop breaks three stages' alignment at once (~300 packets). Cause is CPU load in the chain, not RF and not cables — turn off optional DSP knobs one at a time (a live A/B with the overflow count as the judge). Signature in the raw IQ: pilot *phase* steps with *flat* amplitude |
+| Same drizzle, but zero `OsO` in the log | now suspect the USB path: leaky cables pass volume probes while dropping samples under real load. Short direct USB 3.0, different cable, different rear port. Judge by gap-rate during real decode, never by a throughput test |
+| Tempted by the impulse blanker (`STVT_NB=1`)? | measured verdict: a 13-arm threshold sweep on a real impulse storm was flat — it doesn't help, and **threshold ≤2.0 silently replaces the whole output with null padding** (full-rate file, zero content). It stays off for a reason; turbo decoding is the impulse weapon that actually measures |
 | SDR dead after hours of restarts / hot attic | thermal or firmware wedge: cool it / replug. Never mount the SDR box in a hot attic — run coax up, not USB |
 
 ## The science
@@ -242,6 +273,25 @@ algorithm, plus the field-measured antenna/LNA/gain lessons behind it.
 [`docs/proven_capture_recipe.md`](docs/proven_capture_recipe.md) has
 the reference capture settings.
 
+Three field lessons that shaped this project, offered to anyone
+building live SDR pipelines:
+
+1. **Offline tests cannot validate live DSP.** A feature that wins big
+   on recorded signals can still ruin live decode by missing the
+   real-time deadline — the driver drops samples, and a dropped sample
+   looks like interference in every downstream instrument. Gate every
+   live promotion on the source-overflow count, not on replay quality.
+   (We learned this the hard way: our best-measuring equalizer upgrade
+   was also our mystery glitch.)
+2. **The pixels are a measurement layer.** Transport-stream metrics
+   can be perfect while the *player's* error-concealment flags smear
+   the picture. If viewers say it looks worse and your TS metrics
+   disagree, audit the presentation pipeline before the decoder.
+3. **Failed-packet rescue rate is a diagnostic.** Turbo decoding
+   converts ~70% of impulse-storm failures, ~20% of fading failures,
+   and ~0% of sample-loss failures — so the conversion percentage
+   tells you *which disease* a channel has before you pick a cure.
+
 ## Repo layout
 
 ```
@@ -250,7 +300,9 @@ tools/                  tuner CLI, live chain, DVR suite, PSIP/EPG,
                         players, watchdogs  (tv_tuner.py is the entry)
 adaptive-tv/            universal antenna calibration + diagnostics
                         (mer_meter, mer_gain_cal, ch_scan, config_
-                        shootout, quality_judge, auto_tv, ...)
+                        shootout, quality_judge, auto_tv, ...) plus
+                        tv_tuna_panel.py (web UI) and time_knob.py
+                        (learned per-channel hour curves)
 docs/                   science explainer + capture recipe
 bootstrap.sh            Linux one-shot setup
 ```
