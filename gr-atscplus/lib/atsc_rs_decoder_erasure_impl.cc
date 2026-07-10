@@ -9,6 +9,9 @@
 #include "atsc_rs_decoder_erasure_impl.h"
 #include <gnuradio/io_signature.h>
 #include <gnuradio/dtv/atsc_plinfo.h>
+// Trellis mux geometry tables (enco_which_syms / enco_which_dibits) shared
+// with atsc_viterbi_soft — the turbo stage-2b back-mapper needs them.
+#include "atsc_viterbi_mux.h"
 // gnuradio/fec/rs.h is a C header; gr-fec was built without extern "C"
 // guards in its public header. Wrap it here so the symbols resolve.
 extern "C" {
@@ -17,6 +20,7 @@ extern "C" {
 
 #include <algorithm>
 #include <cerrno>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -42,10 +46,16 @@ atsc_rs_decoder_erasure_impl::atsc_rs_decoder_erasure_impl(int max_erasures)
                  // input 2 (optional, 2026-07-07): SOVA per-byte
                  // reliability plane from the viterbi (deinterleaved by
                  // a twin deinterleaver) — TRUE erasure positions
-                 io_signature::make3(2, 3,
-                     sizeof(unsigned char) * CODE_LEN,
-                     sizeof(gr::dtv::plinfo),
-                     sizeof(unsigned char) * CODE_LEN),
+                 // input 3 (optional, 2026-07-10 turbo stage-2b): the
+                 // post-equalizer SOFT SYMBOLS (float x 832) — the exact
+                 // viterbi input, same item index space (all sync blocks),
+                 // buffered here for the pinned second Viterbi pass
+                 io_signature::makev(2, 4,
+                     std::vector<int>{
+                         (int)(sizeof(unsigned char) * CODE_LEN),
+                         (int)sizeof(gr::dtv::plinfo),
+                         (int)(sizeof(unsigned char) * CODE_LEN),
+                         (int)(sizeof(float) * SEG_FLOATS)}),
                  io_signature::make2(2, 2,
                      sizeof(unsigned char) * PKT_LEN,
                      sizeof(gr::dtv::plinfo)))
@@ -94,6 +104,35 @@ atsc_rs_decoder_erasure_impl::atsc_rs_decoder_erasure_impl(int max_erasures)
     std::fprintf(stderr,
                  "[rs_erasure] init max_erasures=%d decay_period=%d hist_count=%d\n",
                  d_max_erasures, d_hist_decay_period, d_hist_count);
+
+    // ── TURBO STAGE 2B (2026-07-10) — opt-in, default OFF ─────────────
+    {
+        const char* p = std::getenv("STVT_TURBO");
+        d_turbo = p && p[0] == '1';
+    }
+    if (d_turbo) {
+        auto env_int = [](const char* name, long defv, long lo, long hi) {
+            if (const char* p = std::getenv(name)) {
+                long v = std::atol(p);
+                if (v >= lo && v <= hi) return v;
+            }
+            return defv;
+        };
+        d_turbo_lag      = (int)env_int("STVT_TURBO_LAG", 56, 53, 200);
+        d_turbo_bytes    = (int)env_int("STVT_TURBO_BYTES", 64, 1, 207);
+        d_turbo_ctx      = (int)env_int("STVT_TURBO_CTX", 48, 8, 400);
+        d_turbo_pinz2    = (int)env_int("STVT_TURBO_PINZ2", 1, 0, 1);
+        d_turbo_selftest = (int)env_int("STVT_TURBO_SELFTEST", 0, 0, 1);
+        d_turbo_maxsym   = env_int("STVT_TURBO_MAXSYM", 250000, 1000, 100000000);
+        d_soft_ring.assign((size_t)TSOFT_RING * SEG_FLOATS, 0.0f);
+        d_soft_abs.assign(TSOFT_RING, ~0ull);
+        d_known.assign(TKNOWN_RING, turbo_known());
+        std::fprintf(stderr,
+                     "[rs_erasure] TURBO 2B armed: lag=%d bytes=%d ctx=%d "
+                     "pinz2=%d selftest=%d maxsym=%ld\n",
+                     d_turbo_lag, d_turbo_bytes, d_turbo_ctx, d_turbo_pinz2,
+                     d_turbo_selftest, d_turbo_maxsym);
+    }
 }
 
 void atsc_rs_decoder_erasure_impl::load_histogram()
@@ -209,7 +248,8 @@ int atsc_rs_decoder_erasure_impl::dynamic_max_erasures() const
 
 int atsc_rs_decoder_erasure_impl::decode_block(const unsigned char* in207,
                                                unsigned char* out188,
-                                               const unsigned char* rel207)
+                                               const unsigned char* rel207,
+                                               unsigned char* corr207)
 {
     // (207, 187) shortened from (255, 235) — 48 byte implicit zero pad
     // at the front of the 255-byte buffer fed to decode_rs_char.
@@ -251,6 +291,8 @@ int atsc_rs_decoder_erasure_impl::decode_block(const unsigned char* in207,
             }
         }
         std::memcpy(out188, tmp + PAD_BYTES, PKT_LEN);
+        if (corr207)
+            std::memcpy(corr207, tmp + PAD_BYTES, CODE_LEN);
         d_hist_count++;
         return n;
     }
@@ -339,6 +381,8 @@ int atsc_rs_decoder_erasure_impl::decode_block(const unsigned char* in207,
                 }
             }
             std::memcpy(out188, tmp + PAD_BYTES, PKT_LEN);
+            if (corr207)
+                std::memcpy(corr207, tmp + PAD_BYTES, CODE_LEN);
             d_hist_count++;
             return ng;
         }
@@ -435,6 +479,8 @@ int atsc_rs_decoder_erasure_impl::decode_block(const unsigned char* in207,
             }
         }
         std::memcpy(out188, tmp + PAD_BYTES, PKT_LEN);
+        if (corr207)
+            std::memcpy(corr207, tmp + PAD_BYTES, CODE_LEN);
         d_hist_count++;
         return n;
     }
@@ -443,6 +489,375 @@ int atsc_rs_decoder_erasure_impl::decode_block(const unsigned char* in207,
     // Uncorrectable (or rejected miscorrection) — return data as-is, mark TEI.
     std::memcpy(out188, in207, PKT_LEN);
     return -1;
+}
+
+// ═════════════════ TURBO STAGE 2B machinery (2026-07-10) ═════════════════
+// RS-truth back-propagation (TURBO_BLUEPRINT.md stage 2): the convolutional
+// interleaver spreads each codeword across 52 segments, so when a codeword
+// FAILS, most bytes of the trellis stretches that fed it belong to OTHER
+// codewords that DECODED — known-correct symbols. Pin those branches in a
+// second Viterbi pass over the buffered soft input and give RS+GMD one more
+// look at the re-decoded bytes.
+//
+// Geometry (verified against tx_seg() and the viterbi fifo arithmetic):
+//   deint:   output byte at anchor-rel pos P came from pre-deint byte
+//            S = P - 156 - 208*(51 - (P mod 52))        [156 ≡ 0 (mod 52)]
+//   viterbi: output byte (seg s, byte j) dibit d  <->  (encoder e, slot k)
+//            via enco_which_dibits; its SYMBOL lives one 12-seg batch
+//            earlier: fifo(797) + traceback(31) = 828 = one batch per
+//            decoder, so slot (t, k) decodes symbol enco_which_syms[e][k]
+//            of batch t-1 (abs segment 12*(t-1) + sym/832, sample sym%832).
+namespace {
+
+// trellis tables — replicas of atsc_single_viterbi_soft's (kept protected
+// there); pair index = (Z2<<1)|Z1, symbol level index = 4*Z2 + 2*Z1 + Z0.
+static const int TB_was_sent[4][4] = {
+    { 0, 2, 4, 6 }, { 0, 2, 4, 6 }, { 1, 3, 5, 7 }, { 1, 3, 5, 7 }
+};
+static const int TB_trans[4][4] = {
+    { 0, 2, 0, 2 }, { 2, 0, 2, 0 }, { 1, 3, 1, 3 }, { 3, 1, 3, 1 }
+};
+
+struct turbo_pin_t {
+    uint8_t mode; // 0 = free, 1 = Z1 pinned, 2 = Z1+Z2 pinned
+    uint8_t z1;
+    uint8_t z2;
+    uint8_t x2;   // known postcoder OUTPUT bit (Z2-chain resolution input)
+};
+
+// Full-traceback Viterbi over one span with per-symbol branch pins.
+// Same L1 branch metric as atsc_single_viterbi_soft; better traceback
+// (whole-span, not 32-truncated). pairs_out[i] = (Z2<<1)|Z1 at step i.
+static void run_pinned_viterbi(const float* syms,
+                               const turbo_pin_t* pins,
+                               int L,
+                               std::vector<uint8_t>& tb_scratch,
+                               uint8_t* pairs_out)
+{
+    float pm[4] = { 0, 0, 0, 0 };
+    tb_scratch.assign((size_t)L * 4, 0);
+    for (int i = 0; i < L; i++) {
+        float dist[8];
+        for (int s = 0; s < 8; s++)
+            dist[s] = std::fabs(syms[i] - (float)(2 * s - 7));
+        const turbo_pin_t& p = pins[i];
+        float npm[4];
+        for (int st = 0; st < 4; st++) {
+            float best = 1e30f;
+            int bp = 0;
+            for (int pair = 0; pair < 4; pair++) {
+                float m = dist[TB_was_sent[st][pair]] + pm[TB_trans[st][pair]];
+                if (p.mode >= 1 && (pair & 1) != p.z1)
+                    m += 1.0e6f;
+                if (p.mode == 2 && ((pair >> 1) & 1) != p.z2)
+                    m += 1.0e6f;
+                if (m < best) {
+                    best = m;
+                    bp = pair;
+                }
+            }
+            npm[st] = best;
+            tb_scratch[(size_t)i * 4 + st] = (uint8_t)bp;
+        }
+        const float mn =
+            std::min(std::min(npm[0], npm[1]), std::min(npm[2], npm[3]));
+        for (int st = 0; st < 4; st++)
+            pm[st] = npm[st] - mn;
+    }
+    int st = 0;
+    float b = pm[0];
+    for (int s = 1; s < 4; s++)
+        if (pm[s] < b) {
+            b = pm[s];
+            st = s;
+        }
+    for (int i = L - 1; i >= 0; i--) {
+        const uint8_t pair = tb_scratch[(size_t)i * 4 + st];
+        pairs_out[i] = pair;
+        st = TB_trans[st][pair];
+    }
+}
+
+// Inverse of the viterbi mux tables: batch byte index (0..2483) + dibit
+// (0..3 = bit-shift/2) -> (encoder, slot k). Built once, 12*828*4 entries
+// exactly cover 2484 bytes x 4 dibits.
+struct mux_inverse {
+    uint8_t enc[12 * 207][4];
+    uint16_t kk[12 * 207][4];
+    mux_inverse()
+    {
+        for (int e = 0; e < 12; e++)
+            for (unsigned k = 0; k < enco_which_max; k++) {
+                const unsigned dbwhere = enco_which_dibits[e][k];
+                const unsigned idx = dbwhere >> 3;
+                const unsigned d = (dbwhere & 0x7) >> 1;
+                enc[idx][d] = (uint8_t)e;
+                kk[idx][d] = (uint16_t)k;
+            }
+    }
+};
+static const mux_inverse& muxinv()
+{
+    static const mux_inverse m;
+    return m;
+}
+
+} // anonymous namespace
+
+bool atsc_rs_decoder_erasure_impl::turbo_rescue(turbo_pending& F)
+{
+    if (!d_anchor_seen || !F.has_rel)
+        return false;
+    if (F.abs < d_deint_anchor)
+        return false;
+    const int64_t n_rel = (int64_t)(F.abs - d_deint_anchor);
+    if (n_rel < 53)
+        return false; // all 52 source segments must postdate the anchor
+
+    d_turbo_att++;
+
+    // 1) targets: the weakest-SOVA bytes of the failed codeword.
+    int order[CODE_LEN];
+    for (int j = 0; j < CODE_LEN; j++)
+        order[j] = j;
+    std::sort(order, order + CODE_LEN, [&](int a, int b2) {
+        if (F.rel207[a] != F.rel207[b2])
+            return F.rel207[a] < F.rel207[b2];
+        return a < b2;
+    });
+    const int ntar = std::min(d_turbo_bytes, (int)CODE_LEN);
+
+    // 2) back-map targets to per-encoder trellis slot indices
+    //    M = t*828 + k (continuous across batches in decode-call order).
+    std::vector<int64_t> tgt[12];
+    const mux_inverse& inv = muxinv();
+    const uint64_t anchor = d_deint_anchor;
+    for (int ti = 0; ti < ntar; ti++) {
+        const int j = order[ti];
+        const int64_t P = n_rel * 207 + j;          // output byte position
+        const int b = (int)(P % 52);                // 156 ≡ 0 (mod 52)
+        const int64_t S = P - 156 - 208 * (51 - b); // pre-deint byte position
+        if (S < 0)
+            continue;
+        const uint64_t s_abs = anchor + (uint64_t)(S / 207);
+        const int j2 = (int)(S % 207);
+        const uint64_t t = s_abs / 12;
+        if (t < 1)
+            continue; // symbols would predate the stream
+        const int idx = (int)(s_abs % 12) * 207 + j2;
+        for (int d = 0; d < 4; d++) {
+            const int e = inv.enc[idx][d];
+            tgt[e].push_back((int64_t)t * 828 + inv.kk[idx][d]);
+        }
+    }
+
+    // candidate re-decoded dibits for bytes of THIS codeword
+    uint8_t cand_dib[CODE_LEN][4];
+    uint8_t cand_have[CODE_LEN];
+    std::memset(cand_have, 0, sizeof(cand_have));
+
+    std::vector<float> syms;
+    std::vector<turbo_pin_t> pins;
+    std::vector<uint8_t> pairs, tbs;
+    long syms_budget = d_turbo_maxsym;
+
+    for (int e = 0; e < 12; e++) {
+        auto& v = tgt[e];
+        if (v.empty())
+            continue;
+        std::sort(v.begin(), v.end());
+        v.erase(std::unique(v.begin(), v.end()), v.end());
+        size_t ci = 0;
+        while (ci < v.size()) {
+            size_t cj = ci;
+            while (cj + 1 < v.size() && v[cj + 1] - v[cj] <= 2 * d_turbo_ctx)
+                cj++;
+            int64_t M0 = v[ci] - d_turbo_ctx;
+            const int64_t M1 = v[cj] + d_turbo_ctx;
+            ci = cj + 1;
+            if (M0 < 828)
+                M0 = 828; // batch >= 1 so the symbol batch (t-1) exists
+            const int64_t L = M1 - M0 + 1;
+            if (L < 8)
+                continue;
+            if (L > syms_budget) {
+                d_turbo_skip++;
+                continue;
+            }
+
+            // fetch soft symbols; abort cluster on any ring miss
+            syms.resize((size_t)L);
+            pins.assign((size_t)L, turbo_pin_t{ 0, 0, 0, 0 });
+            bool have_all = true;
+            for (int64_t M = M0; M <= M1; M++) {
+                const int64_t t = M / 828;
+                const int k = (int)(M % 828);
+                const unsigned sym = enco_which_syms[e][k];
+                const int64_t seg = 12 * (t - 1) + (int64_t)(sym / 832);
+                const int slot = (int)(seg & (TSOFT_RING - 1));
+                if (seg < 0 || d_soft_abs[slot] != (uint64_t)seg) {
+                    have_all = false;
+                    break;
+                }
+                syms[(size_t)(M - M0)] =
+                    d_soft_ring[(size_t)slot * SEG_FLOATS + (sym % 832)];
+            }
+            if (!have_all) {
+                d_turbo_skip++;
+                continue;
+            }
+
+            // pin sources (bytes of DECODED codewords) + suspect registry
+            // (bytes of THIS codeword falling in the span)
+            struct susp_t {
+                int j3;
+                int d;
+                int64_t M;
+            };
+            std::vector<susp_t> susp;
+            for (int64_t M = M0; M <= M1; M++) {
+                const int64_t t = M / 828;
+                const int k = (int)(M % 828);
+                const unsigned dbwhere = enco_which_dibits[e][k];
+                const unsigned idx = dbwhere >> 3;
+                const int d = (int)((dbwhere & 0x7) >> 1);
+                const uint64_t s_abs = (uint64_t)t * 12 + idx / 207;
+                const int j2 = (int)(idx % 207);
+                if (s_abs < anchor)
+                    continue;
+                const int64_t Pp = (int64_t)(s_abs - anchor) * 207 + j2;
+                const int b2 = (int)(Pp % 52);
+                const int64_t Q = Pp + 208 * (51 - b2) + 156;
+                const uint64_t n_out = anchor + (uint64_t)(Q / 207);
+                const int j3 = (int)(Q % 207);
+                if (n_out == F.abs) {
+                    susp.push_back({ j3, d, M });
+                    continue;
+                }
+                if (d_turbo_selftest)
+                    continue; // mapping validation runs pin-free
+                const turbo_known& K = d_known[n_out & (TKNOWN_RING - 1)];
+                if (K.abs != n_out || !K.ok)
+                    continue;
+                const int vdib = (K.cw[j3] >> (2 * d)) & 0x3;
+                turbo_pin_t& pn = pins[(size_t)(M - M0)];
+                pn.mode = 1;
+                pn.z1 = (uint8_t)(vdib & 1);
+                pn.x2 = (uint8_t)((vdib >> 1) & 1);
+            }
+            if (susp.empty())
+                continue;
+
+            // Z2-chain resolution: within each contiguous pinned run the
+            // postcoder differential y2[i] = x2[i] ^ y2[i-1] leaves ONE
+            // unknown phase bit — score both hypotheses against the
+            // received levels and, if decisive, upgrade to a full pin.
+            if (d_turbo_pinz2 && !d_turbo_selftest) {
+                int64_t i0 = 0;
+                while (i0 < L) {
+                    if (pins[(size_t)i0].mode == 0) {
+                        i0++;
+                        continue;
+                    }
+                    int64_t i1 = i0;
+                    while (i1 + 1 < L && pins[(size_t)(i1 + 1)].mode != 0)
+                        i1++;
+                    float sc[2] = { 0.0f, 0.0f };
+                    for (int h = 0; h < 2; h++) {
+                        int y2 = h;
+                        for (int64_t i = i0; i <= i1; i++) {
+                            y2 ^= pins[(size_t)i].x2;
+                            const int base = 4 * y2 + 2 * pins[(size_t)i].z1;
+                            const float d0 =
+                                std::fabs(syms[(size_t)i] - (float)(2 * base - 7));
+                            const float d1 =
+                                std::fabs(syms[(size_t)i] - (float)(2 * (base + 1) - 7));
+                            sc[h] += std::min(d0, d1);
+                        }
+                    }
+                    if (std::fabs(sc[0] - sc[1]) > 1.0f) {
+                        int y2 = (sc[0] <= sc[1]) ? 0 : 1;
+                        for (int64_t i = i0; i <= i1; i++) {
+                            y2 ^= pins[(size_t)i].x2;
+                            pins[(size_t)i].mode = 2;
+                            pins[(size_t)i].z2 = (uint8_t)y2;
+                        }
+                    }
+                    i0 = i1 + 1;
+                }
+            }
+
+            pairs.resize((size_t)L);
+            run_pinned_viterbi(syms.data(), pins.data(), (int)L, tbs,
+                               pairs.data());
+            d_turbo_syms += L;
+            syms_budget -= L;
+
+            for (const auto& sp : susp) {
+                const int64_t i = sp.M - M0;
+                if (i < 1)
+                    continue; // x2 needs the previous path step
+                const int y2 = (pairs[(size_t)i] >> 1) & 1;
+                const int y2p = (pairs[(size_t)(i - 1)] >> 1) & 1;
+                const int x1 = pairs[(size_t)i] & 1;
+                const int x2 = y2 ^ y2p;
+                cand_dib[sp.j3][sp.d] = (uint8_t)((x2 << 1) | x1);
+                cand_have[sp.j3] |= (uint8_t)(1 << sp.d);
+            }
+        }
+    }
+
+    // 3) assemble replacement bytes and give RS+GMD one more look
+    unsigned char new207[CODE_LEN];
+    std::memcpy(new207, F.in207, CODE_LEN);
+    unsigned char relx[CODE_LEN];
+    std::memcpy(relx, F.rel207, CODE_LEN);
+    int ndiff = 0;
+    for (int j = 0; j < CODE_LEN; j++) {
+        if (cand_have[j] != 0x0F)
+            continue;
+        const unsigned char nb = (unsigned char)(
+            (cand_dib[j][3] << 6) | (cand_dib[j][2] << 4) |
+            (cand_dib[j][1] << 2) | cand_dib[j][0]);
+        if (d_turbo_selftest) {
+            d_turbo_selftot++;
+            if (nb == F.in207[j])
+                d_turbo_selfok++;
+            continue;
+        }
+        if (nb != new207[j]) {
+            new207[j] = nb;
+            relx[j] = 200; // pinned re-decode: trust above raw SOVA doubt
+            ndiff++;
+        }
+    }
+    if (d_turbo_selftest || ndiff == 0)
+        return false;
+    d_turbo_retry++;
+    d_turbo_repl += ndiff;
+
+    unsigned char out188[PKT_LEN];
+    unsigned char corr[CODE_LEN];
+    const int64_t save_nsince = d_n_since;
+    d_n_since = n_rel; // sick_mark attribution for the RETRIED codeword
+    const int rs = decode_block(new207, out188, relx, corr);
+    d_n_since = save_nsince;
+    if (rs < 0)
+        return false;
+
+    std::memcpy(F.out188, out188, PKT_LEN);
+    F.pl.set_transport_error(false);
+    F.rs = rs;
+    turbo_known& K = d_known[F.abs & (TKNOWN_RING - 1)];
+    K.abs = F.abs;
+    K.ok = 1;
+    std::memcpy(K.cw, corr, CODE_LEN);
+    d_turbo_resc++;
+    if (d_bad_packets > 0)
+        d_bad_packets--;
+    if (d_log_bad > 0)
+        d_log_bad--;
+    return true;
 }
 
 int atsc_rs_decoder_erasure_impl::work(int noutput_items,
@@ -487,6 +902,20 @@ int atsc_rs_decoder_erasure_impl::work(int noutput_items,
     const unsigned char* rel = input_items.size() > 2
         ? static_cast<const unsigned char*>(input_items[2]) : nullptr;
 
+    // TURBO 2B soft-symbol plane (optional input 3): the viterbi's input.
+    const float* soft = input_items.size() > 3
+        ? static_cast<const float*>(input_items[3]) : nullptr;
+    if (d_turbo && !d_turbo_checked) {
+        d_turbo_checked = true;
+        if (!soft || !rel) {
+            std::fprintf(stderr,
+                         "[rs_erasure] TURBO requested but %s not connected "
+                         "— turbo disabled\n",
+                         !soft ? "soft-symbol port (in3)" : "SOVA plane (in2)");
+            d_turbo = false;
+        }
+    }
+
     // SICKMAP phase anchors: deint_sync tags mark commutator-phase zero.
     // Phase-consistent re-anchors (every field: 312*207 is a multiple of
     // 52) keep the original anchor so the map survives field boundaries;
@@ -521,40 +950,116 @@ int atsc_rs_decoder_erasure_impl::work(int noutput_items,
         if (d_n_since >= 0)
             d_sick[d_n_since & 511] = 0;   // expire the slot fresh writes use
 
-        // Always propagate plinfo (downstream blocks need it).
-        plout[i] = plin[i];
+        if (!d_turbo) {
+            // ═══ ORIGINAL PATH — byte-identical when STVT_TURBO is off ═══
+            // Always propagate plinfo (downstream blocks need it).
+            plout[i] = plin[i];
 
-        // Skip RS decode on non-regular (field-sync) segments — they
-        // aren't RS-encoded data. Day 5: stock RS probably copies the
-        // input bytes through unchanged (NOT a fake NULL packet — that
-        // confuses downstream derand whose PN-sync depends on input
-        // content matching field-sync patterns). Copy first 188 bytes
-        // of the 207-byte codeword through. plinfo tells depad downstream
-        // to strip the segment.
-        if (!plin[i].regular_seg_p()) {
-            std::memcpy(out_pkt, in_pkt, PKT_LEN);
+            // Skip RS decode on non-regular (field-sync) segments — they
+            // aren't RS-encoded data. Day 5: stock RS probably copies the
+            // input bytes through unchanged (NOT a fake NULL packet — that
+            // confuses downstream derand whose PN-sync depends on input
+            // content matching field-sync patterns). Copy first 188 bytes
+            // of the 207-byte codeword through. plinfo tells depad downstream
+            // to strip the segment.
+            if (!plin[i].regular_seg_p()) {
+                std::memcpy(out_pkt, in_pkt, PKT_LEN);
+                d_packets++;
+                d_log_packets++;
+                continue;
+            }
+
+            int n = decode_block(in_pkt, out_pkt, rel_pkt);
             d_packets++;
             d_log_packets++;
+
+            // Day 6: ALSO set plinfo.transport_error so downstream
+            // (depad/derand) sees the same authoritative TEI flag stock RS
+            // uses. Don't overwrite byte 1 of TS — sync is at byte 0 already.
+            plout[i].set_transport_error(n == -1);
+
+            if (n < 0) {
+                // Set TEI flag (bit 7 of byte 1) so teiscrub can NULL-out
+                // the packet downstream.
+                out_pkt[1] |= 0x80;
+                d_bad_packets++;
+                d_log_bad++;
+            } else if (n > 0) {
+                d_errors_corrected += n;
+            }
             continue;
         }
 
-        int n = decode_block(in_pkt, out_pkt, rel_pkt);
-        d_packets++;
-        d_log_packets++;
+        // ═══ TURBO 2B PATH: pass-1 decode into the pending ring, emit
+        // with a d_turbo_lag delay so a failed codeword can see the RS
+        // outcome of every codeword sharing its interleaver span. ═══
+        const uint64_t abs_i = abs0 + (uint64_t)i;
 
-        // Day 6: ALSO set plinfo.transport_error so downstream
-        // (depad/derand) sees the same authoritative TEI flag stock RS
-        // uses. Don't overwrite byte 1 of TS — sync is at byte 0 already.
-        plout[i].set_transport_error(n == -1);
+        // capture the soft-symbol segment
+        {
+            const int slot = (int)(abs_i & (TSOFT_RING - 1));
+            std::memcpy(&d_soft_ring[(size_t)slot * SEG_FLOATS],
+                        soft + (size_t)i * SEG_FLOATS,
+                        SEG_FLOATS * sizeof(float));
+            d_soft_abs[slot] = abs_i;
+        }
 
-        if (n < 0) {
-            // Set TEI flag (bit 7 of byte 1) so teiscrub can NULL-out
-            // the packet downstream.
-            out_pkt[1] |= 0x80;
-            d_bad_packets++;
-            d_log_bad++;
-        } else if (n > 0) {
-            d_errors_corrected += n;
+        d_pending.emplace_back();
+        turbo_pending& P = d_pending.back();
+        P.abs = abs_i;
+        P.pl = plin[i];
+        P.regular = plin[i].regular_seg_p();
+        P.has_rel = rel_pkt != nullptr;
+        std::memcpy(P.in207, in_pkt, CODE_LEN);
+        if (rel_pkt)
+            std::memcpy(P.rel207, rel_pkt, CODE_LEN);
+        else
+            std::memset(P.rel207, 0, CODE_LEN);
+
+        turbo_known& K = d_known[abs_i & (TKNOWN_RING - 1)];
+        K.abs = abs_i;
+        K.ok = 0;
+
+        if (!P.regular) {
+            std::memcpy(P.out188, in_pkt, PKT_LEN);
+            P.rs = -2;
+            d_packets++;
+            d_log_packets++;
+        } else {
+            unsigned char corr1[CODE_LEN];
+            P.rs = decode_block(in_pkt, P.out188, rel_pkt, corr1);
+            d_packets++;
+            d_log_packets++;
+            P.pl.set_transport_error(P.rs == -1);
+            if (P.rs < 0) {
+                P.out188[1] |= 0x80;
+                d_bad_packets++;
+                d_log_bad++;
+            } else {
+                if (P.rs > 0)
+                    d_errors_corrected += P.rs;
+                K.ok = 1;
+                std::memcpy(K.cw, corr1, CODE_LEN);
+            }
+        }
+
+        // emit the head of the pending ring (or a warmup null packet)
+        if ((int)d_pending.size() > d_turbo_lag) {
+            turbo_pending F = d_pending.front();
+            d_pending.pop_front();
+            if (F.regular && F.rs == -1)
+                turbo_rescue(F);
+            std::memcpy(out_pkt, F.out188, PKT_LEN);
+            plout[i] = F.pl;
+        } else {
+            // stream warmup: emit a NULL TS packet with default (non-
+            // regular) plinfo — depad drops it downstream
+            std::memset(out_pkt, 0xFF, PKT_LEN);
+            out_pkt[0] = 0x47;
+            out_pkt[1] = 0x1F;
+            out_pkt[2] = 0xFF;
+            out_pkt[3] = 0x10;
+            plout[i] = gr::dtv::plinfo();
         }
     }
 
@@ -613,6 +1118,15 @@ int atsc_rs_decoder_erasure_impl::work(int noutput_items,
                      d_metric_tag_count, d_effective_max_erasures,
                      d_guard2_rejects, d_gmd_trials, d_gmd_rej,
                      d_sick_wr, d_sick_hit);
+        if (d_turbo || d_turbo_att) {
+            std::fprintf(stderr,
+                         "[rs_turbo t=%6.1fs] att=%ld retry=%ld resc=%ld "
+                         "bytes=%ld syms=%ld skip=%ld selftest=%ld/%ld\n",
+                         elapsed_ms / 1000.0,
+                         d_turbo_att, d_turbo_retry, d_turbo_resc,
+                         d_turbo_repl, d_turbo_syms, d_turbo_skip,
+                         d_turbo_selfok, d_turbo_selftot);
+        }
         d_last_log = now;
         d_log_packets  = 0;
         d_log_eras_dec = 0;

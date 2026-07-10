@@ -261,6 +261,20 @@ class ReplayTopBlock(gr.top_block):
             self._dei_rel = dei_rel
             self._rel_pl_sink = _rel_pl_sink
             LOG.info("SOVA: reliability plane wired (replay)")
+            # ── TURBO STAGE 2B (2026-07-10): trellis pinning ──
+            # Feed the rs_erasure block the post-equalizer SOFT SYMBOLS
+            # (the exact viterbi input; all chain blocks are sync blocks so
+            # the item index spaces coincide). When a codeword fails RS+GMD
+            # the block re-runs a pinned Viterbi over the affected trellis
+            # spans using bytes of DECODED codewords as branch constraints,
+            # then retries RS. Opt-in: STVT_TURBO=1 (requires SOVA plane).
+            if int(os.environ.get("STVT_TURBO", "0")):
+                self.connect((equalizer, 0), (rs, 3))
+                # rs consumes the eq buffer ~lag+64 segments behind the
+                # viterbi path reader — give the shared eq output buffer
+                # comfortable headroom
+                equalizer.set_min_output_buffer(512)
+                LOG.info("TURBO 2B: soft-symbol plane wired (replay)")
         self.connect(derand, depad)
 
         if os.environ.get("STVT_TEISCRUB", "1") == "1":

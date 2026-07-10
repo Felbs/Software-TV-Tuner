@@ -5,10 +5,13 @@
 #define INCLUDED_ATSCPLUS_ATSC_RS_DECODER_ERASURE_IMPL_H
 
 #include <gnuradio/atscplus/atsc_rs_decoder_erasure.h>
+#include <gnuradio/dtv/atsc_plinfo.h>
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <string>
+#include <vector>
 
 namespace gr {
 namespace atscplus {
@@ -130,8 +133,62 @@ private:
     // Day 6: now writes 188 bytes (matching stock dtv.atsc_rs_decoder which
     // outputs the first 188 bytes of the 207-byte codeword — sync byte at
     // offset 0 is preserved by deinterleaver, NOT manually injected).
+    // corr207 (optional): receives the full corrected 207-byte codeword on
+    // success (data + parity) — the turbo stage-2b pinning source.
     int decode_block(const unsigned char* in207, unsigned char* out188,
-                 const unsigned char* rel207 = nullptr);
+                 const unsigned char* rel207 = nullptr,
+                 unsigned char* corr207 = nullptr);
+
+    // ── TURBO STAGE 2B (2026-07-10): trellis pinning ──────────────────
+    // RS-truth back-propagation per TURBO_BLUEPRINT.md stage 2. When a
+    // codeword fails RS+GMD, the bytes RS *did* decode in codewords that
+    // share its interleaver span are mapped back to trellis coordinates
+    // and PINNED (branch-metric prior) in a second Viterbi pass over the
+    // buffered soft symbols; the re-decoded bytes get one more RS+GMD
+    // attempt. Opt-in via STVT_TURBO=1; requires optional input port 3 =
+    // post-equalizer soft symbols (float x 832, same item index space —
+    // every block in the chain is a sync block). Default OFF: the work()
+    // path is byte-identical to the pre-turbo build.
+    static constexpr int SEG_FLOATS = 832;         // symbols per segment
+    static constexpr int TSOFT_RING = 256;         // soft ring (segments, pow2)
+    static constexpr int TKNOWN_RING = 256;        // known ring (codewords, pow2)
+    struct turbo_known {
+        uint64_t abs = ~0ull;
+        uint8_t ok = 0;
+        unsigned char cw[CODE_LEN];
+    };
+    struct turbo_pending {
+        uint64_t abs;
+        gr::dtv::plinfo pl;
+        int rs;                 // decode_block result; -2 = non-regular
+        bool regular;
+        bool has_rel;
+        unsigned char in207[CODE_LEN];
+        unsigned char rel207[CODE_LEN];
+        unsigned char out188[PKT_LEN];
+    };
+    bool d_turbo = false;          // STVT_TURBO=1 master switch
+    bool d_turbo_checked = false;  // first-work port presence check done
+    int d_turbo_lag = 56;          // codewords of finalization delay (>52)
+    int d_turbo_bytes = 64;        // weakest-SOVA bytes re-decoded per failure
+    int d_turbo_ctx = 48;          // pinned-viterbi context symbols per side
+    int d_turbo_pinz2 = 1;         // resolve Z2 chains through the postcoder
+    int d_turbo_selftest = 0;      // no-pin re-decode agreement check only
+    long d_turbo_maxsym = 250000;  // per-rescue symbol budget
+    std::vector<float> d_soft_ring;      // TSOFT_RING * SEG_FLOATS
+    std::vector<uint64_t> d_soft_abs;    // slot -> abs segment index
+    std::vector<turbo_known> d_known;
+    std::deque<turbo_pending> d_pending;
+    long d_turbo_att = 0;      // failed codewords entering rescue
+    long d_turbo_retry = 0;    // rescues that changed >=1 byte (RS retried)
+    long d_turbo_resc = 0;     // rescues where the RS retry succeeded
+    long d_turbo_repl = 0;     // total bytes replaced by pinned re-decode
+    long d_turbo_syms = 0;     // total symbols re-decoded
+    long d_turbo_skip = 0;     // clusters skipped (ring miss / budget)
+    long d_turbo_selfok = 0;   // selftest: re-decoded bytes matching pass 1
+    long d_turbo_selftot = 0;
+    // attempt pinned re-decode + RS retry on finalization of a failure
+    bool turbo_rescue(turbo_pending& F);
 
 public:
     atsc_rs_decoder_erasure_impl(int max_erasures);
