@@ -285,6 +285,17 @@ void atsc_equalizer_long_impl::filterN_dd(const float* input_samples,
         filterN(input_samples, output_samples, nsamples);
         return;
     }
+    // WARM-UP HOLD v2 (2026-07-10, live-debut lesson): stay passive
+    // until the supervised trainer has run on >=3 LIVE field syncs this
+    // session. v1 keyed on d_lkg_valid, but the tap cache pre-sets that
+    // at load — DD then adapted against stale warm taps while the
+    // hardware AGC was still settling and exploded (err_rms 5e14; the
+    // quality-reset safety caught it; isolation A/B convicted the
+    // cache+DD combination, DD alone was clean).
+    if (!d_lkg_valid || d_fs_trained < 3) {
+        filterN(input_samples, output_samples, nsamples);
+        return;
+    }
 
     for (int j = 0; j < nsamples; j++) {
         const float* x = &input_samples[j];
@@ -373,6 +384,7 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
                                  float* output_samples,
                                  int nsamples)
 {
+    d_fs_trained++;   // live supervised trainings this session (DD hold)
     // 2026-05-22 23:42: expose BETA/LEAK/DIVERGENCE_BAIL via env vars
     // so the chain can sweep optimal LMS step / leakage. Defaults match
     // prior hardcoded values. Read once and cached in static locals.
