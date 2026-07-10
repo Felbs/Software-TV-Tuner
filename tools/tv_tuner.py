@@ -1056,10 +1056,19 @@ def run_scan(region: dict | None = None,
         # Non-ATSC region: fall back to RMS threshold for carrier presence.
         rms_values = [r["rms_dbfs"] for r in sweep_out
                       if r["rms_dbfs"] > -150]
-        if rms_values:
-            median = sorted(rms_values)[len(rms_values) // 2]
-        else:
-            median = -50.0
+        if not rms_values:
+            # DEAF SWEEP (2026-07-10): every channel at -inf = the SDR is
+            # streaming silence. No retry fixes this (firmware stick);
+            # tell the user the one real cure instead of quietly failing.
+            print("[scan] RADIO IS STREAMING SILENCE — every frequency "
+                  "read -inf. This is the stuck-SDR state: unplug the "
+                  "SDR's USB cable, wait 5 s, plug it back in, then scan "
+                  "again.", file=sys.stderr)
+            print("[scan] radio silent — REPLUG THE SDR (unplug USB, "
+                  "wait 5s, replug), then scan again")
+            return {"scanned_at": datetime.now().isoformat(timespec="seconds"),
+                    "channels": [], "error": "radio streaming silence — replug SDR"}
+        median = sorted(rms_values)[len(rms_values) // 2]
         rms_threshold = median + rms_threshold_db
         print(f"[scan] noise floor ≈ {median:+.1f} dBFS")
 
