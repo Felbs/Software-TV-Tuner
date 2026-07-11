@@ -26,6 +26,17 @@ LIVE = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live\live.ts")
 CHAIN_LOG = HERE / "lab" / "panel_chain.log"
 PORT = 8642
 
+# PERSISTENT-RADIO RETUNE (2026-07-10): with STVT_PERSIST_RETUNE=1 in the
+# panel's environment, cross-tower channel changes REUSE the running chain
+# — the panel writes retune.cmd, tv_live.py's watcher re-points the soapy
+# source in place (no 3.2 s kill, no 3.6 s driver reopen) and rotates
+# live.ts. Fallback-first: no ack in 3 s, no field sync in 8 s, or a
+# below-cliff quick read -> the classic kill+respawn path, byte-for-byte
+# unchanged. Default OFF.
+PERSIST = os.environ.get("STVT_PERSIST_RETUNE") == "1"
+RETUNE_CMD = LIVE.parent / "retune.cmd"
+RETUNE_ACK = LIVE.parent / "retune.ack"
+
 # per-RF (rfgain_sel, IFGR) — reseed after ANY antenna/path change
 # (AGC servos the IF gain live; rfgain_sel is the regime that matters).
 # UHF values = Philips (2026-07-03); RF7 = first-ever VHF cal
@@ -125,6 +136,8 @@ def run_scan():
         env = base_env(36)
         env["STVT_DABNOTCH"] = "0"   # scans must hear VHF-hi (RF7-13)
         env["STVT_IQ_RING"] = "0"    # no 1.1 GB E7 ring per lock-test chain
+        env["STVT_PERSIST_RETUNE"] = "0"  # scan chains: no retune watchers
+                                     # (many short-lived chains, one cmd file)
         # say WHICH antenna is being scanned — a sticky picker silently
         # produced a 12-minute discone scan the user thought was Philips
         _scan_ant = env.get("STVT_ANTENNA", "?")
@@ -806,7 +819,7 @@ def science_data():
     _SCI_CACHE.update({"t": now, "data": out})
     return out
 
-def tune(rf, prog, virtual, name):
+def tune(rf, prog, virtual, name, force_respawn=False):
     BAL["on"] = False
     FLAT["on"] = False
     # INSTANT SAME-MUX HOP (2026-07-05): stations on one tower share the
@@ -816,7 +829,7 @@ def tune(rf, prog, virtual, name):
         chain_fresh = (time.time() - CHAIN_LOG.stat().st_mtime) < 6
     except OSError:
         chain_fresh = False
-    if (rf == STATE["rf"] and not STATE["tuning"]
+    if (not force_respawn and rf == STATE["rf"] and not STATE["tuning"]
             and STATE["rf"] is not None and chain_fresh):
         with LOCK:
             GEN[0] += 1
@@ -858,6 +871,142 @@ def tune(rf, prog, virtual, name):
             set_stage(100, "")
             STATE.update({"tuning": False})
         threading.Thread(target=hop, daemon=True).start()
+        return
+    # ── PERSISTENT-RADIO RETUNE (2026-07-10, STVT_PERSIST_RETUNE=1) ──
+    # Cross-tower change with a live healthy chain: re-point the radio in
+    # place instead of kill+respawn. Every gate falls back to the classic
+    # path (force_respawn=True skips both this branch and the hop guard,
+    # because after a half-retune the chain may sit on the NEW freq while
+    # STATE still says the old one — only a full respawn is trustworthy).
+    if (PERSIST and not force_respawn and STATE["rf"] is not None
+            and rf != STATE["rf"] and not STATE["tuning"] and chain_fresh):
+        with LOCK:
+            GEN[0] += 1
+            my_gen = GEN[0]
+            METER["rf"] = None
+            STATE.update({"tuning": True})
+            set_stage(8, f"persistent retune → {virtual} (chain stays up, "
+                         "radio re-points in place)")
+
+        def persist():
+            def fallback(reason):
+                try:
+                    RETUNE_CMD.unlink()   # never leave a stale command for
+                except OSError:           # the NEXT chain to replay
+                    pass
+                if GEN[0] != my_gen:
+                    return
+                set_stage(10, f"persistent retune fell back ({reason}) — "
+                              "classic respawn")
+                tune(rf, prog, virtual, name, force_respawn=True)
+
+            kill_watch()
+            if GEN[0] != my_gen:
+                return
+            env = base_env(rf)
+            try:
+                RETUNE_ACK.unlink()
+            except OSError:
+                pass
+            try:
+                log_ofs = CHAIN_LOG.stat().st_size
+            except OSError:
+                log_ofs = 0
+            cmd = {"rf": rf, "antenna": env["STVT_ANTENNA"],
+                   "rfgain_sel": int(env["STVT_RFGAIN_SEL"]),
+                   "ifgr": int(env["STVT_IFGR"]),
+                   "dabnotch": 0 if rf < 14 else 1}
+            tmp = RETUNE_CMD.parent / (RETUNE_CMD.name + ".tmp")
+            try:
+                tmp.write_text(json.dumps(cmd), encoding="utf-8")
+                os.replace(tmp, RETUNE_CMD)      # atomic: no partial reads
+            except OSError as e:
+                fallback(f"cmd write failed: {e}")
+                return
+            # gate 1: ack within 3 s (a chain without the watcher — old
+            # spawn, dead process — never answers)
+            t0 = time.time()
+            ack = None
+            while time.time() - t0 < 3.0:
+                if GEN[0] != my_gen:
+                    return
+                try:
+                    ack = json.loads(RETUNE_ACK.read_text(encoding="utf-8"))
+                    break
+                except (OSError, ValueError):
+                    time.sleep(0.1)
+            if not ack:
+                fallback("no ack from chain")
+                return
+            if not ack.get("ok"):
+                fallback(f"chain says: {ack.get('error')}")
+                return
+            set_stage(30, f"radio re-pointed to RF{rf} in "
+                          f"{time.time()-t0:.1f}s — FPLL hunting the pilot")
+            # player rides in parallel: tv_watch's own gate waits for the
+            # rotated live.ts to grow fresh bytes (rotation law honored —
+            # the sink reopened the file at offset 0 before the ack)
+            def new_text():
+                try:
+                    with open(CHAIN_LOG, "r", errors="ignore") as f:
+                        f.seek(log_ofs)
+                        return f.read()
+                except OSError:
+                    return ""
+            watch_log = open(HERE / "lab" / "panel_watch.log", "w")
+            subprocess.Popen([PY, "-u", str(HERE / "tv_watch.py"), str(prog)],
+                             env=env, stdout=watch_log,
+                             stderr=subprocess.STDOUT)
+            # gate 2: field sync (fs_err_rms telemetry) within 8 s
+            t1 = time.time()
+            synced = False
+            while time.time() - t1 < 8.0:
+                if GEN[0] != my_gen:
+                    return
+                if RE_FS.search(new_text()):
+                    synced = True
+                    break
+                time.sleep(0.4)
+            if not synced:
+                kill_watch()
+                fallback("no field sync within 8 s")
+                return
+            with LOCK:
+                if GEN[0] != my_gen:
+                    return
+                STATE.update({"rf": rf, "prog": prog, "virtual": virtual,
+                              "name": name,
+                              "env": {k.replace("STVT_", ""): v
+                                      for k, v in env.items()
+                                      if k.startswith("STVT_")}})
+            set_stage(55, f"field sync on RF{rf} — equalizer retraining, "
+                          f"extracting program {prog}")
+            # gate 3: quick margin read (~3 s of fresh telemetry). A
+            # true-cliff result goes to the classic path, which owns the
+            # full recovery recipe (erasure FEC + DFE + reseed respawn).
+            time.sleep(3)
+            errs = [float(m.group(1))
+                    for m in RE_FS.finditer(new_text())][-40:]
+            mers = [20 * math.log10(5.0 / e) for e in errs if e > 0]
+            mer_now = sorted(mers)[len(mers) // 2] if mers else 0.0
+            if mers and mer_now < 15.0:
+                kill_watch()
+                fallback(f"MER {mer_now:.1f} below cliff — full recipe")
+                return
+            t2 = time.time()
+            while time.time() - t2 < 120:
+                if GEN[0] != my_gen:
+                    return
+                r = subprocess.run(["tasklist", "/FI",
+                                    "IMAGENAME eq mpv.exe"],
+                                   capture_output=True, text=True)
+                if "mpv.exe" in (r.stdout or ""):
+                    break
+                time.sleep(1)
+            set_stage(100, "")
+            STATE.update({"tuning": False})
+
+        threading.Thread(target=persist, daemon=True).start()
         return
     with LOCK:
         GEN[0] += 1
