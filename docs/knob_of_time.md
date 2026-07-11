@@ -5,6 +5,15 @@ math and logic behind the tuner's learned model of **when** each
 channel is good, on which antenna, for whatever sky it happens to be
 under.*
 
+> **Not to be confused with tune speed.** Fast tuning (the ~10 s
+> channel changes) answers *"how quickly can I get this channel on
+> screen?"* The Knob of Time answers a different question: *"will
+> this channel be watchable at all right now — and if not, when?"*
+> No tuning speed rescues a channel whose signal sinks below the
+> decode cliff every night; the Knob is what knows the sinking is on
+> a schedule. The two cooperate: channels the Knob knows are healthy
+> skip ~9 s of cautious re-measuring during a tune.
+
 ---
 
 ## 1. Why time is a tuning parameter
@@ -152,15 +161,11 @@ while the viewer sleeps.
 ## 7. Failure modes designed against
 
 - **Cold start:** day one honestly shows "no history yet — watch or
-  scan and I'll learn." Curves appear within days. Nothing is seeded.
-- **Stale cache / moved antenna:** recency decay retires the old
+  scan and I'll learn." Nothing is seeded; curves appear within days.
+- **Moved antenna / changed rig:** recency decay retires the old
   world in weeks; a deliberate re-scan accelerates it.
-- **Label drift:** if the user renames antennas, old and new labels
-  coexist as separate populations until decay retires the old one
-  (cosmetic wart, self-healing, documented).
-- **Clock questions:** bins are local-time; date-unknown legacy rows
-  are ingested with hour-only confidence and can never reach *solid*
-  without real dates.
+- **Renamed antennas:** old and new labels coexist until decay
+  retires the old one (cosmetic, self-healing).
 
 ## 8. Code map
 
