@@ -1,0 +1,52 @@
+- [Project topology: Software-TV-Tuner repo lives at Z:\src\magic-tv-decoder, not Z:\SDR_Agent_v2](project_topology.md) — cwd is the stale snapshot, real repo is elsewhere
+- [Ubuntu rig + cross-machine workflow](ubuntu_rig_workflow.md) — separate Linux box runs the live ATSC pipeline; Ubuntu tracks `main-linux` since the 7/01 main swap; Windows and Ubuntu must not push over each other
+- [Pi rig: radiopi @ 192.168.4.27, live SoapyRemote + all-on-Pi DVR, branch `pi-port-stvt`](pi_rig.md) — pushes via Windows relay; own 78-file memory wing; PowerShell stdin mangles UTF-8 to Pi, use scp
+- [Windows-as-relay trick for pushing Ubuntu commits to GitHub](windows_relay_trick.md) — fetch over SSH, push FETCH_HEAD; Ubuntu IP drifts, scan if SSH times out; same recipe for the Pi
+- [HANDOFF.md is the source-of-truth setup doc for cross-machine STVT moves](handoff_doc_convention.md) — read first on a new box; never copy the built .so, rebuild
+- [User: Felbs, mixed Windows + Ubuntu radio rig](user_role.md) — ham/SDR hobbyist building an autonomous TV tuner
+- [DVR architecture: scan → EPG → multirec → daemon → controller](dvr_architecture.md) — small CLIs glued by file state
+- [DVR headline UI: `python tools/stvt_schedule.py tv`](dvr_main_entry.md) — interactive controller, mux-grouped EPG
+- [Scanner needs play-path STVT_* env vars or it locks 4/10 channels](scanner_chain_env_gotcha.md) — never route through tv_live_softvit.py
+- [SDR is single-tenant: 1 mux at a time; daemon must SKIP not stack same-mux records](sdr_single_tuner_rule.md)
+- [User likes autonomous delegation with verification/revert safeguards](user_pref_autonomous_agents.md) — agents may touch hard code if they prove edits safe
+- [Execute commands directly — don't post snippets for the user to run](user_pref_just_execute.md) — "just do it all for me"
+- [Branch layout after 7/07 GREAT CLEANUP: main (= main-universal front page), main-universal (Win dev, push here), main-linux, pi-port-stvt](branch_layout.md) — main fast-forwards need user's say-so; **FABLE 5 UNTIL JULY 12**
+- [Pi-5 → x86 backport flow: Pi is the experimental forge, v3 absorbs validated features](pi5_to_x86_backport.md) — STVT_FPLL_FOLD defaults ON for x86
+- [Never push to Linux port branches without per-branch live test first](no_push_linux_without_test.md)
+- [WSL handoff briefing — what's waiting to be ported](wsl_handoff_briefing.md)
+- [VLC --programs filter unreliable on growing TS; use ffmpeg demux + VLC stdin](vlc_program_filter_unreliable.md)
+- [Silence SoapySDR's driver-load error cascade with setLogLevel(FATAL)](soapysdr_noise_suppression.md)
+- [Multirec needs 20 MB pre-buffered live.ts + bumped analyzeduration for N-program demux](multirec_analyze_buffer.md)
+- [Linux chain stability recipe — fused-filter gain, drought handling, CPU isolation, live.ts rotation](linux_chain_stability_recipe.md) — FUSED gain 1.9 doesn't transfer (Windows needs ~8-10)
+- [gr-atscplus `_rebuild.bat` builds but does NOT install — cmake --install / DLL copy required or Python imports stale module](gr_atscplus_build_install_gotcha.md)
+- [x86 CPU-savings is HARDWARE-SPECIFIC — FOLD wins everywhere, BLOCK_NCO wins Ubuntu but regresses Windows +35%](x86_cpu_savings_ceiling.md) — always A/B before pushing
+- [FPLL_FOLD on Threadripper: −42% CPU, bit-identical TS](fpll_fold_windows_threadripper.md) — opt-in env; A/B harness in tools/data/ab_test/
+- [Before sweeping DSP knobs on "video gone", fingerprint live.ts for noise](noise_fingerprint_check.md) — pure noise = SDR firmware stuck
+- [SDR firmware sticks after repeated restarts — physical USB replug is the only reset](sdr_firmware_replug.md)
+- [Don't hammer the chain with frequent diagnostics — steals matched-filter cycles](dont_hammer_chain_cpu.md)
+- [Real decode quality = ffmpeg null-sink fps, not chain-internal counters](real_quality_metric_ffmpeg_fps.md)
+- [Any respawn loop needs max-retries + success condition — unbounded mpv loop killed Ubuntu's GPU](mpv_recovery_loop_safety.md)
+- [Wait-loops/pgrep/psutil substring searches match their own argv — self-match trap](pgrep_self_match_trap.md) — use sentinel/exact match/wait $PID; bit again 7/11 via heredoc text
+- [stvt_play_hd's ffmpeg probe LIES on multi-program TS — tsanalyze a file copy instead](stvt_play_hd_ffmpeg_probe_lies.md)
+- [TV scan 0 carriers? Sweep FM as a chain control first](fm_sweep_as_chain_control.md) — proves SDR+antenna+port+chain alive
+- [Discone+port-C decodes ATSC at VHF-hi (RF7-13); UHF fails](discone_vhf_hi_atsc_works.md) — see also the 7/11 discone conquest in [[speed-and-oracle-71011]]
+- [ANT-B WSL task: passive Total Vision antenna](antb_wsl_task.md) — SNR-limited; read first on the ANT-B job
+- [adaptive-tv project: universal ATSC decoder at Z:\src\adaptive-tv](adaptive_tv_project.md) — adaptive gain calibration; validates real decode via MPEG seq-headers, not file growth
+- [LNA lessons: RTL-SDR Blog LNA is bias-T-ONLY (RSPdx bias-T = Antenna B only); amp-only beats amp+LNA and LNA-only; never stack the wideband LNA behind an amplified antenna](lna_passive_antenna_result.md) — spectrum-scout side-project lives at Z:\src\spectrum-scout, keep distinct
+- [SDR USB cables fail TWO ways: starvation (caps 2 MS/s) and leakage (passes volume probe, gaps under load)](sdr_usb_throughput_starvation.md) — first session after replug is a dud; law = short direct USB 3.0, extend antenna side with coax
+- [Directional shed antenna decodes RF31 amp-ONLY (every LNA combo loses)](directional_antenna_atsc.md) — indoor multipath is the limit; real fix = outside/higher
+- [MER DIAL + universal tuning — THE method, campaign log entries 1-20](mer_dial_universal_algorithm.md) — fs_err_rms IS live MER (=20·log10(5/err), cliff 15.2); LAWS: recalibrate forever / liveness denominator / replay overfits / failure classes by MER shape / amps are a loan / no region-specific notches in universal paths; entries 16-20 = 7/04-05 detail
+- [tv_tuna_panel.py = web GUI localhost:8642 — grid/REC/NERD/SIGNAL FINDER/FLATNESS/ALL-TOWERS/SCAN/flight recorder/echo X-ray](mer_dial_universal_algorithm.md) — panel benched during direct-chain trials; always unlink live.ts before following a fresh chain
+- [VHF SOLVED 7/04: DABNOTCH=0 for rf<14 everywhere; first VHF video 7.1 WJLA](mer_dial_universal_algorithm.md) — entry 17; GAINS[7]=(5,32)
+- [Antenna ledger: attic-classic + Philips (100/100 bare), directional (amp-only), rabbit ANT111E, discone](mer_dial_universal_algorithm.md) — best-channel-is-a-function-of-time PROVEN; never scan during fireworks
+- [STRIKES 7/05: H1 freeze+Huber killed; flywheel v2 safe-but-inert; 98%-unexplained gap map → later closed 7/10](mer_dial_universal_algorithm.md) — NEXT_LEVERS_20260705.md = ranked plan
+- [gr-radiotuna: SEPARATE project @ Z:\src\gr-radiotuna — HD Radio via nrsc5, LRPT, GOES, AIS/UAT roadmap](radiotuna_project.md)
+- [Overnight cube 7/06: RF9 first headers ever (dawn window); TIME = official knob; PowerShell-kill law (bash eats $_ → stacked panels)](overnight_cube_campaign.md)
+- [Fable finale 7/07: GMD/Forney ladder shipped; TURBO_BLUEPRINT; tv_replay deterministic rail + STVT_IQ_SKIP; e7_vote; DLL rename hot-swap](fable_finale_builds.md) — replay A/B beats live gauntlets for decoder questions
+- [DATAMOSH SAGA 7/10: melting video was OUR +discardcorrupt flag (I-frame killer), not RF](datamosh_presentation_layer.md) — LAW: pixels are a measurement layer TS metrics can't see; user's eyes beat instruments
+- [7/10 glitch saga SOLVED: live DD tracking = the splice source (missed realtime deadline → OsO overflows); DD evicted, offline-only; post-fix 0.054% GLASS](drizzle_wave_interferer.md) — **LAW: replay can NEVER validate a live promotion — overflow-gate (OsO==0) every live A/B**; knob audit 7 conflicts/9 fossils (DVR path = different decoder, fix pending); Knob of Time named + shipped (quality_history.csv, learned hour-curves); antenna territories proven; label wrinkle rabbit/philips vs A/B
+- [Day quality sweep 7/09: watchability cliff sharp ~16-17 MER; RF9 improves toward evening](day_quality_baseline.md)
+- [TURBO 2B SHIPPED 7/10 + STAMPEDE GATE: >4% failure → stand down (RF15 death spiral 768k attempts→52% loss on a channel that gates to GLASS)](turbo2b_shipped.md) — LAW: every per-failure rescue path needs a failure-RATE gate; conversion % = disease fingerprint (69% impulse / 23% fader / 0% drizzle)
+- [Deferred-work ledger (Fable rationing era)](pending_fable5_work.md) — remaining: Healed Viewing latency, SigMF
+- [7/10 night → 7/11: THE SPEED-AND-ORACLE SPRINT — memory-tune (warm 7.5s hops), persistent retune (10s cross-tower MET, STVT_PERSIST_RETUNE), Deep Tune doctor + recipes (RF15 mystery = auto-picker), antenna fingerprint (VHF/UHF regime transfers; hour-curves don't; tower≈frequency confound — rotate-antenna test decides), scan planner WIRED (antenna stamp, market-wide pid_cache seeding, order-only), frontier patrol, discone CONQUERED 9/9 overnight, Knob-of-Time v3 growing bars + MARKET BRAIN audited-oracle card, CH± surf keys, RF9 investigation (panel pollers 48MB reads = ambient OsO SOLVED; cliff threshold 16.5→16.0; turbo exonerated on this hw; 9.1/68.1 same mux)](speed_and_oracle_71011.md) — full detail + SHUTDOWN CHECKPOINT #2 7/11 15:00 (PC back upstairs; MISSION: enroll ALL antennas with H(f) prints — see the empty-port ghost trap + restart checklist inside; H(f) PRINT lifecycle fully proven incl. A→B→A round trip @92%, HF-YSHDI = shed directional; then Linux/WSL→Ubuntu→Pi roadmap) + NEXT QUEUE (feature governor, arsenal bisect, knob-audit fixes, label unification); TOTAL VISION RESURRECTED (14.1 @ 0.02% from attic coax), Old Faithful = UHF champ/VHF-deaf, docs current through 6ef8f28
+- PENDING: rf31_cliff_lab (zero data), tune_antenna phantom fix, live EIT harvest, μV calibration, MiniMod/HackRF channel-lab (user shopping); repo: Software-TV-Tuner main = main-universal (tag tv-tuna)
