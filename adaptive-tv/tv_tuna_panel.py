@@ -139,6 +139,21 @@ def run_scan():
         env["STVT_IQ_RING"] = "0"    # no 1.1 GB E7 ring per lock-test chain
         env["STVT_PERSIST_RETUNE"] = "0"  # scan chains: no retune watchers
                                      # (many short-lived chains, one cmd file)
+        # seed the player's PID cache market-wide during the scan
+        env["STVT_PID_CACHE"] = str(HERE / "lab" / "pid_cache.json")
+        # planner ordering (ordering ONLY): rank known RFs by learned
+        # productivity for THIS antenna+hour so the guide fills with
+        # the good channels first. Failure here must never block a scan.
+        try:
+            import scan_planner as _sp
+            _rows = _sp.load_history()
+            _verd = _sp.harvest_scan_verdicts()
+            _cands = sorted({r["rf"] for r in _rows})
+            _plan = _sp.plan(_cands, env.get("STVT_ANTENNA", "?"),
+                             _rows, _verd)
+            env["STVT_SCAN_ORDER"] = ",".join(str(e["rf"]) for e in _plan)
+        except Exception:
+            pass
         # say WHICH antenna is being scanned — a sticky picker silently
         # produced a 12-minute discone scan the user thought was Philips
         _scan_ant = env.get("STVT_ANTENNA", "?")
