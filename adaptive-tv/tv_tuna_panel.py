@@ -843,6 +843,51 @@ def science_data():
                     for h in range(24)) / 24)}
         except (OSError, ValueError, KeyError):
             pass
+    # MARKET BRAIN: how much of the whole market the rig has mapped +
+    # audited prediction accuracy (the oracle scorecard)
+    try:
+        rows = _tk_rows()
+        rfs = sorted({r["rf"] for r in rows})
+        if rfs:
+            tot = 0.0
+            for _rf in rfs:
+                _c = tkn.curve(_rf, rows)
+                tot += sum({"solid": 1.0, "thin": 0.5, "trace": 0.25,
+                            "borrowed": 0.15}.get(
+                    _c.get(h, {}).get("conf") or "", 0.0)
+                    for h in range(24)) / 24
+            pidn = 0
+            try:
+                pidn = len(json.loads((HERE / "lab" / "pid_cache.json")
+                                      .read_text(encoding="utf-8")))
+            except (OSError, ValueError):
+                pass
+            recn = 0
+            try:
+                recn = len(json.loads((HERE / "lab" / "channel_recipes.json")
+                                      .read_text(encoding="utf-8")))
+            except (OSError, ValueError):
+                pass
+            mae = None
+            npairs = 0
+            try:
+                lines = (HERE / "lab" / "oracle_score.csv").read_text(
+                    encoding="utf-8").strip().splitlines()[1:][-100:]
+                errs = []
+                for ln in lines:
+                    p = ln.split(",")
+                    errs.append(abs(float(p[2]) - float(p[3])))
+                if errs:
+                    npairs = len(errs)
+                    errs.sort()
+                    mae = round(sum(errs) / len(errs), 2)
+            except (OSError, ValueError, IndexError):
+                pass
+            out["brain"] = {"know_pct": round(100 * tot / len(rfs)),
+                            "channels": len(rfs), "pids": pidn,
+                            "recipes": recn, "mae": mae, "n_audit": npairs}
+    except (OSError, ValueError):
+        pass
     # turbo + realtime-health telemetry for the science cards
     try:
         text = CHAIN_LOG.read_text(errors="ignore")[-60000:]
@@ -1525,6 +1570,25 @@ def live_math():
             and time.time() - _TK_LAST_REC[0] > 60):
         _TK_LAST_REC[0] = time.time()
         try:
+            # oracle audit: BEFORE appending, compare the model's
+            # confident prediction for this (rf, hour) against what the
+            # air just measured — a rolling honesty score for the Knob
+            if out.get("mer_db") is not None:
+                try:
+                    _c = tkn.curve(STATE["rf"], _tk_rows())
+                    _b = _c.get(time.localtime().tm_hour, {})
+                    if _b.get("conf") in ("solid", "thin") \
+                            and _b.get("mer") is not None:
+                        _op = HERE / "lab" / "oracle_score.csv"
+                        _new = not _op.exists()
+                        with open(_op, "a", encoding="utf-8") as f:
+                            if _new:
+                                f.write("ts,rf,predicted,actual\n")
+                            f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')},"
+                                    f"{STATE['rf']},{_b['mer']},"
+                                    f"{out['mer_db']}\n")
+                except (OSError, ValueError, KeyError):
+                    pass
             tkn.record({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
                         "rf": STATE["rf"],
                         "ant": STATE.get("ant_override") or "?",
@@ -1992,6 +2056,10 @@ if(SC.turbo){const tb=SC.turbo;
 const tbs=(tb.fail_ema>=4?'⚠ standing down — channel failing beyond rescue ('+tb.fail_ema+'%)':'fail rate '+tb.fail_ema+'% · '+tb.att+' attempted'+(tb.skip>0?' · '+tb.skip+' skipped (stampede gate)':''));
 sc+=card('TURBO RESCUE',tb.resc,tbs+' — packets brought back from the dead by pinned re-decode')}
 if(SC.oso!=null)sc+=card('REALTIME HEALTH',SC.oso===0?'✓ 0':'⚠ '+SC.oso,SC.oso===0?'sample overflows this session — the decoder is beating the deadline':'sample overflows — the decoder missed its realtime deadline; something is stealing CPU');
+if(SC.brain){const b=SC.brain;
+sc+=card('🧠 MARKET BRAIN',b.know_pct+'%',
+ 'of your '+b.channels+'-channel market mapped by hour · <b>'+b.pids+'</b> programs memorized for instant tuning · <b>'+b.recipes+'</b> doctor recipes'+
+ (b.mae!=null?' · <b style="color:'+(b.mae<=1.5?'#67d18a':'#e7c96a')+'">oracle audited: predictions within ±'+b.mae+' dB</b> (last '+b.n_audit+' checks)':' · oracle audit warming up — accuracy appears after a few tunes'))}
 if(SC.guard_fires!==undefined)sc+=card('MOD-12 GUARD',SC.guard_fires,'slips healed this session',SC.guard_fires>20?'warn':'good');
 if(SC.sheriff)sc+=card('FEC SHERIFF',SC.sheriff.action,'last action · '+SC.sheriff.t);
 if(SC.dawn)sc+=card('DAWN FORECAST',SC.dawn.score,SC.dawn.verdict);
