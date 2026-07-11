@@ -362,22 +362,12 @@ def observe(sig, port, store=None, ts=None, save=True, path=PROFILES):
         return {"verdict": "UNUSABLE", "needs_epoch": False,
                 "message": "sweep unusable for fingerprinting "
                            "(flat spectrum — radio wedged?)"}
-    # 0. VACANT check first (2026-07-11, user's insight): an empty
-    # socket has its own radio face — ambient leakage shaped by the
-    # disconnected front-end. Each port can enroll a "vacant print";
-    # matching it means "nothing is plugged in here", which must never
-    # be enrolled as a new antenna (the ant-0002 ghost lesson).
-    vac = (store.get("vacant") or {}).get(port)
-    if vac is not None:
-        vs, _ = similarity(vac, sig)
-        if vs >= T_VACANT:
-            return {"verdict": "VACANT", "needs_epoch": False,
-                    "score": vs,
-                    "message": "%s reads as an EMPTY SOCKET "
-                               "(%.0f%% match to its vacant print) — "
-                               "nothing appears to be plugged in"
-                               % (port, 100 * vs)}
     cur_pid = store["port_current"].get(port)
+    if cur_pid and cur_pid not in store["profiles"]:
+        # dangling reference (profile deleted out from under the port
+        # pointer) — self-heal instead of crashing (the ant-0002 lesson)
+        store["port_current"].pop(port, None)
+        cur_pid = None
     scores = {}
     details = {}
     for pid, prof in store["profiles"].items():
@@ -386,6 +376,22 @@ def observe(sig, port, store=None, ts=None, save=True, path=PROFILES):
     best_pid = max(scores, key=scores.get) if scores else None
     best = scores.get(best_pid, 0.0)
     cur = scores.get(cur_pid, 0.0) if cur_pid else 0.0
+
+    # VACANT competes, never preempts (2026-07-11 round-trip lesson: a
+    # disconnected port hears real broadcast leakage, so its vacant
+    # print can resemble a weak antenna — the empty-socket verdict is
+    # only allowed to win when it BEATS every known antenna decisively)
+    vac = (store.get("vacant") or {}).get(port)
+    if vac is not None:
+        vs, _ = similarity(vac, sig)
+        if vs >= T_VACANT and vs >= best + 0.05:
+            return {"verdict": "VACANT", "needs_epoch": False,
+                    "score": vs,
+                    "message": "%s reads as an EMPTY SOCKET "
+                               "(%.0f%% vacant-print match, best known "
+                               "antenna only %.0f%%) — nothing appears "
+                               "to be plugged in"
+                               % (port, 100 * vs, 100 * best)}
 
     def label(pid):
         prof = store["profiles"][pid]
