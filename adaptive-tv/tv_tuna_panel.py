@@ -818,6 +818,8 @@ def science_data():
                 "conf24": [c.get(h, {}).get("conf") or "unknown"
                            for h in range(24)],
                 "mer24": [c.get(h, {}).get("mer") for h in range(24)],
+                "n24": [c.get(h, {}).get("n", 0) for h in range(24)],
+                "loss24": [c.get(h, {}).get("loss") for h in range(24)],
                 "ant_scoped": ant_scoped,
                 "learn_pct": round(100 * sum(
                     {"solid": 1.0, "thin": 0.5, "trace": 0.25,
@@ -1948,23 +1950,27 @@ if(tk.conf24){
  const lp=tk.learn_pct||0;
  const stage=lp>=90?'🔒 ON LOCK':(lp>=75?'well known':(lp>=40?'getting it down':(lp>=15?'learning':'just met')));
  let known=0,watch=0;
- let bar='<div style="display:flex;gap:1px;margin:4px 0 2px">';
- for(let h=0;h<24;h++){const cf=tk.conf24[h],m=(tk.mer24||[])[h];
-  let col='#1a2436',op=1,lab=cf;
+ // cell HEIGHT grows with training data for that hour; cell COLOR
+ // turns green only when the hour reliably decodes (MER above the
+ // cliff AND measured loss low — loss is the metric that can't lie)
+ let bar='<div style="display:flex;gap:1px;margin:4px 0 2px;height:16px;align-items:flex-end">';
+ for(let h=0;h<24;h++){const cf=tk.conf24[h],m=(tk.mer24||[])[h],n=(tk.n24||[])[h]||0,lo=(tk.loss24||[])[h];
+  let col='#1a2436',lab=h+'h: unknown',px=2;
+  if(n>0||cf==='borrowed')px=Math.min(16,4+Math.round(2.2*Math.log2(1+n)));
   if(m!=null&&(cf==='solid'||cf==='thin'||cf==='trace'||cf==='borrowed')){
-   col=m>=16.5?'#67d18a':(m>=15.2?'#e7c96a':'#e77');
-   op=cf==='solid'?1:(cf==='thin'?0.65:0.35);
-   lab=h+'h: '+m.toFixed(1)+' dB ('+cf+')';
-   if(cf==='solid'||cf==='thin'){known++;if(m>=15.7)watch++;}
-  } else lab=h+'h: unknown';
-  bar+='<div title="'+lab+'" style="flex:1;height:8px;border-radius:1px;background:'+col+';opacity:'+op+(h===tk.hour_now?';outline:1px solid #dce6f2':'')+'"></div>';}
+   const good=(m>=15.7)&&(lo==null||lo<1.5), bad=(m<15.2)||(lo!=null&&lo>=5);
+   col=bad?'#e77':(good?'#67d18a':'#e7c96a');
+   lab=h+'h: '+m.toFixed(1)+' dB'+(lo!=null?', '+lo.toFixed(1)+'% loss':'')+' ('+n+' samples, '+cf+')';
+   if(cf==='solid'||cf==='thin'){known++;if(good)watch++;}
+  }
+  bar+='<div title="'+lab+'" style="flex:1;height:'+px+'px;border-radius:1px 1px 0 0;background:'+col+(h===tk.hour_now?';outline:1px solid #dce6f2':'')+'"></div>';}
  const verdict=known===0?'no verdict yet':
   (watch===0?'<b style="color:#e77">learned — and honestly unwatchable at every known hour on this antenna</b>':
    (watch===known?'<b style="color:#67d18a">watchable at every known hour</b>':
     '<b style="color:'+(watch/known>=0.5?'#67d18a':'#e7c96a')+'">watchable ~'+watch+' of '+known+' known hours</b>'));
  bar+='</div><span style="font-size:11px;color:#7f96b3">knowledge: <b>'+lp+'%</b> ('+stage+') · verdict: '+verdict+
   (tk.ant_scoped?' · this antenna\\'s own history':' · all-antenna blend (this antenna is still new here)')+
-  ' · cell color = watchability that hour (green/amber/red), brightness = certainty · outlined = now</span>';
+  ' · each bar = one hour: it GROWS as that hour trains, and only turns green once the hour reliably decodes · outlined = now</span>';
  tks+=bar;}
 sc+=card('🕰 KNOB OF TIME — learned, this hour',tkv,tks)}
 if(SC.turbo){const tb=SC.turbo;
