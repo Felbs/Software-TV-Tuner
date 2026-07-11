@@ -2265,9 +2265,13 @@ if(tk.conf24){
   let col='#1a2436',lab=h+'h: unknown',px=2;
   if(n>0||cf==='borrowed')px=Math.min(16,4+Math.round(2.2*Math.log2(1+n)));
   if(m!=null&&(cf==='solid'||cf==='thin'||cf==='trace'||cf==='borrowed')){
-   const good=(m>=15.7)&&(lo==null||lo<1.5), bad=(m<15.2)||(lo!=null&&lo>=5);
-   col=bad?'#e77':(good?'#67d18a':'#e7c96a');
-   lab=h+'h: '+m.toFixed(1)+' dB'+(lo!=null?', '+lo.toFixed(1)+'% loss':'')+' ('+n+' samples, '+cf+')';
+   // four verdict tiers (user spec 2026-07-11): green = decodes WELL,
+   // yellow = struggles, red = bad, BROWN = cannot decode at all
+   const dead=(m<14.8)||(lo!=null&&lo>=30);
+   const bad=!dead&&((m<15.7)||(lo!=null&&lo>=5));
+   const good=(m>=16.5)&&(lo==null||lo<1.5);
+   col=dead?'#7a4a22':(bad?'#e77':(good?'#67d18a':'#e7c96a'));
+   lab=h+'h: '+m.toFixed(1)+' dB'+(lo!=null?', '+lo.toFixed(1)+'% loss':'')+' ('+n+' samples, '+cf+') — '+(dead?'no decode':(bad?'bad':(good?'decodes well':'struggles')));
    if(cf==='solid'||cf==='thin'){known++;if(good)watch++;}
   }
   bar+='<div title="'+lab+'" style="flex:1;height:'+px+'px;border-radius:1px 1px 0 0;background:'+col+(h===tk.hour_now?';outline:1px solid #dce6f2':'')+'"></div>';}
@@ -2277,7 +2281,7 @@ if(tk.conf24){
     '<b style="color:'+(watch/known>=0.5?'#67d18a':'#e7c96a')+'">watchable ~'+watch+' of '+known+' known hours</b>'));
  bar+='</div><span style="font-size:11px;color:#7f96b3">knowledge: <b>'+lp+'%</b> ('+stage+') · verdict: '+verdict+
   (tk.ant_scoped?' · this antenna\\'s own history':' · all-antenna blend (this antenna is still new here)')+
-  ' · each bar = one hour: it GROWS as that hour trains, and only turns green once the hour reliably decodes · outlined = now</span>';
+  ' · each bar = one hour: it GROWS as that hour trains · green = decodes well, yellow = struggles, red = bad, brown = no decode at all, dark = untrained · outlined = now</span>';
  tks+=bar;}
 sc+=card('🕰 KNOB OF TIME — learned, this hour',tkv,tks)}
 if(SC.turbo){const tb=SC.turbo;
