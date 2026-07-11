@@ -724,11 +724,19 @@ def ffprobe_programs(timeout_sec: float = 20.0,
         }
         # Audio streams may be plural (English + Spanish SAP, etc.).
         audio_streams: list[dict] = []
+        def _pid(st):
+            # ffprobe stream "id" is the TS PID as hex ("0x31")
+            try:
+                return int(str(st.get("id")), 16)
+            except (TypeError, ValueError):
+                return None
         for s in p.get("streams", []) or []:
             ct = s.get("codec_type")
             if ct == "video":
                 info["video_codec"] = s.get("codec_name")
                 info["video_height"] = s.get("height")
+                if _pid(s) is not None:
+                    info["vpid"] = _pid(s)
                 # Frame rate: ffprobe gives "avg_frame_rate" as "num/den".
                 fps_str = s.get("avg_frame_rate", "0/1")
                 try:
@@ -747,9 +755,19 @@ def ffprobe_programs(timeout_sec: float = 20.0,
                     "codec": s.get("codec_name"),
                     "channels": s.get("channels"),
                     "lang": lang,
+                    "pid": _pid(s),
                 })
+            elif ct == "subtitle" and _pid(s) is not None:
+                info.setdefault("spids", []).append(_pid(s))
         if audio_streams:
             info["audio_streams"] = audio_streams
+            # English-first, matching the player's extraction rule
+            apids = [a["pid"] for a in audio_streams
+                     if a.get("pid") is not None and a.get("lang") == "eng"]
+            apids += [a["pid"] for a in audio_streams
+                      if a.get("pid") is not None and a.get("lang") != "eng"]
+            if apids:
+                info["apids"] = apids
         progs.append(info)
     return progs
 
@@ -892,6 +910,29 @@ def scan_one_rf(rf: int, dwell_sec: float = 12.0,
         if loss_pct() is not None:
             result["loss_pct"] = loss_pct()  # measured loss during dwell
         result["antenna"] = os.environ.get("STVT_ANTENNA", "?")
+        # seed the player's PID cache for the WHOLE market at scan time
+        # (2026-07-11): the scan already discovers every program's PIDs
+        # and used to throw them away — keeping them turns every
+        # first-ever visit into a warm memory-tune. The player's PSI
+        # probe + no-output watchdog self-heal any staleness.
+        qc = os.environ.get("STVT_PID_CACHE")
+        if qc and progs:
+            try:
+                cache = (json.loads(Path(qc).read_text(encoding="utf-8"))
+                         if os.path.exists(qc) else {})
+                now_iso = time.strftime("%Y-%m-%dT%H:%M:%S")
+                for pinfo in progs:
+                    pn, vp = pinfo.get("program_num"), pinfo.get("vpid")
+                    if pn and vp:
+                        cache[f"{rf}:{pn}"] = {
+                            "vpid": vp,
+                            "apids": pinfo.get("apids", []),
+                            "spids": pinfo.get("spids", []),
+                            "ts": now_iso, "src": "scan"}
+                Path(qc).write_text(json.dumps(cache, indent=1),
+                                    encoding="utf-8")
+            except (OSError, ValueError):
+                pass
         # feed the learned hour-curves (time-knob v2): every scan is a
         # timestamped quality sample. Env-gated; schema matches
         # time_knob.FIELDS (ts,rf,ant,mer,loss_pct,source,date_known).
@@ -1209,6 +1250,22 @@ def run_scan(region: dict | None = None,
                 print(f"[scan]   (also {len(atsc3_carriers)} ATSC 3.0 / "
                       f"NextGen TV carrier(s) detected — skipping phase 2; "
                       f"need a 3.0 decoder to watch those)")
+            # planner ordering (opt-in, ordering ONLY — no dwell changes):
+            # STVT_SCAN_ORDER="36,34,..." is a preference list computed
+            # from the learned quality history; stable sort keeps the
+            # original relative order for RFs the planner doesn't know.
+            _order = os.environ.get("STVT_SCAN_ORDER", "")
+            if _order:
+                try:
+                    _rank = {int(x): i for i, x in
+                             enumerate(_order.replace(" ", "").split(","))
+                             if x}
+                    hot_atsc = sorted(
+                        hot_atsc, key=lambda t: _rank.get(t[0], 10**6))
+                    print("[scan] phase-2 order from learned history: "
+                          + ", ".join(f"RF{rf_}" for rf_, _ in hot_atsc))
+                except ValueError:
+                    pass
             for rf, rec in hot_atsc:
                 print(f"  RF {rf:>2} ({rec['freq_mhz']:5.1f} MHz, "
                       f"SNR {rec['pilot_snr_db']:+4.0f} / sharp "
@@ -1263,6 +1320,10 @@ def run_scan(region: dict | None = None,
 
         scan = {
             "scanned_at": datetime.now().isoformat(timespec="seconds"),
+            # which antenna this sweep measured — prerequisite for all
+            # verdict learning (a dead verdict without its antenna is
+            # unattributable)
+            "antenna": os.environ.get("STVT_ANTENNA", "?"),
             "region": region["key"],
             "region_name": region["name"],
             "standard": region["standard"],
