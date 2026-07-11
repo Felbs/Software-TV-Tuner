@@ -453,9 +453,8 @@ def observe(sig, port, store=None, ts=None, save=True, path=PROFILES,
               "name": prof["name"], "score": best,
               "detail": details[best_pid], "moved_from": moved_from,
               "needs_epoch": True,
-              "message": "this looks like the antenna you called '%s' "
-                         "(%.0f%% match), last seen on %s — its learned "
-                         "history can follow it to %s"
+              "message": "SWAP DETECTED: '%s' (%.0f%% match) moved "
+                         "%s → %s — its learned history follows it"
                          % (label(best_pid), best * 100,
                             moved_from or "?", port)}
     # 3. gray zone vs the resident -> CHANGED: ask, never silently fork
