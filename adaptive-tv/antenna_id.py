@@ -58,7 +58,15 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 PROFILES = HERE / "lab" / "antenna_profiles.json"
-TOOLS = Path(r"Z:\src\magic-tv-decoder\tools")
+# tools/ dir (sdr_sweep.py lives there). Platform layer: env override first,
+# then the in-repo sibling (Linux clone / any checkout), then the Windows
+# rig's absolute path (Z:\src\adaptive-tv is deployed beside the repo there).
+_tools_candidates = [
+    Path(p) for p in ([os.environ["STVT_TOOLS_DIR"]]
+                      if os.environ.get("STVT_TOOLS_DIR") else [])
+] + [HERE.parent / "tools", Path(r"Z:\src\magic-tv-decoder\tools")]
+TOOLS = next((p for p in _tools_candidates if (p / "sdr_sweep.py").exists()),
+             _tools_candidates[-1])
 SCAN_JSON = Path(os.path.expanduser("~")) / ".tv_tuner" / "scan.json"
 
 # similarity thresholds (calibrated 2026-07-11 on real saved sweeps:
