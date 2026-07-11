@@ -15,37 +15,63 @@ options, and tells you honestly — in dB — whether an antenna can
 decode at your location and what's limiting it if not. See
 [The science](#the-science) for how.
 
-Latest additions:
+Latest additions (each earned its place through a live A/B):
 
-- **Turbo decoding (stage 2b, "trellis pinning")** — when a packet
-  fails Reed-Solomon, the decoder goes *back* to the raw symbols and
-  re-runs the Viterbi pass over just that stretch with the
-  successfully-decoded neighboring bytes pinned as constraints, then
-  retries RS. On marginal signals it converts 50–70% of failed packets
-  at ~1–4% CPU, with a full miscorrection guard battery (measured: 0
-  false fixes). On by default in the panel (`STVT_TURBO=1`, needs the
-  SOVA reliability plane `STVT_SOVA=1`).
-- **The Knob of Time** — a learned model of the one knob you can't
-  turn, only consult. Broadcast reception provably changes with the
-  hour (the classic *diurnal variation* of radio propagation:
-  temperature inversions, tropospheric ducting, foliage, and
-  human-schedule interference; we measured per-channel swings of
-  3–7 dB with stable daily shape). The panel records a quality sample every minute you
-  watch and every time you scan, and learns each channel's 24-hour
-  curve for *your* rig — with recency decay and honest confidence
-  tiers ("unknown" beats a guess). It tells you "usually better around
-  21h" only when the data backs it. Training is automatic — watching
-  TV *is* the training — and `adaptive-tv\time_trainer.py` adds
-  optional overnight sweep-training: one full-channel scan per hour
-  while the tuner is idle fills every channel's night bins in a
-  couple of nights (it stands down automatically if you tune in).
-  The Knob of Time has its own deep-dive page — the full estimator
-  math, the confidence logic, and why a CSV is the whole database:
-  [`docs/knob_of_time.md`](docs/knob_of_time.md).
-- **Honest quality labels** — the guide and status bar are driven by
-  *measured packet loss*, not signal-strength proxies: fast-fading
-  channels alias any MER average and can read "flawless" while losing
-  10%/min. Loss can't lie.
+- **Turbo decoding (stage 2b, "trellis pinning")** — on an RS codeword
+  failure the decoder returns to the post-equalizer soft symbols and
+  re-runs a full-traceback Viterbi over the affected trellis spans
+  with bytes of *successfully decoded* codewords pinned as branch
+  constraints, then retries RS+GMD. Converts 50-70% of failed packets
+  on marginal signals at ~1-4% CPU, zero measured miscorrections. A
+  failure-rate EMA gate stands it down above ~4% channel failure (an
+  expensive per-failure rescue path MUST be rate-gated or it
+  self-amplifies exactly when the channel is worst — we measured the
+  death spiral before adding the gate). `STVT_TURBO=1`, requires the
+  SOVA reliability plane (`STVT_SOVA=1`).
+- **~10-second channel changes** — three cooperating layers: the SDR
+  session persists across retunes (runtime `set_frequency` /
+  `set_antenna` on the Soapy source instead of teardown + vendor
+  re-handshake; command-file protocol with ack and fallback gates);
+  the player tunes from a per-program **PID cache** seeded by every
+  scan (a first visit to any channel starts warm); and channels the
+  quality model knows are healthy skip the cautious decode-margin
+  re-measure. Measured: same-mux hop ~3 s, cross-mux ~9.5 s to
+  flowing video; every fallback lands on the classic path.
+- **The Knob of Time** — a learned model of diurnal variation:
+  per-channel, per-antenna 24-hour quality curves built from the
+  decoder's own telemetry (one row per watched minute plus one per
+  scan dwell), recency-weighted-median estimator with confidence
+  tiers. Full math: [`docs/knob_of_time.md`](docs/knob_of_time.md).
+  Optional overnight sweep-trainer, plus a "frontier patrol" that
+  re-tries any (channel, antenna) pair whose estimate sits within
+  ~2 dB of the decode cliff — which is how two written-off antennas
+  got un-written-off (see field results below).
+- **Deep Tune, the channel doctor (panel button)** — for any channel,
+  watchable or not: baseline, antenna race, bounded gain grid (regime
+  and IFGR seed only — the hardware AGC servo owns level tracking),
+  failure-class diagnosis, plain-language verdict. Winning recipes
+  persist per channel and every future tune consults them.
+- **Audited self-knowledge** — the Market Brain card shows how much of
+  the local market is mapped and, critically, *audited* forecast
+  accuracy: each watched minute on a confidently-modeled channel logs
+  a (predicted, measured) MER pair; the card reports the rolling mean
+  absolute error. The model's accuracy is a measurement, not a claim.
+- **Honest quality labels** — guide badges and the status chip are
+  driven by *measured packet loss*, not signal-strength proxies: fast
+  faders alias any MER median (sub-second fades against the ~41 Hz
+  field-sync sampling) and can read "flawless" while losing 10%/min.
+- **Antenna lifecycle controls** — NEW ANTENNA restarts a port's
+  learned history when you physically swap hardware (epoch marker;
+  old rows archived, never deleted); reset-all-learning is the
+  double-confirmed factory reset of every learned artifact.
+
+Field results from the reference market (same wires, better math): a
+scanner discone with a long "can't do ATSC" record decoded its VHF-hi
+mux nine-for-nine overnight once the modern stack retried it; a
+passive panel antenna with a recorded "SNR-limited, undecodable"
+verdict locked three muxes and played 0.02%-loss video on its first
+modern scan. Moral for fellow experimenters: **re-try condemned
+hardware after every decoder improvement — the cliff moves.**
 
 ---
 
@@ -149,11 +175,18 @@ python adaptive-tv\tv_tuna_panel.py
 ```
 
 **Guide tab** — a channel grid built from your last scan; click a
-station to tune, and the video opens in its own player window. An
-**antenna picker** lets you tell the tuner which antenna is connected
-(it decodes whatever you point it at — you choose the antenna, the code
-adapts). **📡 SCAN CHANNELS** re-surveys the airwaves and refreshes the
-guide; **REC** records the current channel.
+station to tune, and the video opens in its own player window.
+**CH+ / CH−** buttons (or ↑/↓ arrow keys) surf the tuneable stations
+in guide order on the fast-tune stack. An **antenna picker** lets you
+tell the tuner which port's antenna to use (your manual pick always
+outranks learned recipes); **🔌 NEW ANTENNA** tells the model you
+physically swapped the hardware on a port. **📡 SCAN CHANNELS**
+re-surveys the airwaves — scans are planner-ordered from learned
+history, refresh the guide's measured-loss badges, and seed the PID
+cache for every program in the market; **REC** records the current
+channel. **🔬 DEEP TUNE** appears beside the status line for the
+tuned channel — including failed tunes, where the doctor earns its
+keep.
 
 **NERD tab (Stats for Nerds)** — the live instrument panel, all reading
 straight off the decoder:
@@ -168,14 +201,21 @@ straight off the decoder:
   the aim that's fair to all of them at once.
 - **📡 ECHO X-RAY** — the channel's impulse response: the main path plus
   every reflection, so you can see multipath instead of guessing.
-- **🩺 SECOND OPINION (E7)** — snapshots the last ~30 s you just watched
-  from the decoder's own IQ ring and re-decodes it several ways, splicing
-  the best of each pass — a rescue pass for a glitchy moment, with no
-  interruption to live TV.
-- **🔬 TUNA SCIENCE** — plain-language cards explaining each invented
-  instrument, with your own rig's live numbers — including the TIME
-  KNOB card (this channel's learned best/worst hours) and a live
-  watchability chip fed by actual packet loss.
+- **🩺 REPLAY-HEAL (last 30 s)** — snapshots the last ~30 s you just
+  watched from the decoder's own IQ ring and re-decodes it offline
+  several ways, splicing the best of each pass. Offline means no
+  real-time deadline — the one place the heaviest math (e.g.
+  decision-directed equalizer tracking) is allowed to live, because
+  we measured that running it live costs source overflows.
+- **🔬 TUNA SCIENCE** — plain-language cards with your rig's live
+  numbers: the **🕰 Knob of Time** card (24 per-hour bars that GROW
+  with training data and turn green only when that hour reliably
+  decodes — knowledge and verdict are deliberately separate metrics),
+  **TURBO RESCUE** (live count of packets recovered by re-decode),
+  **REALTIME HEALTH** (source-overflow count; anything above zero
+  means the decoder missed its deadline and samples died), and the
+  **🧠 MARKET BRAIN** (market coverage + audited forecast accuracy,
+  with the reset-all-learning control).
 
 The panel also runs a **chain doctor**: if the vendor SDR service
 crashes mid-watch (it happens), the doctor notices the silent chain
