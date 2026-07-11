@@ -17,7 +17,7 @@ After a `.cc` source change, running `_rebuild.bat` produces a fresh `gnuradio-a
 **Verification command** — confirm Python is loading the fresh pyd, not a stale one:
 ```powershell
 $py = "$env:USERPROFILE\radioconda\python.exe"
-& $py -c "import os; p = r'C:\Users\emane\radioconda\Lib\site-packages\gnuradio\atscplus\atscplus_python.cp312-win_amd64.pyd'; print('mtime:', os.path.getmtime(p))"
+& $py -c "import os; p = r'%USERPROFILE%\radioconda\Lib\site-packages\gnuradio\atscplus\atscplus_python.cp312-win_amd64.pyd'; print('mtime:', os.path.getmtime(p))"
 ```
 Compare mtime to your edit timestamp.
 

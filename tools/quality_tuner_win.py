@@ -60,7 +60,7 @@ from pathlib import Path
 
 # -------------------------- paths ----------------------------------
 REPO = Path(__file__).resolve().parents[1]
-PY = r"C:\Users\emane\radioconda\python.exe"
+PY = sys.executable
 TV_LIVE = REPO / "tools" / "tv_live.py"
 FFMPEG = r"C:\ffmpeg\bin\ffmpeg.exe"
 FFPROBE = r"C:\ffmpeg\bin\ffprobe.exe"
