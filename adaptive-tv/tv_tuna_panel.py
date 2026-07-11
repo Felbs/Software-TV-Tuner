@@ -772,8 +772,19 @@ def science_data():
         try:
             rows = _tk_rows()
             rf_now = STATE["rf"]
-            bh = tkn.best_hours(rf_now, rows)
-            c = tkn.curve(rf_now, rows)
+            # antenna-aware card (2026-07-11, discone lesson): show the
+            # curve for the antenna IN USE when it has real data —
+            # RF7 on the discone is a different channel than RF7 on
+            # rabbit ears; blending them lies to both. Fall back to
+            # the all-antenna blend (tagged) when the antenna is new.
+            _ant_now = STATE.get("ant_override")
+            _ant_rows = [r for r in rows if r["ant"] == _ant_now]
+            ant_scoped = bool(_ant_now) and sum(
+                1 for r in _ant_rows if r["rf"] == rf_now) >= 30
+            bh = tkn.best_hours(rf_now, rows,
+                                ant=_ant_now if ant_scoped else None)
+            c = tkn.curve(rf_now, rows,
+                          ant=_ant_now if ant_scoped else None)
             known = {h: b["mer"] for h, b in c.items()
                      if b.get("mer") is not None
                      and b.get("conf") in ("solid", "thin")}
@@ -800,9 +811,14 @@ def science_data():
                 # channel has ever contributed — ticks up each minute
                 "n_samples": sum(1 for r in rows if r["rf"] == rf_now),
                 # learning progress: 24 per-hour confidence tiers +
-                # an overall 0-100 "how well do I know this channel"
+                # an overall 0-100 "how well do I know this channel".
+                # KNOWLEDGE and VERDICT are separate metrics (2026-07-11
+                # discone lesson: a channel can be fully learned to be
+                # BAD — the bar must show both, not conflate them).
                 "conf24": [c.get(h, {}).get("conf") or "unknown"
                            for h in range(24)],
+                "mer24": [c.get(h, {}).get("mer") for h in range(24)],
+                "ant_scoped": ant_scoped,
                 "learn_pct": round(100 * sum(
                     {"solid": 1.0, "thin": 0.5, "trace": 0.25,
                      "borrowed": 0.15}.get(
@@ -1565,7 +1581,7 @@ canvas{width:100%;image-rendering:pixelated;display:block;border-radius:4px}
   <div class="cards" id="knobcards"></div>
   <h3 style="margin:14px 0 4px">🔬 TUNA SCIENCE — the invented instruments, live
     <button onclick="fetch('/api/e7',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(()=>{})"
-      style="margin-left:12px;font-size:12px" title="Snapshot the last ~30s you just watched from the chain's IQ ring, decode it 3 ways, splice the best of every pass. TV keeps playing.">🩺 SECOND OPINION (E7)</button>
+      style="margin-left:12px;font-size:12px" title="Missed something in a glitchy moment? Snapshot the last ~30s from the radio's memory, re-decode it several ways offline (no realtime deadline = deeper math), splice the best of every pass into a healed clip. TV keeps playing.">🩺 REPLAY-HEAL (last 30 s)</button>
   </h3>
   <div class="cards" id="sciencecards"></div>
   <div id="scinotes" style="font-size:11px;color:#8aa;line-height:1.5;max-width:900px"></div>
@@ -1926,13 +1942,29 @@ tks+=(tk.best_hour!=null?'best ~'+tk.best_hour+'h · worst ~'+tk.worst_hour+'h (
 if(tk.hint)tks+=' · '+tk.hint;
 tks+=' · <b>'+(tk.n_samples||0)+'</b> samples and counting (+1/min while you watch) · '+(tk.now_owner||'?');
 if(tk.conf24){
- const cc={solid:'#67d18a',thin:'#e7c96a',trace:'#9a8a4a',borrowed:'#5f7591'};
+ // hue = WATCHABILITY at that hour, brightness = how sure we are.
+ // Knowledge and verdict are separate: a channel can be fully
+ // learned to be bad — that's a bar full of confident RED.
  const lp=tk.learn_pct||0;
- const stage=lp>=90?'🔒 ON LOCK — this channel is fully learned':(lp>=75?'well known':(lp>=40?'getting it down':(lp>=15?'learning this channel':'just met this channel')));
+ const stage=lp>=90?'🔒 ON LOCK':(lp>=75?'well known':(lp>=40?'getting it down':(lp>=15?'learning':'just met')));
+ let known=0,watch=0;
  let bar='<div style="display:flex;gap:1px;margin:4px 0 2px">';
- for(let h=0;h<24;h++){const cf=tk.conf24[h];
-  bar+='<div title="'+h+'h: '+cf+'" style="flex:1;height:8px;border-radius:1px;background:'+(cc[cf]||'#1a2436')+(h===tk.hour_now?';outline:1px solid #dce6f2':'')+'"></div>';}
- bar+='</div><span style="font-size:11px;color:#7f96b3">training: <b style="color:'+(lp>=75?'#67d18a':'#e7c96a')+'">'+lp+'%</b> · '+stage+' · each cell = one hour of the day (green=solid, amber=thin, dark=still unknown; the outlined cell is now)</span>';
+ for(let h=0;h<24;h++){const cf=tk.conf24[h],m=(tk.mer24||[])[h];
+  let col='#1a2436',op=1,lab=cf;
+  if(m!=null&&(cf==='solid'||cf==='thin'||cf==='trace'||cf==='borrowed')){
+   col=m>=16.5?'#67d18a':(m>=15.2?'#e7c96a':'#e77');
+   op=cf==='solid'?1:(cf==='thin'?0.65:0.35);
+   lab=h+'h: '+m.toFixed(1)+' dB ('+cf+')';
+   if(cf==='solid'||cf==='thin'){known++;if(m>=15.7)watch++;}
+  } else lab=h+'h: unknown';
+  bar+='<div title="'+lab+'" style="flex:1;height:8px;border-radius:1px;background:'+col+';opacity:'+op+(h===tk.hour_now?';outline:1px solid #dce6f2':'')+'"></div>';}
+ const verdict=known===0?'no verdict yet':
+  (watch===0?'<b style="color:#e77">learned — and honestly unwatchable at every known hour on this antenna</b>':
+   (watch===known?'<b style="color:#67d18a">watchable at every known hour</b>':
+    '<b style="color:'+(watch/known>=0.5?'#67d18a':'#e7c96a')+'">watchable ~'+watch+' of '+known+' known hours</b>'));
+ bar+='</div><span style="font-size:11px;color:#7f96b3">knowledge: <b>'+lp+'%</b> ('+stage+') · verdict: '+verdict+
+  (tk.ant_scoped?' · this antenna\\'s own history':' · all-antenna blend (this antenna is still new here)')+
+  ' · cell color = watchability that hour (green/amber/red), brightness = certainty · outlined = now</span>';
  tks+=bar;}
 sc+=card('🕰 KNOB OF TIME — learned, this hour',tkv,tks)}
 if(SC.turbo){const tb=SC.turbo;
