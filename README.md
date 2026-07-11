@@ -39,8 +39,9 @@ Latest additions:
   optional overnight sweep-training: one full-channel scan per hour
   while the tuner is idle fills every channel's night bins in a
   couple of nights (it stands down automatically if you tune in).
-  The estimator math is in
-  [`docs/science.md` §15.5](docs/science.md).
+  The Knob of Time has its own deep-dive page — the full estimator
+  math, the confidence logic, and why a CSV is the whole database:
+  [`docs/knob_of_time.md`](docs/knob_of_time.md).
 - **Honest quality labels** — the guide and status bar are driven by
   *measured packet loss*, not signal-strength proxies: fast-fading
   channels alias any MER average and can read "flawless" while losing

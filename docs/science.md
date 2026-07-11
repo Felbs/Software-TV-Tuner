@@ -943,6 +943,11 @@ by code:
 
 ## 15.5 The time dimension — teaching the tuner what hour it is
 
+> This section is the short version. The Knob of Time now has its own
+> full treatment — estimator math, confidence tiers, training
+> arithmetic, code map — in
+> [`docs/knob_of_time.md`](knob_of_time.md).
+
 Law 1 said *no stored configuration survives the sky*. This section is
 what we built once we accepted that — instead of fighting the sky's
 schedule, learn it.
