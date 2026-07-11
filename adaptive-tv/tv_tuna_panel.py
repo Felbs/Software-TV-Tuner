@@ -16,7 +16,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-TOOLS = Path(r"Z:\src\magic-tv-decoder\tools")
+IS_WIN = sys.platform == "win32"
+# tools/ dir — platform layer: env override, in-repo sibling, Windows rig path.
+_tools_candidates = [
+    Path(p) for p in ([os.environ["STVT_TOOLS_DIR"]]
+                      if os.environ.get("STVT_TOOLS_DIR") else [])
+] + [HERE.parent / "tools", Path(r"Z:\src\magic-tv-decoder\tools")]
+TOOLS = next((p for p in _tools_candidates if (p / "tv_live.py").exists()),
+             _tools_candidates[-1])
 sys.path.insert(0, str(TOOLS)); sys.path.insert(0, str(HERE))
 from stvt_epg import load_epg, SCAN_PATH
 from tv_lab import ts_metrics
@@ -25,7 +32,17 @@ import deep_tune as dtn   # DEEP TUNE channel doctor (2026-07-10 late)
 import antenna_id as aid  # antenna auto-identification (2026-07-11)
 
 PY = sys.executable
-LIVE = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live\live.ts")
+LIVE = TOOLS / "data" / "tv_live" / "live.ts"
+# FEATURE GOVERNOR seed (2026-07-11, born on the WSL port): the full
+# Windows decode arsenal (soft Viterbi + SOVA + TURBO + RFNOTCH + RRC 8)
+# misses the real-time deadline on WSL-over-SoapyRemote — measured
+# 10,728 source overflows / 1.15% loss / 1606 KB/s on an RF34 that the
+# lean chain decodes at 2400 KB/s / 0.0%. Law (this file, DD eviction):
+# never run a live feature the machine can't afford. Start every
+# non-Windows machine LEAN; force with STVT_CHAIN_PROFILE=full|lean
+# after an overflow-gated A/B proves the hardware (OsO == 0).
+LEAN_CHAIN = (os.environ.get("STVT_CHAIN_PROFILE")
+              or ("full" if IS_WIN else "lean")) == "lean"
 CHAIN_LOG = HERE / "lab" / "panel_chain.log"
 PORT = 8642
 
@@ -310,12 +327,27 @@ WF_LOCK = threading.Lock()
 SWEEP_LO, SWEEP_HI, HOP = 473e6, 605e6, 6e6   # UHF TV band, 6 MHz hops
 
 def chain_running():
-    r = subprocess.run(["powershell", "-NoProfile", "-Command",
-                        "(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" "
-                        "| Where-Object { $_.CommandLine -match 'tv_live' }).Count"],
+    if IS_WIN:
+        r = subprocess.run(["powershell", "-NoProfile", "-Command",
+                            "(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" "
+                            "| Where-Object { $_.CommandLine -match 'tv_live' }).Count"],
+                           capture_output=True, text=True, timeout=20)
+        try: return int((r.stdout or "0").strip() or 0) > 0
+        except ValueError: return False
+    # Linux: pgrep called directly (no shell wrapper) can't self-match —
+    # the pgrep-self-match trap only bites pattern-in-wrapper invocations.
+    r = subprocess.run(["pgrep", "-f", r"tv_live\.py"],
                        capture_output=True, text=True, timeout=20)
-    try: return int((r.stdout or "0").strip() or 0) > 0
-    except ValueError: return False
+    return bool(r.stdout.strip())
+
+def mpv_up():
+    """Is the mpv player process alive? (platform layer)"""
+    if IS_WIN:
+        r = subprocess.run(["tasklist", "/FI", "IMAGENAME eq mpv.exe"],
+                           capture_output=True, text=True)
+        return "mpv.exe" in (r.stdout or "")
+    r = subprocess.run(["pgrep", "-x", "mpv"], capture_output=True, text=True)
+    return bool(r.stdout.strip())
 
 def sweeper():
     import numpy as np
@@ -666,8 +698,9 @@ def base_env(rf):
                 + (f" — recipe from {age:.0f} days ago"
                    if age > dtn.STALE_DAYS else ""))
     env = os.environ.copy()
-    env["PATH"] = (r"C:\Program Files\SDRplay\API\x64;C:\ffmpeg\bin;"
-                   + env.get("PATH", ""))
+    if IS_WIN:   # SDRplay API DLL + bundled ffmpeg (Windows only; Linux uses PATH)
+        env["PATH"] = (r"C:\Program Files\SDRplay\API\x64;C:\ffmpeg\bin;"
+                       + env.get("PATH", ""))
     # user override first (the user picks the antenna; the code's job
     # is to decode whatever it's given) — recipe antenna next, then
     # belief-map auto as the fallback
@@ -736,27 +769,47 @@ def base_env(rf):
                 # time-knob v2: scans append quality samples here
                 "STVT_QUALITY_HISTORY": str(HERE / "lab"
                                             / "quality_history.csv")})
+    if LEAN_CHAIN:
+        # governor: June-proven WSL real-time set — decode essentials +
+        # cheap bookkeeping; the heavy levers wait for a proven machine.
+        # IQ_RING=0: the 35 s raw-IQ ring writes ~50 MB/s to disk — on a
+        # WSL VHD that I/O fights the 8 MS/s TCP stream (measured: 224
+        # overflows in 40 s with the ring, 0 without on direct chains).
+        env.update({"STVT_VITERBI": "hard", "STVT_RS": "stock",
+                    "STVT_SOVA": "0", "STVT_TURBO": "0",
+                    "STVT_RFNOTCH": "0", "STVT_EQ_CIR": "0",
+                    "STVT_RRC_SYMS": "4", "STVT_IQ_RING": "0"})
     return env
 
 def kill_watch():
     """Kill only the player side (tv_watch/mpv/ffmpeg) — the chain keeps
     decoding. This is what makes same-mux hops instant."""
-    subprocess.run(["powershell", "-NoProfile", "-Command",
-                    "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
-                    "Where-Object { $_.CommandLine -match 'tv_watch' } | "
-                    "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
-                    "-ErrorAction SilentlyContinue }"], capture_output=True)
-    subprocess.run(["taskkill", "/F", "/IM", "mpv.exe"], capture_output=True)
-    subprocess.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True)
+    if IS_WIN:
+        subprocess.run(["powershell", "-NoProfile", "-Command",
+                        "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+                        "Where-Object { $_.CommandLine -match 'tv_watch' } | "
+                        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
+                        "-ErrorAction SilentlyContinue }"], capture_output=True)
+        subprocess.run(["taskkill", "/F", "/IM", "mpv.exe"], capture_output=True)
+        subprocess.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True)
+        return
+    subprocess.run(["pkill", "-f", r"tv_watch\.py"], capture_output=True)
+    subprocess.run(["pkill", "-x", "mpv"], capture_output=True)
+    subprocess.run(["pkill", "-x", "ffmpeg"], capture_output=True)
 
 def kill_tv():
-    subprocess.run(["powershell", "-NoProfile", "-Command",
-                    "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
-                    "Where-Object { $_.CommandLine -match 'tv_live|tv_watch' } | "
-                    "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
-                    "-ErrorAction SilentlyContinue }"], capture_output=True)
-    subprocess.run(["taskkill", "/F", "/IM", "mpv.exe"], capture_output=True)
-    subprocess.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True)
+    if IS_WIN:
+        subprocess.run(["powershell", "-NoProfile", "-Command",
+                        "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+                        "Where-Object { $_.CommandLine -match 'tv_live|tv_watch' } | "
+                        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
+                        "-ErrorAction SilentlyContinue }"], capture_output=True)
+        subprocess.run(["taskkill", "/F", "/IM", "mpv.exe"], capture_output=True)
+        subprocess.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True)
+        return
+    subprocess.run(["pkill", "-f", r"tv_live\.py|tv_watch\.py"], capture_output=True)
+    subprocess.run(["pkill", "-x", "mpv"], capture_output=True)
+    subprocess.run(["pkill", "-x", "ffmpeg"], capture_output=True)
 
 def set_stage(pct, msg):
     STATE.update({"stage": msg, "stage_pct": pct})
@@ -1095,10 +1148,7 @@ def tune(rf, prog, virtual, name, force_respawn=False):
             while time.time() - t0 < 120:
                 if GEN[0] != my_gen:
                     return
-                r = subprocess.run(["tasklist", "/FI",
-                                    "IMAGENAME eq mpv.exe"],
-                                   capture_output=True, text=True)
-                if "mpv.exe" in (r.stdout or ""):
+                if mpv_up():
                     break
                 time.sleep(1)
             set_stage(100, "")
@@ -1230,10 +1280,7 @@ def tune(rf, prog, virtual, name, force_respawn=False):
             while time.time() - t2 < 120:
                 if GEN[0] != my_gen:
                     return
-                r = subprocess.run(["tasklist", "/FI",
-                                    "IMAGENAME eq mpv.exe"],
-                                   capture_output=True, text=True)
-                if "mpv.exe" in (r.stdout or ""):
+                if mpv_up():
                     break
                 time.sleep(1)
             set_stage(100, "")
@@ -1463,9 +1510,7 @@ def tune(rf, prog, virtual, name, force_respawn=False):
             player_up = False
             while time.time() - t0 < 150:
                 if GEN[0] != my_gen: return
-                r = subprocess.run(["tasklist", "/FI", "IMAGENAME eq mpv.exe"],
-                                   capture_output=True, text=True)
-                if "mpv.exe" in (r.stdout or ""):
+                if mpv_up():
                     player_up = True
                     break
                 time.sleep(1)

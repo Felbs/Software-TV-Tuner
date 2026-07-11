@@ -14,14 +14,23 @@ Usage: python tv_watch.py [program] [marginal] [mux]
   marginal  add show-all/no-skip decode flags (cliff-edge forced video)
   mux       legacy mode: play the whole mux file directly (all tracks)
 """
-import json, os, subprocess, sys, threading, time
+import json, os, shutil, subprocess, sys, threading, time
 from pathlib import Path
 
-MPV = r"C:\Program Files\MPV Player\mpv.exe"
-FFMPEG = r"C:\ffmpeg\bin\ffmpeg.exe"
-LIVE = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live\live.ts")
-SOLO = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live\live_solo.ts")
-IPC = r"\\.\pipe\mpv-tvtuna-super"
+IS_WIN = sys.platform == "win32"
+HERE = Path(__file__).resolve().parent
+if IS_WIN:
+    MPV = r"C:\Program Files\MPV Player\mpv.exe"
+    FFMPEG = r"C:\ffmpeg\bin\ffmpeg.exe"
+    _LIVE_DIR = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live")
+    IPC = r"\\.\pipe\mpv-tvtuna-super"
+else:   # platform layer: PATH binaries, in-repo live dir, unix IPC socket
+    MPV = shutil.which("mpv") or "mpv"
+    FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
+    _LIVE_DIR = HERE.parent / "tools" / "data" / "tv_live"
+    IPC = "/tmp/mpv-tvtuna-super"
+LIVE = _LIVE_DIR / "live.ts"
+SOLO = _LIVE_DIR / "live_solo.ts"
 MUXBPS = 19_392_658 / 8
 
 # MEMORY-TUNE (2026-07-10): PID/program-layout cache. Discovery (the 20 MB
@@ -71,22 +80,45 @@ def pmt_pids(prog, timeout=5):
     except Exception:
         return None
 
+def _ipc_scan(buf, req):
+    for line in buf.split(b"\n"):
+        if not line.strip(): continue
+        try: r = json.loads(line)
+        except ValueError: continue
+        if r.get("request_id") == req:
+            return r.get("data")
+    return None
+
 def ipc(command, req=None):
     msg = {"command": command}
     if req is not None: msg["request_id"] = req
+    data = json.dumps(msg).encode() + b"\n"
     try:
-        with open(IPC, "r+b", buffering=0) as p:
-            p.write(json.dumps(msg).encode() + b"\n")
+        if IS_WIN:   # mpv IPC = named pipe on Windows (plain file open works)
+            with open(IPC, "r+b", buffering=0) as p:
+                p.write(data)
+                if req is None: return True
+                t0 = time.time(); buf = b""
+                while time.time() - t0 < 3:
+                    buf += p.read(4096)
+                    got = _ipc_scan(buf, req)
+                    if got is not None: return got
+            return None
+        # Linux/Mac: mpv IPC = unix domain socket
+        import socket
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(3)
+            s.connect(IPC)
+            s.sendall(data)
             if req is None: return True
             t0 = time.time(); buf = b""
             while time.time() - t0 < 3:
-                buf += p.read(4096)
-                for line in buf.split(b"\n"):
-                    if not line.strip(): continue
-                    try: r = json.loads(line)
-                    except ValueError: continue
-                    if r.get("request_id") == req:
-                        return r.get("data")
+                try: chunk = s.recv(4096)
+                except OSError: break
+                if not chunk: break
+                buf += chunk
+                got = _ipc_scan(buf, req)
+                if got is not None: return got
     except OSError:
         return None
     return None
@@ -223,7 +255,13 @@ class Extractor:
             maps = ["-map", f"0:p:{self.prog}:v:0", "-an"]
         self.ff = subprocess.Popen(
             [FFMPEG, "-hide_banner", "-loglevel", "error",
-             "-fflags", "+genpts+igndts+nobuffer",   # discardcorrupt removed 7/10: the I-frame killer (anti-mosh)
+             # CC-salad forensics 2026-07-11: garbled captions
+             # ("PORTIA4093H@" letter-salad) were proven ON-AIR — ffmpeg
+             # decoded the same salad from the RAW mux (program 3, 19:00
+             # show), while the 18:50 show's captions decoded clean
+             # through this exact pipeline. These flags are innocent.
+             # discardcorrupt removed 7/10: the I-frame killer (anti-mosh)
+             "-fflags", "+genpts+igndts+nobuffer",
              "-err_detect", "ignore_err",
              "-analyzeduration", "2000000" if fast else "10000000",
              "-probesize", "3000000" if fast else "20000000",
@@ -401,8 +439,21 @@ def main():
            "--vd-lavc-o=err_detect=+crccheck+bitstream+buffer+explode,"
            "error_concealment=deblock+favor_inter",
            "--sub-create-cc-track=yes",
+           # captions OFF by default (user pref 2026-07-11) — the CC track
+           # still exists, press j in the player to toggle it on/off.
+           "--sid=no",
            f"--title=TV Tuna — program {prog}" + (" (solo)" if not muxmode else ""),
            ]
+    if not IS_WIN:
+        # WSLg/Wayland: the gpu VO black-screens under WSLg — wlshm is the
+        # June-proven reliable path (override with STVT_MPV_VO).
+        cmd += [f"--vo={os.environ.get('STVT_MPV_VO', 'wlshm')}"]
+        # 1080i broadcasts (NBC/CBS/PBS) NEED a deinterlacer: with
+        # hwdec=no + wlshm nothing deinterlaces and both fields render
+        # woven — combing on motion, "very bad quality" (2026-07-11,
+        # RF34 WRC 1080i field_order=tt). mpv's deinterlace only touches
+        # frames FLAGGED interlaced, so 720p FOX passes through untouched.
+        cmd += ["--deinterlace=yes"]
     if marginal:
         # show-all removed 7/10: it forces pre-keyframe garbage frames
         # onto the screen — the opposite of anti-mosh
