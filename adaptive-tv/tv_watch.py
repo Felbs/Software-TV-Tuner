@@ -346,6 +346,10 @@ def main():
            # (freeze beats melt). Measured: mosh frames 67.5% -> 0.7%,
            # frames shown +89%. All flags inert on clean streams.
            "--demuxer-lavf-o=err_detect=ignore_err",
+           # damaged bursts corrupt size/aspect metadata and mpv
+           # resizes the window to match ("screen randomly gets wider
+           # then narrower", 2026-07-11) — keep the window put
+           "--auto-window-resize=no",
            "--vd-lavc-o=err_detect=+crccheck+bitstream+buffer+explode,"
            "error_concealment=deblock+favor_inter",
            "--sub-create-cc-track=yes",
