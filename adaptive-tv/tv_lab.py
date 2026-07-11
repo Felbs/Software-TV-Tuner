@@ -73,14 +73,30 @@ def start_chain(rf, env):
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def ts_metrics(window_s=60):
-    """Liveness-guarded stream metrics from the tail of live.ts."""
+    """Liveness-guarded stream metrics from the tail of live.ts.
+
+    POLLING-LAW soft read (2026-07-11): the tail is pulled in 4 MB
+    slices with a breather between them instead of one big burst —
+    a monolithic ~48 MB read of the file the SDR writer is appending
+    to was measured causing source overflows (OsO) on the live chain
+    (RF9 morning investigation: OsO metronome at the pollers' cadence).
+    """
     if not LIVE.exists() or LIVE.stat().st_size < 20_000_000:
         return None
     with open(LIVE, "rb") as f:
         size = f.seek(0, 2)
         want = int(window_s * MUXBPS / 188) * 188
         f.seek(max(0, size - want))
-        tail = f.read()
+        parts, left = [], want
+        while left > 0:
+            chunk = f.read(min(4_000_000, left))
+            if not chunk:
+                break
+            parts.append(chunk)
+            left -= len(chunk)
+            if left > 0:
+                time.sleep(0.05)
+        tail = b"".join(parts)
     n = len(tail) // 188
     if n == 0: return None
     headers = tail.count(b"\x00\x00\x01\xb3")

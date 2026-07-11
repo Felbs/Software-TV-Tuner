@@ -1216,7 +1216,18 @@ def tune(rf, prog, virtual, name, force_respawn=False):
                         for mm in RE_FS.finditer(logtxt())][-40:]
                 mers = [20 * math.log10(5.0 / e) for e in errs if e > 0]
                 mer_now = sum(mers) / len(mers) if mers else 0.0
-            cliff_mode = bool(mers) and mer_now < 16.5
+            # Threshold 16.5 -> 16.0 (2026-07-11 RF9 morning A/B ladder,
+            # direct chains, panel dead, ABBA): at tune-MER 16.4-16.7 the
+            # cliff arsenal MISSES THE LIVE DEADLINE — 16 & 22 source
+            # overflows/150 s and 2 & 8 MOD12 slips vs ZERO in all four
+            # base/turbo-off arms, and 9-15% fewer delivered good packets
+            # (1.55-1.65M vs 1.74-1.85M/150 s) despite prettier post-DFE
+            # MER. Same disease that evicted DD tracking (overflow-gate
+            # law, 7/10). RF9 mornings straddled 16.5 and randomly drew
+            # the arsenal (today's 10:01 session: eff_eras=14). Below
+            # 16.0 the arsenal keeps its proven sub-cliff home turf —
+            # splices are an acceptable price where base decodes nothing.
+            cliff_mode = bool(mers) and mer_now < 16.0
             if cliff_mode:
                 set_stage(52, f"MER {mer_now:.1f} dB — engaging cliff-edge "
                               "recovery (erasure FEC + tap guard)")
@@ -1526,6 +1537,32 @@ def chain_math():
         pass
     return out
 
+# ── THE POLLING LAW, enforced at the source (2026-07-11) ───────────
+# live_math() is called from THREE pollers: the GUI status loop (8 s,
+# 1.8 s while busy), the NERD tab (3 s), and the flight recorder
+# (10 s). Each call ran ts_metrics(20) = a ~48 MB read of live.ts —
+# the very file the SDR writer is appending to. Measured result on
+# RF9 (2026-07-11 morning): source overflows (OsO) at a metronomic
+# ~9.7 s cadence, ~7/min — every overflow drops samples, every drop
+# is a splice, every splice is a visible glitch. The panel was
+# glitching its own television. One cached read per 30 s serves all
+# pollers; a lock makes it single-flight (concurrent callers get the
+# last value instead of stacking reads).
+_TSM = {"t": 0.0, "m": None}
+_TSM_LOCK = threading.Lock()
+
+def ts_metrics_cached(window_s=20, ttl=30.0):
+    if time.time() - _TSM["t"] < ttl:
+        return _TSM["m"]
+    if not _TSM_LOCK.acquire(blocking=False):
+        return _TSM["m"]          # a read is in flight — serve stale
+    try:
+        _TSM["m"] = ts_metrics(window_s)
+        _TSM["t"] = time.time()
+    finally:
+        _TSM_LOCK.release()
+    return _TSM["m"]
+
 def live_math():
     out = {}
     try:
@@ -1556,7 +1593,7 @@ def live_math():
                 out["loss_pct"] = round(100.0 * bd / pk, 2)
     except OSError:
         pass
-    m = ts_metrics(20) if STATE["rf"] is not None else None
+    m = ts_metrics_cached() if STATE["rf"] is not None else None
     if m:
         out.update({"hdrs_s": round(m["hdrs_s"], 1),
                     "gaps_min": round(m["gaps_min"], 1),
