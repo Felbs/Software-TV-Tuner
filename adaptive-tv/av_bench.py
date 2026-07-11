@@ -10,10 +10,11 @@ Modes:
   pipe  tail -> ffmpeg -> mpv stdin  (legacy; cannot seek, cannot heal)
   file  tv_watch.py                  (file-native + resync watchdog)
 """
+import sys
 import argparse, json, os, statistics, subprocess, time
 from pathlib import Path
 
-PY = r"C:\Users\user\radioconda\python.exe"
+PY = sys.executable
 HERE = Path(__file__).resolve().parent
 IPC = r"\\.\pipe\mpv-tvtuna-super"
 LIVE = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live\live.ts")

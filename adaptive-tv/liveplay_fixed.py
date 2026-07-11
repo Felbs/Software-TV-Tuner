@@ -17,7 +17,7 @@ FFPLAY = r"C:\ffmpeg\bin\ffplay.exe"
 if not os.path.exists(FFMPEG):
     FFMPEG = "ffmpeg"
 if not os.path.exists(FFPLAY):
-    FFPLAY = r"C:\Users\user\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1-full_build\bin\ffplay.exe"
+    FFPLAY = r"%USERPROFILE%\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1-full_build\bin\ffplay.exe"
 
 prog = int(sys.argv[1]) if len(sys.argv) > 1 else 9
 tail_mb = int(sys.argv[2]) if len(sys.argv) > 2 else 25

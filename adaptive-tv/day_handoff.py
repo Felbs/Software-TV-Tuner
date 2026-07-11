@@ -2,6 +2,7 @@
 daylight cube (09:00 -> 17:00). Fills the daytime half of the 24 h
 Antenna x Channel x Time map ("daylight is the honest window").
 """
+import sys
 import os
 import subprocess
 import time
@@ -9,7 +10,7 @@ from datetime import datetime
 
 import psutil
 
-PY = r"C:\Users\user\radioconda\python.exe"
+PY = sys.executable
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 while datetime.now().strftime("%H:%M") < "09:00":

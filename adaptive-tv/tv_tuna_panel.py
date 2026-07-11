@@ -10,6 +10,7 @@ http://localhost:8642
                 One tuner = one 8 MHz window: while TV plays, the sweep
                 pauses (banner explains) and resumes when the radio idles.
 """
+import sys
 import json, math, os, re, subprocess, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -23,7 +24,7 @@ import time_knob as tkn   # learned hour-curves (2026-07-10, cube fossil's heir)
 import deep_tune as dtn   # DEEP TUNE channel doctor (2026-07-10 late)
 import antenna_id as aid  # antenna auto-identification (2026-07-11)
 
-PY = r"C:\Users\user\radioconda\python.exe"
+PY = sys.executable
 LIVE = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live\live.ts")
 CHAIN_LOG = HERE / "lab" / "panel_chain.log"
 PORT = 8642

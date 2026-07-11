@@ -12,10 +12,11 @@ Phase C  closed-loop supervision toward the CABLE criterion:
 
 Log milestones: PHASE / CABLE QUALITY ACHIEVED / FATAL / SWITCH / BOUNCE
 """
+import sys
 import argparse, json, os, statistics, subprocess, sys, time
 from pathlib import Path
 
-PY = r"C:\Users\user\radioconda\python.exe"
+PY = sys.executable
 TV_LIVE = r"Z:\src\magic-tv-decoder\tools\tv_live.py"
 PLAYER = str(Path(__file__).resolve().parent / "play_marginal.py")
 LIVE = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live\live.ts")

@@ -2,10 +2,11 @@
 IF gain to kill intermod from an overdriving amp. Tries (rfgain_sel, IFGR) combos
 on RF31/long and reports lock%, fps, and v_err/s for program 1. Lowest v_err wins.
 """
+import sys
 import os, re, subprocess, time
 from pathlib import Path
 
-PY = r"C:\Users\user\radioconda\python.exe"
+PY = sys.executable
 TV_LIVE = Path(r"Z:\src\magic-tv-decoder\tools\tv_live.py")
 JUDGE = Path(r"Z:\src\adaptive-tv\quality_judge.py")
 LIVE = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live\live.ts")
@@ -39,7 +40,7 @@ def main():
         if LIVE.exists():
             try: LIVE.unlink()
             except Exception: pass
-        log = Path(f"C:/Users/user/AppData/Local/Temp/claude/gd_{rfgain}_{ifgr}.log")
+        log = Path(f"C:/Temp/stvt_lab/gd_{rfgain}_{ifgr}.log")
         with open(log, "w") as lf:
             ch = subprocess.Popen([PY, "-u", str(TV_LIVE), "--rf", RF],
                                   env=env(rfgain, ifgr), stdout=lf,

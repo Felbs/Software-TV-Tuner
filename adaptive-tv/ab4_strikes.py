@@ -23,7 +23,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from tv_lab import ts_metrics   # noqa: E402
 
-PY = r"C:\Users\user\radioconda\python.exe"
+PY = sys.executable
 TOOLS = Path(r"Z:\src\magic-tv-decoder\tools")
 LOGDIR = HERE / "lab"
 OUT = LOGDIR / ("ab4_strikes_%s.jsonl" % time.strftime("%Y%m%d_%H%M"))
@@ -85,7 +85,7 @@ def start_panel():
     subprocess.Popen(
         ["powershell", "-NoProfile", "-Command",
          "$env:PATH = 'C:\\Program Files\\SDRplay\\API\\x64;' + $env:PATH; "
-         "Start-Process -FilePath C:\\Users\\user\\radioconda\\python.exe "
+         "Start-Process -FilePath $env:USERPROFILE\\radioconda\\python.exe "
          "-ArgumentList 'Z:\\src\\adaptive-tv\\tv_tuna_panel.py' "
          "-WindowStyle Hidden"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

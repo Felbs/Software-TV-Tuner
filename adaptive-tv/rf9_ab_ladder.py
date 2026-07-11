@@ -8,13 +8,14 @@ ABBA-ish so RF9's breathing shows up as per-arm MER, not config bias.
 Panel process must be DEAD (sweeper steals the radio; flight recorder
 reads live.ts).  No players attached: chain-only loss.
 """
+import sys
 import io, json, math, os, re, subprocess, sys, time
 from pathlib import Path
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8",
                               errors="replace")
 
-PY = r"C:\Users\user\radioconda\python.exe"
+PY = sys.executable
 HERE = Path(r"Z:\src\adaptive-tv")
 TOOLS = Path(r"Z:\src\magic-tv-decoder\tools")
 LIVE = TOOLS / "data" / "tv_live" / "live.ts"

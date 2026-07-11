@@ -40,7 +40,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 TOOLS = Path(r"Z:\src\magic-tv-decoder\tools")
-PY = r"C:\Users\user\radioconda\python.exe"
+PY = sys.executable
 RECIPES = HERE / "lab" / "channel_recipes.json"
 
 CLIFF = 15.2            # the survival-curve cliff (dB)

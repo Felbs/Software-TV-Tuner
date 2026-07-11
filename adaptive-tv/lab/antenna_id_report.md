@@ -166,8 +166,8 @@ data can never be overwritten again.
   off PATH — the panel's own in-process waterfall then can't load the
   sdrplay module either, which looks exactly like a missing radio.
   The relaunch recipe must prepend:
-  `C:\Users\user\radioconda;C:\Users\user\radioconda\Library\bin;`
-  `C:\Users\user\radioconda\Scripts;C:\Program Files\SDRplay\API\x64`.
+  `%USERPROFILE%\radioconda;%USERPROFILE%\radioconda\Library\bin;`
+  `%USERPROFILE%\radioconda\Scripts;C:\Program Files\SDRplay\API\x64`.
   The panel now runs with that PATH; waterfall honestly reports
   "radio busy — waiting" until the SDR returns.
 - **After the replug (user: "shed antenna back on"), the live loop

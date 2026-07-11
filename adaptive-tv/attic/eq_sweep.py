@@ -2,10 +2,11 @@
 HD program. Finds the EQ that best handles this signal's multipath. Reports lock
 stability (fraction of fpll samples with mean|x|>0) + decode score.
 """
+import sys
 import os, re, subprocess, time
 from pathlib import Path
 
-PY = r"C:\Users\user\radioconda\python.exe"
+PY = sys.executable
 TV_LIVE = Path(r"Z:\src\magic-tv-decoder\tools\tv_live.py")
 JUDGE = Path(r"Z:\src\adaptive-tv\quality_judge.py")
 LIVE = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live\live.ts")
@@ -39,7 +40,7 @@ def main():
         if LIVE.exists():
             try: LIVE.unlink()
             except Exception: pass
-        log = Path(f"C:/Users/user/AppData/Local/Temp/claude/eq_{eq}.log")
+        log = Path(f"C:/Temp/stvt_lab/eq_{eq}.log")
         with open(log, "w") as lf:
             ch = subprocess.Popen([PY, "-u", str(TV_LIVE), "--rf", RF],
                                   env=env(eq), stdout=lf, stderr=subprocess.STDOUT)

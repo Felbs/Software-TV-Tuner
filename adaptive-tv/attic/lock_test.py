@@ -2,10 +2,11 @@
 whether the FPLL pilot actually LOCKS (mean|x|>0) and the input level. Finds a
 channel worth a full decode attempt instead of guessing.
 """
+import sys
 import os, re, subprocess, time
 from pathlib import Path
 
-PY = r"C:\Users\user\radioconda\python.exe"
+PY = sys.executable
 TV_LIVE = Path(r"Z:\src\magic-tv-decoder\tools\tv_live.py")
 LIVE = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live\live.ts")
 SDRPLAY_DLL = r"C:\Program Files\SDRplay\API\x64"
@@ -45,7 +46,7 @@ def main():
         if LIVE.exists():
             try: LIVE.unlink()
             except Exception: pass
-        log = Path(f"C:/Users/user/AppData/Local/Temp/claude/lock_rf{rf}.log")
+        log = Path(f"C:/Temp/stvt_lab/lock_rf{rf}.log")
         with open(log, "w") as lf:
             ch = subprocess.Popen([PY, "-u", str(TV_LIVE), "--rf", str(rf)],
                                   env=base_env(), stdout=lf, stderr=subprocess.STDOUT)

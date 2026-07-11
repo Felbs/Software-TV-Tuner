@@ -20,7 +20,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from tv_lab import ts_metrics   # noqa: E402
 
-PY = r"C:\Users\user\radioconda\python.exe"
+PY = sys.executable
 TOOLS = Path(r"Z:\src\magic-tv-decoder\tools")
 LOGDIR = HERE / "lab"
 OUT = LOGDIR / ("ab_impulse_%s.jsonl" % time.strftime("%Y%m%d_%H%M"))

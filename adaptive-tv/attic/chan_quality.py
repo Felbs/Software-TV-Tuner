@@ -1,10 +1,11 @@
 """chan_quality.py — decode-quality (fps + v_err) of the strong channels at the
 working gain, to pick the one with the cleanest multipath path for viewing.
 """
+import sys
 import os, re, subprocess, time
 from pathlib import Path
 
-PY = r"C:\Users\user\radioconda\python.exe"
+PY = sys.executable
 TV_LIVE = Path(r"Z:\src\magic-tv-decoder\tools\tv_live.py")
 JUDGE = Path(r"Z:\src\adaptive-tv\quality_judge.py")
 LIVE = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live\live.ts")

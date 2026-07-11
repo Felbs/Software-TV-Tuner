@@ -6,10 +6,11 @@ only ~14 s because MER is continuous — no waiting for the binary decode cliff.
 Usage:
     python mer_gain_cal.py --rf 31 [--antenna "Antenna A"] [--secs 14]
 """
+import sys
 import argparse, math, os, re, subprocess, time
 from pathlib import Path
 
-PY = r"C:\Users\user\radioconda\python.exe"
+PY = sys.executable
 TV_LIVE = Path(r"Z:\src\magic-tv-decoder\tools\tv_live.py")
 LIVE = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live\live.ts")
 SDRPLAY_DLL = r"C:\Program Files\SDRplay\API\x64"

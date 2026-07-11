@@ -14,12 +14,13 @@ judged fairly — the RF34 lesson), then full-rate configs compete on v_err.
 At the end: relaunches live TV (chain + player) on the best config found and
 writes lab/live_tune_report.txt. Log milestones: NEW BEST / DONE / FATAL.
 """
+import sys
 import argparse, json, os, re, subprocess, sys, time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 LAB = HERE / "lab"
-PY = r"C:\Users\user\radioconda\python.exe"
+PY = sys.executable
 TV_LIVE = Path(r"Z:\src\magic-tv-decoder\tools\tv_live.py")
 JUDGE = HERE / "quality_judge.py"
 PLAYER = HERE / "play_marginal.py"

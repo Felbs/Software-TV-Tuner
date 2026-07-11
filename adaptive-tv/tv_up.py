@@ -12,10 +12,11 @@ Usage:
     python tv_up.py --rf 36 --program 3 [--ifgr 32 --rfgain 2] [--nb 2.0]
 Log lines are grep-friendly: PLAYING VERIFIED / STALL / ROTATE / RETRY / FATAL
 """
+import sys
 import argparse, json, os, subprocess, sys, time
 from pathlib import Path
 
-PY = r"C:\Users\user\radioconda\python.exe"
+PY = sys.executable
 TV_LIVE = r"Z:\src\magic-tv-decoder\tools\tv_live.py"
 PLAYER = str(Path(__file__).resolve().parent / "play_marginal.py")
 LIVE = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live\live.ts")

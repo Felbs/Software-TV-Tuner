@@ -28,7 +28,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-PY = r"C:\Users\user\radioconda\python.exe"
+PY = sys.executable
 TV_LIVE = Path(r"Z:\src\magic-tv-decoder\tools\tv_live.py")
 LIVE = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live\live.ts")
 SDRPLAY_DLL = r"C:\Program Files\SDRplay\API\x64"

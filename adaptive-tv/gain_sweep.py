@@ -6,10 +6,11 @@ header count climbs as gain increases, the system is gain-starved (another amp
 stage / more LNA gain would help). If it plateaus or drops, it's SNR/capture
 limited and amplification won't help.
 """
+import sys
 import os, subprocess, time, sys
 from pathlib import Path
 
-PY = r"C:\Users\user\radioconda\python.exe"
+PY = sys.executable
 TV_LIVE = Path(r"Z:\src\magic-tv-decoder\tools\tv_live.py")
 LIVE = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live\live.ts")
 SDRPLAY_DLL = r"C:\Program Files\SDRplay\API\x64"

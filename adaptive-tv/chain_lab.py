@@ -18,6 +18,7 @@ Workflow:
 
 Scoring: MPEG-2 seq-headers in the output TS (decode volume) minus a
 penalty for ffmpeg null-decode error lines (decode cleanliness), plus MER
+import sys
 from the equalizer telemetry as a diagnostic. Replay runs at IDLE process
 priority so a live TV chain keeps its cycles.
 """
@@ -26,7 +27,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 LAB = HERE / "lab"
-PY = r"C:\Users\user\radioconda\python.exe"
+PY = sys.executable
 REPLAY = Path(r"Z:\src\magic-tv-decoder\tools\tv_replay.py")
 SDRPLAY_DLL = r"C:\Program Files\SDRplay\API\x64"
 FFMPEG = r"C:\ffmpeg\bin\ffmpeg.exe"

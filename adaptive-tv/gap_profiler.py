@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-PY = r"C:\Users\user\radioconda\python.exe"
+PY = sys.executable
 TOOLS = Path(r"Z:\src\magic-tv-decoder\tools")
 LIVE = TOOLS / "data" / "tv_live" / "live.ts"
 LOGDIR = HERE / "lab"
@@ -198,7 +198,7 @@ def main():
     subprocess.Popen(
         ["powershell", "-NoProfile", "-Command",
          "$env:PATH = 'C:\\Program Files\\SDRplay\\API\\x64;' + $env:PATH; "
-         "Start-Process -FilePath C:\\Users\\user\\radioconda\\python.exe "
+         "Start-Process -FilePath $env:USERPROFILE\\radioconda\\python.exe "
          "-ArgumentList 'Z:\\src\\adaptive-tv\\tv_tuna_panel.py' "
          "-WindowStyle Hidden"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
