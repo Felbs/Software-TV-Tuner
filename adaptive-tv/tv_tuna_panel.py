@@ -890,19 +890,34 @@ def science_data():
         try:
             rows = _tk_rows()
             rf_now = STATE["rf"]
-            # antenna-aware card (2026-07-11, discone lesson): show the
-            # curve for the antenna IN USE when it has real data —
-            # RF7 on the discone is a different channel than RF7 on
-            # rabbit ears; blending them lies to both. Fall back to
-            # the all-antenna blend (tagged) when the antenna is new.
+            # identity-aware card (2026-07-11 evening): history follows
+            # the RECOGNIZED PHYSICAL ANTENNA (fingerprint ledger), not
+            # the port label — a port's label-rows blend every antenna
+            # that ever sat there ("watching TV under a BROWN bar"
+            # lesson: the bar judged this antenna by its predecessors).
             _ant_now = STATE.get("ant_override")
-            _ant_rows = [r for r in rows if r["ant"] == _ant_now]
-            ant_scoped = bool(_ant_now) and sum(
-                1 for r in _ant_rows if r["rf"] == rf_now) >= 30
-            bh = tkn.best_hours(rf_now, rows,
-                                ant=_ant_now if ant_scoped else None)
-            c = tkn.curve(rf_now, rows,
-                          ant=_ant_now if ant_scoped else None)
+            ant_scoped = False
+            prof_rows = None
+            try:
+                _led = aid.load_profiles()
+                _pid = (_led.get("port_current") or {}).get(_ant_now)
+                if _pid:
+                    _pr = aid.rows_for_profile(_pid, rows)
+                    if sum(1 for r in _pr if r["rf"] == rf_now) >= 10:
+                        prof_rows = _pr
+                        ant_scoped = True
+            except Exception:
+                pass
+            if prof_rows is None:
+                # fallback: port-label scoping, then all-antenna blend
+                _ant_rows = [r for r in rows if r["ant"] == _ant_now]
+                ant_scoped = bool(_ant_now) and sum(
+                    1 for r in _ant_rows if r["rf"] == rf_now) >= 30
+            _rows_use = prof_rows if prof_rows is not None else rows
+            _ant_use = (None if prof_rows is not None
+                        else (_ant_now if ant_scoped else None))
+            bh = tkn.best_hours(rf_now, _rows_use, ant=_ant_use)
+            c = tkn.curve(rf_now, _rows_use, ant=_ant_use)
             known = {h: b["mer"] for h, b in c.items()
                      if b.get("mer") is not None
                      and b.get("conf") in ("solid", "thin")}
