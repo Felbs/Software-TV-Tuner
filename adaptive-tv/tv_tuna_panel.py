@@ -1649,6 +1649,8 @@ canvas{width:100%;image-rendering:pixelated;display:block;border-radius:4px}
 <div id="status">loading…</div>
 <div id="pageG">
 <div style="margin:4px 0 8px;font-size:12px">📡 antenna:
+<button onclick="surf(-1)" title="previous channel (↓ key)" style="background:#152238;color:#9fb4d0;border:1px solid #26436b;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:13px">⏮ CH−</button>
+<button onclick="surf(1)" title="next channel (↑ key)" style="background:#152238;color:#9fb4d0;border:1px solid #26436b;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:13px;margin-right:10px">CH+ ⏭</button>
 <select id="antpick" onchange="fetch('/api/antenna',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({antenna:this.value})})" style="background:#123;color:#cde;border:1px solid #356;padding:2px 6px">
 <option value="auto">auto (belief map)</option>
 <option value="Antenna B">Philips (B)</option>
@@ -1726,7 +1728,24 @@ document.getElementById('page'+p).style.display=t===p?'':'none';
 document.getElementById('tab'+p).className=t===p?'on':'';}}
 function toast(m){const el=document.getElementById('toast');el.textContent=m;el.style.display='block';
 setTimeout(()=>el.style.display='none',6000)}
+// CHANNEL SURF (2026-07-11): a real TV's ch+/ch- — steps through the
+// guide's tuneable stations in order, riding the 10-second tune stack.
+let SURF=[],LAST_RFPROG=null;
+function surf(dir){
+ if(!SURF.length){toast('scan first — the surf list comes from the guide');return}
+ let i=SURF.findIndex(x=>LAST_RFPROG&&x.rf===LAST_RFPROG[0]&&x.prog===LAST_RFPROG[1]);
+ i=(i<0?(dir>0?-1:0):i)+dir;
+ i=((i%SURF.length)+SURF.length)%SURF.length;
+ const t=SURF[i];
+ tune(t.rf,t.prog,t.virt,t.name);
+}
+document.addEventListener('keydown',e=>{
+ if(e.target.tagName==='INPUT'||e.target.tagName==='SELECT'||e.target.tagName==='TEXTAREA')return;
+ if(e.key==='ArrowUp'){e.preventDefault();surf(1)}
+ else if(e.key==='ArrowDown'){e.preventDefault();surf(-1)}
+});
 async function tune(rf,prog,virt,name){
+LAST_RFPROG=[rf,prog];
 const antSel=document.getElementById('antpick').value;
 toast('tuning '+virt+' '+name+' — ~30s to picture'
  +(antSel==='auto'?' · antenna: auto (belief map)':' · antenna: '+antSel)
@@ -1755,7 +1774,8 @@ else{
  if(WAS_SCANNING){WAS_SCANNING=false;loadGrid();toast('📡 scan complete — guide refreshed')}
  if(s.tuning) h='⏳ <b>tuning '+(s.virtual||'')+' '+(s.name||'')+'</b> — '+(s.stage||'starting…')+pbar(s.stage_pct);
  else if(s.tuned&&s.stage&&s.stage.startsWith('PLAYER')) h='🔴 <span class="failbanner">'+s.stage+'</span>'+
-  ` <button class="stop" onclick="stopTv()">stop</button>`;
+  ` <button class="stop" onclick="stopTv()">stop</button>`+
+  ` <button class="tune" style="background:#3a2a4a;border:1px solid #5a4a7a" onclick="deepTune()" title="The doctor's REAL specialty: race every antenna and gain on this unwatchable channel and try to drag it over the cliff — or say honestly why it can't be.">🔬 DEEP TUNE the unwatchable</button>`;
  else if(s.tuned){
   // live watchability from actual packet loss (last 30 s) — MER medians
   // alias on fast faders (RF9 lesson 7/10: "flawless" badge, 10% loss)
@@ -1769,7 +1789,8 @@ else{
   ` <button class="stop" onclick="stopTv()">stop TV</button>`+
   ` <button class="tune" style="background:#3a2a4a;border:1px solid #5a4a7a" onclick="deepTune()" title="The channel doctor: baseline, antenna race, gain grid, disease verdict — writes a recipe future tunes reuse. ~5-12 min; click any station to abort.">🔬 DEEP TUNE</button>`;
   if(s.hdrs_s===0&&(s.real_pct||0)<5) h+=' <span style="color:#e7c96a">⚠ locked but nothing decoding — signal is under the cliff, aim with 🎯</span>';}
- else if(s.stage&&s.stage.startsWith('RADIO FAILED')) h='🔴 <span class="failbanner">'+s.stage+'</span>';
+ else if(s.stage&&s.stage.startsWith('RADIO FAILED')) h='🔴 <span class="failbanner">'+s.stage+'</span>'+
+  (s.rf!=null?` <button class="tune" style="background:#3a2a4a;border:1px solid #5a4a7a" onclick="deepTune()">🔬 DEEP TUNE the unwatchable</button>`:'');
  else h='tuner idle — waterfall live on NERD tab · click a station to tune · 📡 SCAN refreshes the guide';}
 if(s.deeptune&&!s.deeptune.on&&s.deeptune.verdict)
  h+='<div style="color:#8fe0b0;font-size:12px;margin-top:5px">🔬 <b>DEEP TUNE verdict:</b> '+s.deeptune.verdict+'</div>';
@@ -1780,6 +1801,7 @@ async function deepTune(){
 toast('🔬 DEEP TUNE — the channel doctor takes the tuner: baseline, antenna race, gain grid. Verdict + recipe when done. Click any station to abort.');
 const r=await fetch('/api/deeptune',{method:'POST',body:'{}'});toast(await r.json())}
 async function loadGrid(){const g=await (await fetch('/api/grid')).json();
+SURF=[];
 let h='<table><tr><th>station</th>';g.slots.forEach(s=>h+='<th>'+s+'</th>');h+='<th></th></tr>';
 let lastRf=null;
 g.rows.forEach(r=>{
@@ -1811,6 +1833,7 @@ h+=`<tr><td colspan="${g.slots.length+2}" style="background:#0d1626;border-top:2
 (r.rms!=null&&g.floor!=null?` · level ${r.rms.toFixed(1)} dBFS / floor ${g.floor.toFixed(1)} dBFS`:'')+
 ` · one transmitter shared by every station below</span></td></tr>`}
 const bc=r.tune==='+'?'b-plus':(r.tune==='~'?'b-tilde':'b-x');
+if(r.tune==='+'||r.tune==='~')SURF.push({rf:r.rf,prog:r.prog,virt:r.virtual,name:r.callsign});
 h+=`<tr><td class="ch"><span class="badge ${bc}">${r.tune}</span>`+
 `<button class="tune" onclick='tune(${r.rf},${r.prog},"${r.virtual}","${r.callsign}")'>${r.virtual}</button> ${r.callsign}</td>`;
 r.cells.forEach((c,i)=>{h+=`<td class="${i===0?'now':''}">`+(c.cont?`<span class="cont">&raquo; ${c.title}</span>`
