@@ -1793,11 +1793,11 @@ async function stopTv(){await fetch('/api/stop',{method:'POST'});toast('TV stopp
 async function newAnt(){
 const a=document.getElementById('antpick').value;
 if(!a||a==='auto'){toast('pick the port (Antenna A/B/C) in the dropdown first, then press NEW ANTENNA');return}
-if(!confirm('Did you plug a DIFFERENT physical antenna into '+a+'?\n\nIts learned history restarts (old data is archived, not deleted). Recipes naming it are dropped.'))return;
+if(!confirm('Did you plug a DIFFERENT physical antenna into '+a+'? Its learned history restarts (old data is archived, not deleted). Recipes naming it are dropped.'))return;
 const r=await fetch('/api/new_antenna',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({antenna:a})});
 toast(await r.json())}
 async function resetLearning(){
-if(!confirm('Erase ALL learned training data?\n\nHour curves, recipes, memorized programs, prediction audits — everything. Archives are kept on disk, but the rig starts its education from scratch.'))return;
+if(!confirm('Erase ALL learned training data? Hour curves, recipes, memorized programs, prediction audits — everything. Archives are kept on disk, but the rig starts its education from scratch.'))return;
 if(!confirm('Really sure? This is the factory-reset of the Knob of Time.'))return;
 const r=await fetch('/api/reset_learning',{method:'POST'});
 toast(await r.json())}
