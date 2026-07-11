@@ -348,7 +348,8 @@ def mark_vacant(port, sig, store=None, save=True, path=PROFILES):
     return store
 
 
-def observe(sig, port, store=None, ts=None, save=True, path=PROFILES):
+def observe(sig, port, store=None, ts=None, save=True, path=PROFILES,
+            conservative=False):
     """Match a fresh signature against the ledger and update it.
     Returns an event dict:
       {verdict, profile, name, score, detail, needs_epoch, message,
@@ -409,16 +410,45 @@ def observe(sig, port, store=None, ts=None, save=True, path=PROFILES):
                          % (label(cur_pid), port, cur * 100)}
     # 2. a DIFFERENT known profile matches strongly -> the antenna MOVED
     elif best_pid and best_pid != cur_pid and best >= T_RECOGNIZED:
+        # near-twin guard (2026-07-11, Old-Faithful×Total-Vision lesson):
+        # if the runner-up is within 0.07, the print can't honestly pick
+        # between two known antennas — ASK, never auto-follow.
+        second = max((s for p, s in scores.items() if p != best_pid),
+                     default=0.0)
+        if second >= best - 0.07 or conservative:
+            store["pending"][port] = {"ts": ts, "profile": best_pid,
+                                      "score": best, "signature": sig}
+            if save:
+                save_profiles(store, path)
+            return {"verdict": "ASK", "profile": best_pid,
+                    "name": label(best_pid), "score": best,
+                    "needs_epoch": False, "pending": True,
+                    "message": "%s reads like '%s' (%.0f%%)%s — confirm "
+                               "with a 🪪 fingerprint scan before any "
+                               "history moves"
+                               % (port, label(best_pid), 100 * best,
+                                  (" but '%s' is close behind (%.0f%%)"
+                                   % (label(max((p for p in scores
+                                                 if p != best_pid),
+                                                key=scores.get)),
+                                      100 * second))
+                                  if second >= best - 0.07 else "")}
         prof = store["profiles"][best_pid]
         was = [sp["port"] for sp in prof["port_history"]]
         moved_from = was[-1] if was else None
-        _close_span(prof, moved_from, ts)
+        # one antenna, one place: close EVERY open span of this profile
+        for sp in prof["port_history"]:
+            if sp.get("end") is None:
+                sp["end"] = ts
         if cur_pid:
             _close_span(store["profiles"][cur_pid], port, ts)
         prof["port_history"].append({"port": port, "start": ts, "end": None,
                                      "confirmed": False})
         _sight(prof, ts, port, best)
         store["port_current"][port] = best_pid
+        for op in [k for k, v in store["port_current"].items()
+                   if v == best_pid and k != port]:
+            store["port_current"].pop(op)
         ev = {"verdict": "MOVED", "profile": best_pid,
               "name": prof["name"], "score": best,
               "detail": details[best_pid], "moved_from": moved_from,
@@ -442,6 +472,17 @@ def observe(sig, port, store=None, ts=None, save=True, path=PROFILES):
     # 4. nothing close -> NEW (or ADOPTED on a virgin port)
     else:
         bootstrap = cur_pid is None
+        if conservative and not bootstrap:
+            # scan byproducts never enroll or evict on their own — a
+            # routine channel scan must not interrogate the user
+            store["pending"][port] = {"ts": ts, "profile": None,
+                                      "score": best, "signature": sig}
+            if save:
+                save_profiles(store, path)
+            return {"verdict": "ASK", "profile": None, "name": None,
+                    "score": best, "needs_epoch": False, "pending": True,
+                    "message": "%s doesn't match its resident — run a 🪪 "
+                               "fingerprint scan when convenient" % port}
         pid = _new_profile(store, sig, port, ts)
         if cur_pid:
             _close_span(store["profiles"][cur_pid], port, ts)
@@ -468,7 +509,8 @@ def observe_scan(scan=None, path=PROFILES, scan_path=SCAN_JSON):
         return {"verdict": "UNUSABLE", "needs_epoch": False,
                 "message": "scan has no antenna/port stamp"}
     ts = scan.get("scanned_at")
-    return observe(signature_from_scan(scan), port, ts=ts, path=path)
+    return observe(signature_from_scan(scan), port, ts=ts, path=path,
+                   conservative=True)
 
 
 def resolve_pending(port, action, path=PROFILES):
