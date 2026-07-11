@@ -1686,6 +1686,7 @@ canvas{width:100%;image-rendering:pixelated;display:block;border-radius:4px}
 <div id="status">loading…</div>
 <div id="pageG">
 <div style="margin:4px 0 8px;font-size:12px">📡 antenna:
+<button onclick="newAnt()" title="Physically swapped the antenna on the selected port? Press this so the model restarts that port's education (old data archived, never deleted)." style="background:#152238;color:#9fb4d0;border:1px solid #26436b;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:13px;margin-right:10px">🔌 NEW ANTENNA</button>
 <button onclick="surf(-1)" title="previous channel (↓ key)" style="background:#152238;color:#9fb4d0;border:1px solid #26436b;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:13px">⏮ CH−</button>
 <button onclick="surf(1)" title="next channel (↑ key)" style="background:#152238;color:#9fb4d0;border:1px solid #26436b;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:13px;margin-right:10px">CH+ ⏭</button>
 <select id="antpick" onchange="fetch('/api/antenna',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({antenna:this.value})})" style="background:#123;color:#cde;border:1px solid #356;padding:2px 6px">
@@ -1789,6 +1790,17 @@ toast('tuning '+virt+' '+name+' — ~30s to picture'
  +(rf<14?' (VHF — DAB-notch fix 2026-07-04)':''));
 await fetch('/api/tune',{method:'POST',body:JSON.stringify({rf,prog,virt,name,antenna:antSel})})}
 async function stopTv(){await fetch('/api/stop',{method:'POST'});toast('TV stopped — tuner idle, waterfall resumes')}
+async function newAnt(){
+const a=document.getElementById('antpick').value;
+if(!a||a==='auto'){toast('pick the port (Antenna A/B/C) in the dropdown first, then press NEW ANTENNA');return}
+if(!confirm('Did you plug a DIFFERENT physical antenna into '+a+'?\n\nIts learned history restarts (old data is archived, not deleted). Recipes naming it are dropped.'))return;
+const r=await fetch('/api/new_antenna',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({antenna:a})});
+toast(await r.json())}
+async function resetLearning(){
+if(!confirm('Erase ALL learned training data?\n\nHour curves, recipes, memorized programs, prediction audits — everything. Archives are kept on disk, but the rig starts its education from scratch.'))return;
+if(!confirm('Really sure? This is the factory-reset of the Knob of Time.'))return;
+const r=await fetch('/api/reset_learning',{method:'POST'});
+toast(await r.json())}
 async function rec(virt,title){toast('scheduling '+title+' …');
 const r=await fetch('/api/record',{method:'POST',body:JSON.stringify({virt,title})});toast(await r.text())}
 function pbar(p){return `<div class="pbar"><div style="width:${p||0}%"></div></div>`}
@@ -2119,7 +2131,8 @@ if(SC.oso!=null)sc+=card('REALTIME HEALTH',SC.oso===0?'✓ 0':'⚠ '+SC.oso,SC.o
 if(SC.brain){const b=SC.brain;
 sc+=card('🧠 MARKET BRAIN',b.know_pct+'%',
  'of your '+b.channels+'-channel market mapped by hour · <b>'+b.pids+'</b> programs memorized for instant tuning · <b>'+b.recipes+'</b> doctor recipes'+
- (b.mae!=null?' · <b style="color:'+(b.mae<=1.5?'#67d18a':'#e7c96a')+'">oracle audited: predictions within ±'+b.mae+' dB</b> (last '+b.n_audit+' checks)':' · oracle audit warming up — accuracy appears after a few tunes'))}
+ (b.mae!=null?' · <b style="color:'+(b.mae<=1.5?'#67d18a':'#e7c96a')+'">oracle audited: predictions within ±'+b.mae+' dB</b> (last '+b.n_audit+' checks)':' · oracle audit warming up — accuracy appears after a few tunes')+
+ ' · <a href="#" onclick="resetLearning();return false" style="color:#5f7591;font-size:10px">🧹 reset all learning</a>')}
 if(SC.guard_fires!==undefined)sc+=card('MOD-12 GUARD',SC.guard_fires,'slips healed this session',SC.guard_fires>20?'warn':'good');
 if(SC.sheriff)sc+=card('FEC SHERIFF',SC.sheriff.action,'last action · '+SC.sheriff.t);
 if(SC.dawn)sc+=card('DAWN FORECAST',SC.dawn.score,SC.dawn.verdict);
@@ -2459,6 +2472,54 @@ class H(BaseHTTPRequestHandler):
             set_antenna(ant)
             self._send(json.dumps(f"antenna: {ant or 'auto'} (saved; "
                                   "applies to next tune/scan)"))
+        elif self.path == "/api/new_antenna":
+            # user physically swapped the antenna on a port: fresh
+            # epoch for that label (old rows stay on disk but stop
+            # counting), recipes naming it dropped, caches cleared
+            ant = req.get("antenna")
+            if not ant or ant == "auto":
+                self._send(json.dumps(
+                    "pick the port (Antenna A/B/C) first, then press "
+                    "NEW ANTENNA"))
+            else:
+                when = tkn.mark_new_antenna(ant)
+                try:
+                    rp = HERE / "lab" / "channel_recipes.json"
+                    rec = json.loads(rp.read_text(encoding="utf-8"))
+                    kept = {k: v for k, v in rec.items()
+                            if v.get("antenna") != ant}
+                    dropped = len(rec) - len(kept)
+                    rp.write_text(json.dumps(kept, indent=1),
+                                  encoding="utf-8")
+                except (OSError, ValueError):
+                    dropped = 0
+                _TK_CACHE["t"] = 0.0
+                self._send(json.dumps(
+                    f"fresh start for {ant} (epoch {when}): its learned "
+                    f"history is archived, {dropped} recipe(s) dropped — "
+                    "watch or scan and it relearns the new antenna"))
+        elif self.path == "/api/reset_learning":
+            # flush ALL training data: archive (never delete) every
+            # learned artifact and start the rig's education over
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            moved = []
+            for fn in ("quality_history.csv", "oracle_score.csv",
+                       "channel_recipes.json", "antenna_epochs.json",
+                       "pid_cache.json"):
+                p = HERE / "lab" / fn
+                if p.exists():
+                    try:
+                        p.rename(p.with_name(f"{p.name}.archived_{stamp}"))
+                        moved.append(fn)
+                    except OSError:
+                        pass
+            _TK_CACHE["t"] = 0.0
+            _TK_CACHE["rows"] = []
+            self._send(json.dumps(
+                f"learning reset — archived {len(moved)} file(s) "
+                f"({', '.join(moved) or 'nothing to archive'}). The rig "
+                "is a blank slate: scan and watch to re-teach it. "
+                f"Archives kept as *.archived_{stamp}"))
         elif self.path == "/api/e7/play":
             hp = HERE / "lab" / "e7_healed.ts"
             if hp.exists() and hp.stat().st_size > 500_000:
