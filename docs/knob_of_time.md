@@ -167,7 +167,24 @@ while the viewer sleeps.
 - **Renamed antennas:** old and new labels coexist until decay
   retires the old one (cosmetic, self-healing).
 
-## 8. Code map
+## 8. Case study: the scanner antenna that couldn't do TV
+
+A discone is a wideband scanner antenna with no business decoding
+ATSC. Months of history said so: ~14.5 dB on its one plausible
+channel, below the 15.2 dB cliff, at every hour. Then, in one week,
+the decoder gained a turbo re-decode stage, a sync-slip guard, and a
+clean-process discipline — and an overnight campaign re-probed the
+discone hourly: **nine attempts, nine decodes**, 16–18 dB, video
+flowing every time, best in the pre-dawn tropo window the old data
+had faintly hinted at. Two lessons the model architecture already
+encoded: *recency decay exists because even the receiver itself is
+part of the changing world* (the old sub-cliff rows faded, the new
+truth took over within a day), and *a learned schedule turns a
+"broken" antenna into a scheduled one*. The morning after, the
+household watched network television on a scanner antenna at 6.5%
+loss, as forecast.
+
+## 9. Code map
 
 Everything lives in `adaptive-tv/time_knob.py` (pure stdlib, ~450
 lines, imported by the panel; also runnable standalone):
