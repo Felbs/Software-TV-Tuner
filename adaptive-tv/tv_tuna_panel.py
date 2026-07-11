@@ -165,14 +165,14 @@ def ident_run(port):
         # sweep started too early sees Device::make() no match)
         for _ in range(15):
             with WF_LOCK:
-                parked = "H(f) print in progress" in (WF["status"] or "")
+                parked = "fingerprint scan in progress" in (WF["status"] or "")
             if parked:
                 break
             time.sleep(1)
         time.sleep(2)                    # let the driver finish closing
         last_err = None
         for attempt in range(5):
-            IDENT["line"] = ("measuring |H(f)| across the market grid "
+            IDENT["line"] = ("fingerprinting: measuring |H(f)| across the market grid "
                              "on %s (~60 s)…" % port)
             try:
                 # env=None -> antenna_id builds env_with_sdrplay() (the
@@ -342,7 +342,7 @@ def sweeper():
             with WF_LOCK:
                 WF["status"] = ("channel scan in progress — sweep paused"
                                 if SCAN["running"] else
-                                ("🪪 H(f) print in progress — sweep paused"
+                                ("🪪 fingerprint scan in progress — sweep paused"
                                  if IDENT["on"] else
                                  ("📏 flatness aiming in progress — sweep paused"
                                   if FLAT["on"] else
@@ -1791,7 +1791,7 @@ canvas{width:100%;image-rendering:pixelated;display:block;border-radius:4px}
 <div style="margin:4px 0 8px;font-size:12px">📡 antenna:
 <button onclick="newAnt()" title="Physically swapped the antenna on the selected port? Press this so the model restarts that port's education (old data archived, never deleted)." style="background:#152238;color:#9fb4d0;border:1px solid #26436b;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:13px;margin-right:6px">🔌 NEW ANTENNA</button>
 <button onclick="nickAnt()" title="Give the antenna on the selected port a nickname. Its HF- callsign never changes (that's the fingerprint's identity) — the nickname is yours, changeable anytime." style="background:#152238;color:#9fb4d0;border:1px solid #26436b;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:13px;margin-right:6px">✏️ NICKNAME</button>
-<button onclick="identifyAnt()" title="Every antenna+cable system has a unique transfer function |H(f)| — its gain-vs-frequency shape. A ~60 s idle-radio sweep measures it and matches it against every antenna this rig has ever met (channel scans take the print automatically, for free). Absolute levels drift with propagation; the SHAPE is the antenna." style="background:#152238;color:#9fb4d0;border:1px solid #26436b;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:13px;margin-right:10px">🪪 H(f) PRINT</button>
+<button onclick="identifyAnt()" title="Every antenna+cable system has a unique transfer function |H(f)| — its gain-vs-frequency shape. A ~60 s idle-radio sweep measures it and matches it against every antenna this rig has ever met (channel scans take the print automatically, for free). Absolute levels drift with propagation; the SHAPE is the antenna." style="background:#152238;color:#9fb4d0;border:1px solid #26436b;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:13px;margin-right:10px">🪪 ANTENNA FINGERPRINT SCAN</button>
 <button onclick="surf(-1)" title="previous channel (↓ key)" style="background:#152238;color:#9fb4d0;border:1px solid #26436b;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:13px">⏮ CH−</button>
 <button onclick="surf(1)" title="next channel (↑ key)" style="background:#152238;color:#9fb4d0;border:1px solid #26436b;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:13px;margin-right:10px">CH+ ⏭</button>
 <select id="antpick" onchange="fetch('/api/antenna',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({antenna:this.value})})" style="background:#123;color:#cde;border:1px solid #356;padding:2px 6px">
@@ -1911,7 +1911,7 @@ const a=document.getElementById('antpick').value;
 if(!a||a==='auto'){toast('pick the port (Antenna A/B/C) first, then NICKNAME its antenna');return}
 const m=await (await fetch('/api/ports')).json();
 const r=m[a];
-if(!r){toast(a+' has no recognized antenna yet — run a 🪪 H(f) PRINT or a scan first');return}
+if(!r){toast(a+' has no recognized antenna yet — run a 🪪 ANTENNA FINGERPRINT SCAN or a channel scan first');return}
 const nn=prompt('Nickname for '+r.profile+' (currently: '+r.name+') — the callsign stays forever, the nickname is yours:',r.name===r.profile?'':r.name);
 if(!nn)return;
 const resp=await fetch('/api/antenna_id/name',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({profile:r.profile,name:nn})});
@@ -1999,7 +1999,7 @@ else if((ev.verdict==='NEW'||ev.verdict==='ADOPTED'||ev.verdict==='RECOGNIZED')&
    toast(await r.json());}},800);}}
 async function identifyAnt(){
 const a=document.getElementById('antpick').value;
-if(!a||a==='auto'){toast('pick the port (Antenna A/B/C) in the dropdown first, then take its H(f) print');return}
+if(!a||a==='auto'){toast('pick the port (Antenna A/B/C) in the dropdown first, then run the fingerprint scan');return}
 const r=await fetch('/api/identify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({antenna:a})});
 toast(await r.json())}
 async function deepTune(){
@@ -2668,10 +2668,10 @@ class H(BaseHTTPRequestHandler):
             if not ant or ant == "auto":
                 self._send(json.dumps(
                     "pick the port (Antenna A/B/C) first, then take "
-                    "its H(f) print"))
+                    "its fingerprint scan"))
             elif radio_busy():
                 self._send(json.dumps(
-                    "radio is busy (TV/scan/meter) — the H(f) print "
+                    "radio is busy (TV/scan/meter) — the fingerprint scan "
                     "needs the tuner idle for ~60 s; stop TV first or "
                     "just run a SCAN (every scan takes the print for "
                     "free)"))
@@ -2679,7 +2679,7 @@ class H(BaseHTTPRequestHandler):
                 threading.Thread(target=ident_run, args=(ant,),
                                  daemon=True).start()
                 self._send(json.dumps(
-                    "🪪 taking the H(f) print of %s — ~60 s |H(f)| sweep "
+                    "🪪 fingerprint scan of %s — ~60 s |H(f)| sweep "
                     "over the market grid, verdict lands as a toast"
                     % ant))
         elif self.path == "/api/antenna_id/resolve":
