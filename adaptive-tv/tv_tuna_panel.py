@@ -1912,7 +1912,7 @@ if(!a||a==='auto'){toast('pick the port (Antenna A/B/C) first, then NICKNAME its
 const m=await (await fetch('/api/ports')).json();
 const r=m[a];
 if(!r){toast(a+' has no recognized antenna yet — run a 🪪 H(f) PRINT or a scan first');return}
-const nn=prompt('Nickname for '+r.profile+' (currently: '+r.name+')\nThe callsign '+r.profile+' stays forever — the nickname is yours.',r.name===r.profile?'':r.name);
+const nn=prompt('Nickname for '+r.profile+' (currently: '+r.name+') — the callsign stays forever, the nickname is yours:',r.name===r.profile?'':r.name);
 if(!nn)return;
 const resp=await fetch('/api/antenna_id/name',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({profile:r.profile,name:nn})});
 toast(await resp.json());refreshPorts()}
