@@ -798,7 +798,16 @@ def science_data():
                 "now_conf": nowbin.get("conf"),
                 # the live "watch it learn" number: total samples this
                 # channel has ever contributed — ticks up each minute
-                "n_samples": sum(1 for r in rows if r["rf"] == rf_now)}
+                "n_samples": sum(1 for r in rows if r["rf"] == rf_now),
+                # learning progress: 24 per-hour confidence tiers +
+                # an overall 0-100 "how well do I know this channel"
+                "conf24": [c.get(h, {}).get("conf") or "unknown"
+                           for h in range(24)],
+                "learn_pct": round(100 * sum(
+                    {"solid": 1.0, "thin": 0.5, "trace": 0.25,
+                     "borrowed": 0.15}.get(
+                        c.get(h, {}).get("conf") or "", 0.0)
+                    for h in range(24)) / 24)}
         except (OSError, ValueError, KeyError):
             pass
     # turbo + realtime-health telemetry for the science cards
@@ -1916,6 +1925,15 @@ let tks=(tk.spark?'<span style="font-family:monospace;letter-spacing:1px">'+tk.s
 tks+=(tk.best_hour!=null?'best ~'+tk.best_hour+'h · worst ~'+tk.worst_hour+'h ('+tk.swing_db+' dB swing)':'learning this channel\\'s hours');
 if(tk.hint)tks+=' · '+tk.hint;
 tks+=' · <b>'+(tk.n_samples||0)+'</b> samples and counting (+1/min while you watch) · '+(tk.now_owner||'?');
+if(tk.conf24){
+ const cc={solid:'#67d18a',thin:'#e7c96a',trace:'#9a8a4a',borrowed:'#5f7591'};
+ const lp=tk.learn_pct||0;
+ const stage=lp>=90?'🔒 ON LOCK — this channel is fully learned':(lp>=75?'well known':(lp>=40?'getting it down':(lp>=15?'learning this channel':'just met this channel')));
+ let bar='<div style="display:flex;gap:1px;margin:4px 0 2px">';
+ for(let h=0;h<24;h++){const cf=tk.conf24[h];
+  bar+='<div title="'+h+'h: '+cf+'" style="flex:1;height:8px;border-radius:1px;background:'+(cc[cf]||'#1a2436')+(h===tk.hour_now?';outline:1px solid #dce6f2':'')+'"></div>';}
+ bar+='</div><span style="font-size:11px;color:#7f96b3">training: <b style="color:'+(lp>=75?'#67d18a':'#e7c96a')+'">'+lp+'%</b> · '+stage+' · each cell = one hour of the day (green=solid, amber=thin, dark=still unknown; the outlined cell is now)</span>';
+ tks+=bar;}
 sc+=card('🕰 KNOB OF TIME — learned, this hour',tkv,tks)}
 if(SC.turbo){const tb=SC.turbo;
 const tbs=(tb.fail_ema>=4?'⚠ standing down — channel failing beyond rescue ('+tb.fail_ema+'%)':'fail rate '+tb.fail_ema+'% · '+tb.att+' attempted'+(tb.skip>0?' · '+tb.skip+' skipped (stampede gate)':''));
