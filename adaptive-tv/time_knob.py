@@ -79,9 +79,40 @@ def record(row, path=HISTORY):
     return True
 
 
+EPOCHS = HERE / "lab" / "antenna_epochs.json"
+
+
+def antenna_epochs(path=EPOCHS):
+    """{ant_label: iso_ts} — the moment a NEW physical antenna was
+    plugged into that port. Rows older than the epoch belong to the
+    previous antenna and are excluded from the model."""
+    try:
+        return {k: datetime.fromisoformat(v) for k, v in
+                __import__("json").loads(
+                    Path(path).read_text(encoding="utf-8")).items()}
+    except (OSError, ValueError):
+        return {}
+
+
+def mark_new_antenna(ant, path=EPOCHS):
+    """User plugged a different physical antenna into this port: start
+    a fresh epoch. Old rows stay on disk (nothing destroyed) but stop
+    counting toward this label's model."""
+    import json as _json
+    try:
+        cur = _json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cur = {}
+    cur[ant] = datetime.now().replace(microsecond=0).isoformat()
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(_json.dumps(cur, indent=1), encoding="utf-8")
+    return cur[ant]
+
+
 def load(path=HISTORY):
     """History file -> list of row dicts (ts becomes datetime). Missing file
-    -> [] (fresh install: everything is honestly unknown)."""
+    -> [] (fresh install: everything is honestly unknown). Rows from
+    before an antenna's epoch (see mark_new_antenna) are excluded."""
     if not Path(path).exists():
         return []
     out = []
@@ -97,6 +128,10 @@ def load(path=HISTORY):
                     date_known=r.get("date_known", "1") == "1"))
             except (ValueError, KeyError):
                 continue  # one bad line never poisons the model
+    ep = antenna_epochs()
+    if ep:
+        out = [r for r in out
+               if r["ant"] not in ep or r["ts"] >= ep[r["ant"]]]
     return out
 
 # --------------------------------------------------------------------------

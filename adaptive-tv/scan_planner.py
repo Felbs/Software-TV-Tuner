@@ -131,6 +131,17 @@ def load_history(path=HISTORY):
                              mer=float(r["mer"])))
         except (ValueError, KeyError):
             continue
+    # respect antenna epochs (new physical antenna on a port = fresh
+    # slate for that label) — same rule as time_knob.load
+    try:
+        import json as _json
+        ep = {k: datetime.fromisoformat(v) for k, v in _json.loads(
+            (HERE / "lab" / "antenna_epochs.json").read_text(
+                encoding="utf-8")).items()}
+        rows = [r for r in rows
+                if r["ant"] not in ep or r["ts"] >= ep[r["ant"]]]
+    except (OSError, ValueError):
+        pass
     return rows
 
 
