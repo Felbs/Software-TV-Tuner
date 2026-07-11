@@ -41,7 +41,7 @@ Latest additions (each earned its place through a live A/B):
   per-channel, per-antenna 24-hour quality curves built from the
   decoder's own telemetry (one row per watched minute plus one per
   scan dwell), recency-weighted-median estimator with confidence
-  tiers. Full math: [`docs/knob_of_time.md`](docs/knob_of_time.md).
+  tiers. The math, in three lines: the equalizer's field-sync error is a free MER meter, `MER = 20·log10(5 / fs_err_rms)` (~41 Hz); each hour-bin's estimate is the recency-weighted median with `w = 0.5^(age / 14 days)`; a bin is trusted only with n ≥ 8 samples over ≥ 2 distinct days (single-day bins lie). Full derivations: [`docs/knob_of_time.md`](docs/knob_of_time.md).
   Optional overnight sweep-trainer, plus a "frontier patrol" that
   re-tries any (channel, antenna) pair whose estimate sits within
   ~2 dB of the decode cliff — which is how two written-off antennas
@@ -278,6 +278,51 @@ often the PC itself; move the antenna away from electronics),
 never field-syncs is not ATSC — don't chase it). Hot amplified/LNA
 chains that overload the whole normal gain range are rescued
 automatically by extending the search deep into attenuation.
+
+## Antenna fingerprinting — the 🪪 scan
+
+Every antenna+cable system is a filter with transfer function H(f).
+What the receiver measures across the market's channel grid is
+
+    R_dB(f) = |H_ant(f) · H_cable(f) · H_port(f)| · S(f) · G(t)
+
+where S(f) is the broadcast spectrum and G(t) is diurnal propagation
+drift (measured ±3–7 dB over a day). Absolute levels therefore belong
+to the *hour* — but the SHAPE belongs to the hardware. So the
+fingerprint stores only self-referenced shape:
+
+    r(f) = R_dB(f) − floor_dB        (level above the sweep's own noise floor)
+
+and two sweeps are compared by the median absolute deviation of their
+difference — a statistic blind to any constant offset, which is
+exactly what an inline amplifier adds:
+
+    spread = MAD( r_a(f) − r_b(f) )          [dB]
+    s_level = 1 / (1 + (spread / 2.0 dB)²)   (0.5 exactly at the knee)
+
+with parallel components for pilot-SNR shape (knee 4 dB) and a
+continuous "carrierness" overlap, blended into one score s ∈ [0,1].
+Calibrated on real sweeps: the same antenna re-scanned scores ≈ 0.9;
+different antennas ≤ 0.5. Verdict ladder:
+
+| score | verdict |
+|---|---|
+| ≥ 0.75 vs a known print | **RECOGNIZED** (or **SWAP DETECTED** if it lived on another port — its learned history follows it) |
+| runner-up within 0.07 of the winner | **ASK** — near-twin antennas exist; never auto-decide |
+| 0.55–0.75 vs the port's resident | **CHANGED** — same family, drifted (new cable? re-aimed?) — asks |
+| beats everything incl. the port's *vacant print* | **NEW** — auto-enrolled, fresh learning epoch |
+| matches the port's vacant print best | **EMPTY SOCKET** — a disconnected port hears leakage, and that face is enrollable too |
+
+Identity is assigned from the math itself: the enrollment shape,
+quantized to 2 dB, is hashed into a permanent callsign
+(`HF-` + base32(SHA-1)₅) — drift updates the signature, never the
+identity. Nicknames are the human's, optional, changeable (✏️ button).
+Every full channel scan takes the print for free; the 🪪 button does a
+dedicated ~60 s Welch sweep. Field law worth knowing: **amplified
+antennas port-hop recognizably** (the amp's output stage buffers the
+face — measured 92–97% across sockets), while **raw passive antennas
+interact with each port's input network** and may need to be met once
+per port (per-port signature passports are on the roadmap).
 
 ## What SDRs work
 
