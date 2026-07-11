@@ -1794,10 +1794,10 @@ canvas{width:100%;image-rendering:pixelated;display:block;border-radius:4px}
 <button onclick="surf(-1)" title="previous channel (↓ key)" style="background:#152238;color:#9fb4d0;border:1px solid #26436b;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:13px">⏮ CH−</button>
 <button onclick="surf(1)" title="next channel (↑ key)" style="background:#152238;color:#9fb4d0;border:1px solid #26436b;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:13px;margin-right:10px">CH+ ⏭</button>
 <select id="antpick" onchange="fetch('/api/antenna',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({antenna:this.value})})" style="background:#123;color:#cde;border:1px solid #356;padding:2px 6px">
-<option value="auto">auto (belief map)</option>
-<option value="Antenna B">Philips (B)</option>
-<option value="Antenna A">rabbit ears (A)</option>
-<option value="Antenna C">discone (C)</option>
+<option value="auto">auto (learned)</option>
+<option value="Antenna A">Antenna A</option>
+<option value="Antenna B">Antenna B</option>
+<option value="Antenna C">Antenna C</option>
 </select>
 <span style="color:#8aa">— you pick the antenna, the code decodes whatever it's given</span></div>
 <div id="grid">loading guide…</div></div>
@@ -1894,6 +1894,17 @@ toast('tuning '+virt+' '+name+' — ~30s to picture'
  +(rf<14?' (VHF — DAB-notch fix 2026-07-04)':''));
 await fetch('/api/tune',{method:'POST',body:JSON.stringify({rf,prog,virt,name,antenna:antSel})})}
 async function stopTv(){await fetch('/api/stop',{method:'POST'});toast('TV stopped — tuner idle, waterfall resumes')}
+// picker labels come from the H(f) PRINT ledger, never hardcoded
+// names: the port is a socket; the RECOGNIZED RESIDENT is the identity
+async function refreshPorts(){try{
+ const m=await (await fetch('/api/ports')).json();
+ const ap=document.getElementById('antpick');
+ for(const o of ap.options){
+  if(!o.value.startsWith('Antenna'))continue;
+  const r=m[o.value];
+  o.textContent=o.value+(r?' — '+r.name+' 🪪':' — (no antenna recognized)');
+ }}catch(e){}}
+refreshPorts();setInterval(refreshPorts,60000);
 async function newAnt(){
 const a=document.getElementById('antpick').value;
 if(!a||a==='auto'){toast('pick the port (Antenna A/B/C) in the dropdown first, then press NEW ANTENNA');return}
@@ -2446,6 +2457,24 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/":
             self._send(PAGE, "text/html; charset=utf-8")
+        elif self.path == "/api/ports":
+            # port -> recognized resident from the H(f) PRINT ledger's
+            # open residencies. The picker shows fingerprint identity,
+            # never hardcoded nicknames — we don't know what antennas
+            # our users will plug in (universality law).
+            out = {}
+            try:
+                led = aid.load_profiles()
+                for pid, p in (led.get("profiles") or {}).items():
+                    for ph in (p.get("port_history") or []):
+                        if ph.get("end") is None and ph.get("confirmed"):
+                            out[ph["port"]] = {
+                                "profile": pid,
+                                "name": p.get("name") or pid,
+                                "match_count": p.get("match_count", 0)}
+            except Exception:
+                pass
+            self._send(json.dumps(out))
         elif self.path == "/api/grid":
             self._send(json.dumps(grid_json()))
         elif self.path == "/api/status":
