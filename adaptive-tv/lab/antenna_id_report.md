@@ -1,7 +1,14 @@
-# Antenna auto-identification — design, real-data validation, wiring
+# 🪪 H(f) PRINT — antenna auto-identification: design, real-data validation, wiring
 
 2026-07-11 · module: `antenna_id.py` · ledger: `lab/antenna_profiles.json`
-· panel: 🪪 IDENTIFY button + scan-byproduct harvest in `tv_tuna_panel.py`
+· panel: 🪪 H(f) PRINT button + scan-byproduct harvest in `tv_tuna_panel.py`
+
+**The name (user asked for math):** every antenna+cable system is a
+filter with a transfer function **H(f)**; the sweep estimates its
+magnitude shape |H(f)| across the market's frequencies (level above own
+noise floor, pilot margins, carrier strengths). Absolute level drifts
+with propagation; the SHAPE is the antenna — so the print IS |H(f)|,
+and the UI calls it that.
 
 **The vision (user's):** plug in any antenna and go. The rig fingerprints
 whatever is on the port, recognizes antennas it has met before, notices
@@ -163,6 +170,15 @@ data can never be overwritten again.
   `C:\Users\user\radioconda\Scripts;C:\Program Files\SDRplay\API\x64`.
   The panel now runs with that PATH; waterfall honestly reports
   "radio busy — waiting" until the SDR returns.
+- **After the replug (user: "shed antenna back on"), the live loop
+  CLOSED:** 🪪 H(f) PRINT on Antenna A →
+  **"recognized shed directional on Antenna A (90 % match)"**
+  (score 0.897 — level spread 0.30 dB, pilot spread 1.2 dB, s_carrier
+  0.82 over 31 shared frequencies). Note the cross-instrument win: the
+  profile was enrolled from the scanner's 0.1 s phase-1 sniffs, and the
+  live print used the standalone 1.5 s Welch-averaged sweep — the
+  |H(f)| shape survived a different dwell, different code path, and a
+  physical unplug/replug of the radio.
 
 ## 5. Future (deliberately not built today)
 

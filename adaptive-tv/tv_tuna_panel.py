@@ -165,15 +165,15 @@ def ident_run(port):
         # sweep started too early sees Device::make() no match)
         for _ in range(15):
             with WF_LOCK:
-                parked = "identify in progress" in (WF["status"] or "")
+                parked = "H(f) print in progress" in (WF["status"] or "")
             if parked:
                 break
             time.sleep(1)
         time.sleep(2)                    # let the driver finish closing
         last_err = None
         for attempt in range(5):
-            IDENT["line"] = ("sweeping the market grid on %s (~60 s)…"
-                             % port)
+            IDENT["line"] = ("measuring |H(f)| across the market grid "
+                             "on %s (~60 s)…" % port)
             try:
                 # env=None -> antenna_id builds env_with_sdrplay() (the
                 # SDRplay API DLL dir must be on the child's PATH)
@@ -342,7 +342,7 @@ def sweeper():
             with WF_LOCK:
                 WF["status"] = ("channel scan in progress — sweep paused"
                                 if SCAN["running"] else
-                                ("🪪 antenna identify in progress — sweep paused"
+                                ("🪪 H(f) print in progress — sweep paused"
                                  if IDENT["on"] else
                                  ("📏 flatness aiming in progress — sweep paused"
                                   if FLAT["on"] else
@@ -1790,7 +1790,7 @@ canvas{width:100%;image-rendering:pixelated;display:block;border-radius:4px}
 <div id="pageG">
 <div style="margin:4px 0 8px;font-size:12px">📡 antenna:
 <button onclick="newAnt()" title="Physically swapped the antenna on the selected port? Press this so the model restarts that port's education (old data archived, never deleted)." style="background:#152238;color:#9fb4d0;border:1px solid #26436b;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:13px;margin-right:6px">🔌 NEW ANTENNA</button>
-<button onclick="identifyAnt()" title="Fingerprint whatever is plugged into the selected port (~60 s idle-radio sweep) and match it against every antenna this rig has ever met. Scans do this automatically for free — this button is for an on-demand check." style="background:#152238;color:#9fb4d0;border:1px solid #26436b;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:13px;margin-right:10px">🪪 IDENTIFY</button>
+<button onclick="identifyAnt()" title="Every antenna+cable system has a unique transfer function |H(f)| — its gain-vs-frequency shape. A ~60 s idle-radio sweep measures it and matches it against every antenna this rig has ever met (channel scans take the print automatically, for free). Absolute levels drift with propagation; the SHAPE is the antenna." style="background:#152238;color:#9fb4d0;border:1px solid #26436b;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:13px;margin-right:10px">🪪 H(f) PRINT</button>
 <button onclick="surf(-1)" title="previous channel (↓ key)" style="background:#152238;color:#9fb4d0;border:1px solid #26436b;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:13px">⏮ CH−</button>
 <button onclick="surf(1)" title="next channel (↑ key)" style="background:#152238;color:#9fb4d0;border:1px solid #26436b;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:13px;margin-right:10px">CH+ ⏭</button>
 <select id="antpick" onchange="fetch('/api/antenna',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({antenna:this.value})})" style="background:#123;color:#cde;border:1px solid #356;padding:2px 6px">
@@ -1977,7 +1977,7 @@ else if((ev.verdict==='NEW'||ev.verdict==='ADOPTED'||ev.verdict==='RECOGNIZED')&
    toast(await r.json());}},800);}}
 async function identifyAnt(){
 const a=document.getElementById('antpick').value;
-if(!a||a==='auto'){toast('pick the port (Antenna A/B/C) in the dropdown first, then IDENTIFY');return}
+if(!a||a==='auto'){toast('pick the port (Antenna A/B/C) in the dropdown first, then take its H(f) print');return}
 const r=await fetch('/api/identify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({antenna:a})});
 toast(await r.json())}
 async function deepTune(){
@@ -2627,18 +2627,21 @@ class H(BaseHTTPRequestHandler):
             ant = req.get("antenna")
             if not ant or ant == "auto":
                 self._send(json.dumps(
-                    "pick the port (Antenna A/B/C) first, then IDENTIFY"))
+                    "pick the port (Antenna A/B/C) first, then take "
+                    "its H(f) print"))
             elif radio_busy():
                 self._send(json.dumps(
-                    "radio is busy (TV/scan/meter) — identify needs the "
-                    "tuner idle for ~60 s; stop TV first or just run a "
-                    "SCAN (every scan identifies the antenna for free)"))
+                    "radio is busy (TV/scan/meter) — the H(f) print "
+                    "needs the tuner idle for ~60 s; stop TV first or "
+                    "just run a SCAN (every scan takes the print for "
+                    "free)"))
             else:
                 threading.Thread(target=ident_run, args=(ant,),
                                  daemon=True).start()
                 self._send(json.dumps(
-                    "🪪 identifying the antenna on %s — ~60 s sweep over "
-                    "the market grid, verdict lands as a toast" % ant))
+                    "🪪 taking the H(f) print of %s — ~60 s |H(f)| sweep "
+                    "over the market grid, verdict lands as a toast"
+                    % ant))
         elif self.path == "/api/antenna_id/resolve":
             # answer a CHANGED question: same antenna (update) or a
             # different one (fork -> fresh profile + fresh epoch)
