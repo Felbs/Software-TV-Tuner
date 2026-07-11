@@ -67,6 +67,7 @@ SCAN_JSON = Path(os.path.expanduser("~")) / ".tv_tuner" / "scan.json"
 # see lab/antenna_id_report.md for the full matrix)
 T_RECOGNIZED = 0.75   # >= : same antenna
 T_CHANGED = 0.55      # >= : same family, drifted (cable? aim?) -> ASK
+T_VACANT = 0.70       # >= vs the port's enrolled vacant print: empty socket
 MIN_COMMON = 8        # min shared frequencies for a meaningful score
 STRONG_PILOT_DB = 30.0  # the scanner's own strict carrier gate
 EMA = 0.25            # how fast a recognized profile's reference adapts
@@ -296,6 +297,17 @@ def _sight(prof, ts, port, score):
     del prof["sightings"][:-200]        # cap, keep the recent story
 
 
+def mark_vacant(port, sig, store=None, save=True, path=PROFILES):
+    """Enroll (or refresh) a port's EMPTY-SOCKET print, so a sweep of a
+    disconnected port says 'nothing plugged in' instead of enrolling
+    ambient leakage as a ghost antenna."""
+    store = store if store is not None else load_profiles(path)
+    store.setdefault("vacant", {})[port] = sig
+    if save:
+        save_profiles(store, path)
+    return store
+
+
 def observe(sig, port, store=None, ts=None, save=True, path=PROFILES):
     """Match a fresh signature against the ledger and update it.
     Returns an event dict:
@@ -310,6 +322,21 @@ def observe(sig, port, store=None, ts=None, save=True, path=PROFILES):
         return {"verdict": "UNUSABLE", "needs_epoch": False,
                 "message": "sweep unusable for fingerprinting "
                            "(flat spectrum — radio wedged?)"}
+    # 0. VACANT check first (2026-07-11, user's insight): an empty
+    # socket has its own radio face — ambient leakage shaped by the
+    # disconnected front-end. Each port can enroll a "vacant print";
+    # matching it means "nothing is plugged in here", which must never
+    # be enrolled as a new antenna (the ant-0002 ghost lesson).
+    vac = (store.get("vacant") or {}).get(port)
+    if vac is not None:
+        vs, _ = similarity(vac, sig)
+        if vs >= T_VACANT:
+            return {"verdict": "VACANT", "needs_epoch": False,
+                    "score": vs,
+                    "message": "%s reads as an EMPTY SOCKET "
+                               "(%.0f%% match to its vacant print) — "
+                               "nothing appears to be plugged in"
+                               % (port, 100 * vs)}
     cur_pid = store["port_current"].get(port)
     scores = {}
     details = {}
