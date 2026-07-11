@@ -20,6 +20,7 @@ sys.path.insert(0, str(TOOLS)); sys.path.insert(0, str(HERE))
 from stvt_epg import load_epg, SCAN_PATH
 from tv_lab import ts_metrics
 import time_knob as tkn   # learned hour-curves (2026-07-10, cube fossil's heir)
+import deep_tune as dtn   # DEEP TUNE channel doctor (2026-07-10 late)
 
 PY = r"C:\Users\user\radioconda\python.exe"
 LIVE = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live\live.ts")
@@ -529,12 +530,38 @@ def flat_start(rf):
 # ── tuning / recording actions ─────────────────────────────────────
 def base_env(rf):
     rfsel, ifgr = GAINS.get(rf, DEFAULT_GAIN)
+    # DEEP TUNE recipe consult (2026-07-10 late): a measured recipe
+    # outranks the static GAINS row; stale recipes still apply but the
+    # UI says how old they are. The user's antenna pick always wins.
+    recipe = dtn.load_recipe(rf)
+    note = ""
+    if recipe:
+        try:
+            rfsel = int(recipe.get("rfgain_sel", rfsel))
+            ifgr = int(recipe.get("ifgr", ifgr))
+        except (TypeError, ValueError):
+            pass
+        age = dtn.recipe_age_days(recipe)
+        note = (f"deep-tune recipe: {recipe.get('antenna', '?')} rfgain "
+                f"{rfsel}/IFGR {ifgr}"
+                + (f" — recipe from {age:.0f} days ago"
+                   if age > dtn.STALE_DAYS else ""))
     env = os.environ.copy()
     env["PATH"] = (r"C:\Program Files\SDRplay\API\x64;C:\ffmpeg\bin;"
                    + env.get("PATH", ""))
     # user override first (the user picks the antenna; the code's job
-    # is to decode whatever it's given) — belief-map auto as fallback
-    _ant = STATE.get("ant_override") or antenna_for(rf)
+    # is to decode whatever it's given) — recipe antenna next, then
+    # belief-map auto as the fallback
+    _ant = (STATE.get("ant_override") or (recipe or {}).get("antenna")
+            or antenna_for(rf))
+    if recipe:
+        if (STATE.get("ant_override")
+                and STATE["ant_override"] != recipe.get("antenna")):
+            note += (f" (your pick {STATE['ant_override']} wins over "
+                     f"recipe {recipe.get('antenna')})")
+        print(f"[recipe] RF{rf} consulted channel_recipes.json -> "
+              f"antenna={_ant} rfgain_sel={rfsel} ifgr={ifgr}", flush=True)
+    STATE["recipe_note"] = note
     env.update({"STVT_ANTENNA": _ant, "STVT_IFGR": str(ifgr),
                 "STVT_RFGAIN_SEL": str(rfsel),
                 # MEMORY-TUNE (2026-07-10): tv_watch keys its PID/program-
@@ -1247,7 +1274,102 @@ def stop_tv():
         kill_tv()
         STATE.update({"rf": None, "prog": None, "virtual": None,
                       "name": None, "tuning": False, "env": {},
-                      "stage": "", "stage_pct": 0})
+                      "stage": "", "stage_pct": 0, "recipe_note": ""})
+
+# ── 🔬 DEEP TUNE: the channel doctor (2026-07-10 late) ─────────────
+# Baseline -> antenna race -> gain grid -> disease verdict -> recipe.
+# Engine lives in deep_tune.py; this wrapper wires the panel's env,
+# stage line, cancel (any user tune bumps GEN and aborts us cleanly)
+# and the quality history (source="deeptune").
+DT = {"on": False, "status": "", "pct": 0, "verdict": "", "vt": 0.0}
+
+
+def deeptune_start():
+    if DT["on"]:
+        return "deep tune already running"
+    if STATE.get("rf") is None or STATE.get("tuning"):
+        return "tune a channel first (and let it settle), then DEEP TUNE"
+    rf, prog = STATE["rf"], STATE["prog"]
+    virt, name = STATE.get("virtual"), STATE.get("name") or ""
+    e = STATE.get("env") or {}
+    cur_ant = (e.get("ANTENNA") or STATE.get("ant_override")
+               or antenna_for(rf))
+    g = GAINS.get(rf, DEFAULT_GAIN)
+    try:
+        cur_gains = (int(e.get("RFGAIN_SEL", g[0])), int(e.get("IFGR", g[1])))
+    except (TypeError, ValueError):
+        cur_gains = g
+    ants = sorted(set(ANT_PORT.values()))     # the picker's antenna list
+
+    def run():
+        with LOCK:
+            GEN[0] += 1
+            my_gen = GEN[0]
+            METER["rf"] = None
+        DT.update({"on": True, "status": "starting", "pct": 0, "verdict": ""})
+        STATE.update({"tuning": True})        # sweeper/trainer stand down
+        kill_tv()                             # doctor takes the whole tuner
+        time.sleep(2)
+
+        def status(pct, msg):
+            DT.update({"status": msg, "pct": pct})
+            set_stage(pct, "DEEP TUNE (click any station to abort) — " + msg)
+
+        def env_b(ant, rsel, ifgr):
+            env = base_env(rf)
+            env.update({"STVT_ANTENNA": ant, "STVT_RFGAIN_SEL": str(rsel),
+                        "STVT_IFGR": str(ifgr), "STVT_IQ_RING": "0",
+                        "STVT_PERSIST_RETUNE": "0"})
+            return env
+
+        def rec_row(ant, met):
+            try:
+                tkn.record({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                            "rf": rf, "ant": ant, "mer": met.get("mer_med"),
+                            "loss_pct": met.get("loss_pct"),
+                            "source": "deeptune"})
+            except (OSError, ValueError):
+                pass
+
+        def hours():
+            try:
+                rows = tkn.load()
+                h = tkn.hint(rf, rows)
+                if h:
+                    return h + " (Knob of Time)"
+                bh = tkn.best_hours(rf, rows)
+                if bh and bh[0]:
+                    return (f"usually best ~{bh[0][0]}h, worst ~{bh[1][0]}h "
+                            f"({bh[2]} dB swing) (Knob of Time)")
+            except Exception:
+                pass
+            return None
+
+        eng = dtn.DeepTune(rf, ants, cur_ant, cur_gains, env_b, CHAIN_LOG,
+                           status=status,
+                           cancelled=lambda: GEN[0] != my_gen,
+                           record=rec_row, hour_hint=hours)
+        try:
+            res = eng.run()
+        except Exception as exc:
+            res = {"status": "error", "verdict": f"deep tune failed: {exc}"}
+        if res.get("status") == "cancelled" or GEN[0] != my_gen:
+            # the user's click owns the tuner now — vanish quietly
+            DT.update({"on": False, "status": "cancelled — your tune wins",
+                       "pct": 0})
+            return
+        DT.update({"on": False, "verdict": res.get("verdict", ""),
+                   "vt": time.time(), "status": res.get("status", "")})
+        set_stage(100, "")
+        STATE.update({"tuning": False})
+        if res.get("status") == "done":
+            # come back to the channel with the fresh recipe applied
+            # (base_env consults channel_recipes.json on this tune)
+            tune(rf, prog, virt, name, force_respawn=True)
+
+    threading.Thread(target=run, daemon=True).start()
+    return "deep tune started — baseline, antenna race, gain grid (~5-12 min)"
+
 
 def record(virtual, title):
     p = subprocess.run([PY, str(TOOLS / "stvt_schedule.py"), "add-show",
@@ -1538,11 +1660,19 @@ else{
    :` · <b style="color:#e77">📉 heavy glitching — ${lp}% packets lost (this channel breathes; try it again this evening)</b>`);
   h=`watching <b>${s.virtual} ${s.name||''}</b> (RF${s.rf} p${s.prog})`+
   ` · <b>${s.hdrs_s??'—'}</b> hdrs/s · <b>${s.gaps_min??'—'}</b> gaps/min · ${s.real_pct??'—'}% real`+lchip+
-  ` <button class="stop" onclick="stopTv()">stop TV</button>`;
+  ` <button class="stop" onclick="stopTv()">stop TV</button>`+
+  ` <button class="tune" style="background:#3a2a4a;border:1px solid #5a4a7a" onclick="deepTune()" title="The channel doctor: baseline, antenna race, gain grid, disease verdict — writes a recipe future tunes reuse. ~5-12 min; click any station to abort.">🔬 DEEP TUNE</button>`;
   if(s.hdrs_s===0&&(s.real_pct||0)<5) h+=' <span style="color:#e7c96a">⚠ locked but nothing decoding — signal is under the cliff, aim with 🎯</span>';}
  else if(s.stage&&s.stage.startsWith('RADIO FAILED')) h='🔴 <span class="failbanner">'+s.stage+'</span>';
  else h='tuner idle — waterfall live on NERD tab · click a station to tune · 📡 SCAN refreshes the guide';}
+if(s.deeptune&&!s.deeptune.on&&s.deeptune.verdict)
+ h+='<div style="color:#8fe0b0;font-size:12px;margin-top:5px">🔬 <b>DEEP TUNE verdict:</b> '+s.deeptune.verdict+'</div>';
+if(s.recipe_note)
+ h+='<div style="color:#7f96b3;font-size:11px;margin-top:3px">📋 '+s.recipe_note+'</div>';
 document.getElementById('status').innerHTML=h;}catch(e){}}
+async function deepTune(){
+toast('🔬 DEEP TUNE — the channel doctor takes the tuner: baseline, antenna race, gain grid. Verdict + recipe when done. Click any station to abort.');
+const r=await fetch('/api/deeptune',{method:'POST',body:'{}'});toast(await r.json())}
 async function loadGrid(){const g=await (await fetch('/api/grid')).json();
 let h='<table><tr><th>station</th>';g.slots.forEach(s=>h+='<th>'+s+'</th>');h+='<th></th></tr>';
 let lastRf=null;
@@ -1982,6 +2112,12 @@ class H(BaseHTTPRequestHandler):
                           "pct": SCAN["pct"],
                           "elapsed": int(time.time() - SCAN["t0"])
                                      if SCAN["t0"] else 0}
+            st["deeptune"] = {"on": DT["on"], "status": DT["status"],
+                              "pct": DT["pct"],
+                              "verdict": DT["verdict"]
+                              if not DT["on"]
+                              and time.time() - DT["vt"] < 1800 else ""}
+            st["recipe_note"] = STATE.get("recipe_note") or ""
             if st["tuned"]:
                 st.update(live_math())
             self._send(json.dumps(st))
@@ -2110,6 +2246,8 @@ class H(BaseHTTPRequestHandler):
                 return
             out = record(virt, title)
             self._send(out or "scheduled", "text/plain; charset=utf-8")
+        elif self.path == "/api/deeptune":
+            self._send(json.dumps(deeptune_start()))
         elif self.path == "/api/e7":
             try:
                 secs = int(req.get("secs", 30))
