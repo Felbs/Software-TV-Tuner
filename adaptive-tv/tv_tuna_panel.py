@@ -1790,6 +1790,7 @@ canvas{width:100%;image-rendering:pixelated;display:block;border-radius:4px}
 <div id="pageG">
 <div style="margin:4px 0 8px;font-size:12px">📡 antenna:
 <button onclick="newAnt()" title="Physically swapped the antenna on the selected port? Press this so the model restarts that port's education (old data archived, never deleted)." style="background:#152238;color:#9fb4d0;border:1px solid #26436b;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:13px;margin-right:6px">🔌 NEW ANTENNA</button>
+<button onclick="nickAnt()" title="Give the antenna on the selected port a nickname. Its HF- callsign never changes (that's the fingerprint's identity) — the nickname is yours, changeable anytime." style="background:#152238;color:#9fb4d0;border:1px solid #26436b;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:13px;margin-right:6px">✏️ NICKNAME</button>
 <button onclick="identifyAnt()" title="Every antenna+cable system has a unique transfer function |H(f)| — its gain-vs-frequency shape. A ~60 s idle-radio sweep measures it and matches it against every antenna this rig has ever met (channel scans take the print automatically, for free). Absolute levels drift with propagation; the SHAPE is the antenna." style="background:#152238;color:#9fb4d0;border:1px solid #26436b;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:13px;margin-right:10px">🪪 H(f) PRINT</button>
 <button onclick="surf(-1)" title="previous channel (↓ key)" style="background:#152238;color:#9fb4d0;border:1px solid #26436b;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:13px">⏮ CH−</button>
 <button onclick="surf(1)" title="next channel (↑ key)" style="background:#152238;color:#9fb4d0;border:1px solid #26436b;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:13px;margin-right:10px">CH+ ⏭</button>
@@ -1905,6 +1906,16 @@ async function refreshPorts(){try{
   o.textContent=o.value+(r?' — '+r.name+' 🪪':' — (no antenna recognized)');
  }}catch(e){}}
 refreshPorts();setInterval(refreshPorts,60000);
+async function nickAnt(){
+const a=document.getElementById('antpick').value;
+if(!a||a==='auto'){toast('pick the port (Antenna A/B/C) first, then NICKNAME its antenna');return}
+const m=await (await fetch('/api/ports')).json();
+const r=m[a];
+if(!r){toast(a+' has no recognized antenna yet — run a 🪪 H(f) PRINT or a scan first');return}
+const nn=prompt('Nickname for '+r.profile+' (currently: '+r.name+')\nThe callsign '+r.profile+' stays forever — the nickname is yours.',r.name===r.profile?'':r.name);
+if(!nn)return;
+const resp=await fetch('/api/antenna_id/name',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({profile:r.profile,name:nn})});
+toast(await resp.json());refreshPorts()}
 async function newAnt(){
 const a=document.getElementById('antpick').value;
 if(!a||a==='auto'){toast('pick the port (Antenna A/B/C) in the dropdown first, then press NEW ANTENNA');return}
