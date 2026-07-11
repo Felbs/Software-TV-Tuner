@@ -238,6 +238,26 @@ ports = Total vision (A) / Phillips (B) / discone (C), HF-YSHDI shed
 directional benched; swap-test + nickname-persistence experiment
 still pending user's cable hands; repo through 6c34f42.
 
+**CHECKPOINT #3, 7/11 ~17:00 — REVERSE SWAP 4/4, SDR HANDED TO WSL:**
+fingerprints tracked the user's reverse swap AUTONOMOUSLY: Total
+vision recognized+named on A; "SWAP DETECTED: 'Phillips' (97%) moved
+A → B" (new plain MOVED wording, 6861d93). PORT-PHYSICS LAW learned:
+the print = antenna × cable × port electronics — AMPLIFIED antennas
+port-hop recognizably (amp buffers the face; shed 92%, Phillips 97%
+native), PASSIVE mismatched antennas bend per socket (Total Vision
+read as stranger cross-port → enrolled true face HF-FGSQN; old
+HF-HQFFH relabeled "unverified print"). ROADMAP: per-port faces
+("antennas with passports, stamped per socket") — one identity, one
+signature per port lived on. INTEGRITY protocol: ledger bookkeeping
+may encode user-stated truth (names/ports) but signatures are NEVER
+authored — recognition must stay falsifiable; blind-trial offered as
+gold standard. Radio-flat episode: fingerprinter correctly REFUSED
+wedged-radio noise ("sweep unusable"); usbipd shows RSPdx bus 3-1
+Shared for WSL. SHUTDOWN: all Windows radio processes stopped +
+SDRplayAPIService stopped so WSL can attach (usbipd attach --wsl
+--busid 3-1); on return: Start-Service SDRplayAPIService + panel
+relaunch recipe + expect post-handoff dud.
+
 NEXT QUEUE: feature governor (computer-agnostic dial-in via OsO
 headroom), arsenal-piece bisect, README 10s-tuning section,
 knob-audit fix pass (DVR path = different decoder), label unification
