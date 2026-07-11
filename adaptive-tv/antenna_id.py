@@ -271,11 +271,51 @@ def save_profiles(store, path=PROFILES):
         raise
 
 
+def print_id(sig):
+    """A stable designation derived from the fingerprint MATH itself
+    (2026-07-11, user's naming scheme): hash the enrollment signature's
+    quantized shape -> 'HF-XXXXX'. Assigned once at enrollment, stable
+    forever (EMA drift never changes an identity, only the signature)."""
+    import hashlib
+    import base64
+    q = ",".join(f"{f:.0f}:{round(r / 2) * 2:+d}"
+                 for f, r in zip(sig.get("freqs_mhz", []),
+                                 sig.get("resp", [])))
+    h = hashlib.sha1(q.encode()).digest()
+    return "HF-" + base64.b32encode(h)[:5].decode().upper()
+
+
+def auto_descriptor(sig):
+    """What the math can say about an antenna without being told:
+    band tilt (UHF vs VHF relative response) and where it peaks."""
+    fs = sig.get("freqs_mhz", [])
+    rs = sig.get("resp", [])
+    if not fs or not rs:
+        return ""
+    vhf = [r for f, r in zip(fs, rs) if f < 300]
+    uhf = [r for f, r in zip(fs, rs) if f >= 300]
+    parts = []
+    if vhf and uhf:
+        tilt = (sum(uhf) / len(uhf)) - (sum(vhf) / len(vhf))
+        if tilt >= 3:
+            parts.append(f"UHF-tilted +{tilt:.0f} dB")
+        elif tilt <= -3:
+            parts.append(f"VHF-tilted {-tilt:.0f} dB")
+        else:
+            parts.append("broadband")
+    peak_f = fs[rs.index(max(rs))]
+    parts.append(f"peak {peak_f:.0f} MHz")
+    return " · ".join(parts)
+
+
 def _new_profile(store, sig, port, ts):
-    pid = "ant-%04d" % store["next_id"]
+    pid = print_id(sig)
+    if pid in store["profiles"]:            # hash collision: disambiguate
+        pid = "%s-%d" % (pid, store["next_id"])
     store["next_id"] += 1
     store["profiles"][pid] = {
         "name": None, "signature": sig,
+        "descriptor": auto_descriptor(sig),
         "first_seen": ts, "last_seen": ts, "match_count": 1,
         "port_history": [{"port": port, "start": ts, "end": None,
                           "confirmed": True}],
