@@ -21,6 +21,7 @@ from stvt_epg import load_epg, SCAN_PATH
 from tv_lab import ts_metrics
 import time_knob as tkn   # learned hour-curves (2026-07-10, cube fossil's heir)
 import deep_tune as dtn   # DEEP TUNE channel doctor (2026-07-10 late)
+import antenna_id as aid  # antenna auto-identification (2026-07-11)
 
 PY = r"C:\Users\user\radioconda\python.exe"
 LIVE = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live\live.ts")
@@ -113,6 +114,89 @@ try:
 except OSError:
     STATE["ant_override"] = None
 
+# ── antenna auto-identification (2026-07-11) ───────────────────────
+# Every scan's phase-1 sweep is a free antenna fingerprint; antenna_id.py
+# matches it against the profile ledger. ANTID carries the latest event
+# to the UI (seq bumps -> the JS toasts it once). IDENT drives the
+# on-demand 🪪 IDENTIFY sweep (~60 s, radio must be idle).
+ANTID = {"seq": 0, "event": None}
+IDENT = {"on": False, "line": ""}
+
+
+def antid_event(ev):
+    if ev and ev.get("verdict") not in (None, "UNUSABLE", "NOOP"):
+        ANTID["event"] = ev
+        ANTID["seq"] += 1
+    return ev
+
+
+def fresh_epoch(ant):
+    """The 🔌 NEW ANTENNA machinery: fresh learning epoch for a port,
+    recipes naming it dropped, knob cache flushed. Shared by the manual
+    button and antenna_id's automatic NEW/MOVED/FORKED verdicts."""
+    when = tkn.mark_new_antenna(ant)
+    try:
+        rp = HERE / "lab" / "channel_recipes.json"
+        rec = json.loads(rp.read_text(encoding="utf-8"))
+        kept = {k: v for k, v in rec.items() if v.get("antenna") != ant}
+        dropped = len(rec) - len(kept)
+        rp.write_text(json.dumps(kept, indent=1), encoding="utf-8")
+    except (OSError, ValueError):
+        dropped = 0
+    _TK_CACHE["t"] = 0.0
+    return when, dropped
+
+
+def radio_busy():
+    return (STATE["rf"] is not None or STATE["tuning"] or SCAN["running"]
+            or BAL["on"] or FLAT["on"] or METER["rf"] is not None
+            or IDENT["on"])
+
+
+def ident_run(port):
+    """On-demand antenna ID: pause the waterfall, run a ~60 s
+    Welch-averaged sweep over the market grid, fingerprint, match."""
+    if IDENT["on"]:
+        return
+    IDENT.update(on=True, line="releasing the radio…")
+    try:
+        # wait until the waterfall has actually parked (it re-checks the
+        # IDENT flag once per row, ~2 s; SDRplay is single-client so a
+        # sweep started too early sees Device::make() no match)
+        for _ in range(15):
+            with WF_LOCK:
+                parked = "identify in progress" in (WF["status"] or "")
+            if parked:
+                break
+            time.sleep(1)
+        time.sleep(2)                    # let the driver finish closing
+        last_err = None
+        for attempt in range(5):
+            IDENT["line"] = ("sweeping the market grid on %s (~60 s)…"
+                             % port)
+            try:
+                # env=None -> antenna_id builds env_with_sdrplay() (the
+                # SDRplay API DLL dir must be on the child's PATH)
+                sig = aid.identify_sweep(port, py=PY)
+                break
+            except Exception as e:       # device still held? brief retry
+                last_err = e
+                IDENT["line"] = ("radio not free yet (attempt %d/5) — "
+                                 "retrying…" % (attempt + 1))
+                time.sleep(5)
+        else:
+            IDENT["line"] = "identify failed: %s" % last_err
+            return
+        ev = antid_event(aid.observe(sig, port))
+        if ev.get("needs_epoch"):
+            fresh_epoch(port)
+        IDENT["line"] = ev.get("message", "identify done")
+    except Exception as e:
+        IDENT["line"] = "identify failed: %s" % e
+    finally:
+        IDENT["on"] = False
+
+
 # ── channel scan (SCAN button) ─────────────────────────────────────
 SCAN = {"running": False, "line": "", "pct": 0, "t0": None}
 
@@ -196,8 +280,24 @@ def run_scan():
                          "line": f"scan ({dur}s) found NO locks — kept the "
                                  "previous good channel map (dud saved aside)"})
         else:
+            # antenna auto-ID: the scan's phase-1 sweep is a free
+            # fingerprint — match it against the profile ledger (zero
+            # extra radio time). Failure here never breaks a scan.
+            id_note = ""
+            try:
+                ev = antid_event(aid.observe_scan())
+                if ev.get("needs_epoch"):
+                    fresh_epoch(json.loads(SCAN_PATH.read_text(
+                        encoding="utf-8")).get("antenna"))
+                if ev.get("verdict") == "RECOGNIZED" and ev.get("name"):
+                    id_note = " · 🪪 %s" % ev["name"]
+                elif ev.get("verdict") in ("NEW", "MOVED", "CHANGED"):
+                    id_note = " · 🪪 antenna %s" % ev["verdict"].lower()
+            except Exception:
+                pass
             SCAN.update({"pct": 100, "t0": None,
-                         "line": f"scan complete in {dur}s — guide refreshed"})
+                         "line": f"scan complete in {dur}s — guide "
+                                 f"refreshed{id_note}"})
     except Exception as e:
         SCAN["line"] = f"scan failed: {e}"
     finally:
@@ -238,13 +338,15 @@ def sweeper():
         freqs += list((h + (np.arange(keep) - keep / 2) * (8e6 / FFT)) / 1e6)
     with WF_LOCK: WF["freqs"] = [round(x, 2) for x in freqs]
     while True:
-        if SCAN["running"] or BAL["on"] or FLAT["on"]:
+        if SCAN["running"] or BAL["on"] or FLAT["on"] or IDENT["on"]:
             with WF_LOCK:
                 WF["status"] = ("channel scan in progress — sweep paused"
                                 if SCAN["running"] else
-                                ("📏 flatness aiming in progress — sweep paused"
-                                 if FLAT["on"] else
-                                 "🌐 all-towers aiming in progress — sweep paused"))
+                                ("🪪 antenna identify in progress — sweep paused"
+                                 if IDENT["on"] else
+                                 ("📏 flatness aiming in progress — sweep paused"
+                                  if FLAT["on"] else
+                                  "🌐 all-towers aiming in progress — sweep paused")))
             time.sleep(5); continue
         if STATE["rf"] is not None or STATE["tuning"] or METER["rf"] is not None \
                 or chain_running():
@@ -278,7 +380,8 @@ def sweeper():
                     return False
             while not (STATE["rf"] is not None or STATE["tuning"]
                        or METER["rf"] is not None or BAL["on"] or FLAT["on"]
-                       or SCAN["running"] or external_wants_sdr()):
+                       or SCAN["running"] or IDENT["on"]
+                       or external_wants_sdr()):
                 row = []
                 t_row = time.strftime("%H:%M:%S")
                 for h in hops:
@@ -1686,7 +1789,8 @@ canvas{width:100%;image-rendering:pixelated;display:block;border-radius:4px}
 <div id="status">loading…</div>
 <div id="pageG">
 <div style="margin:4px 0 8px;font-size:12px">📡 antenna:
-<button onclick="newAnt()" title="Physically swapped the antenna on the selected port? Press this so the model restarts that port's education (old data archived, never deleted)." style="background:#152238;color:#9fb4d0;border:1px solid #26436b;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:13px;margin-right:10px">🔌 NEW ANTENNA</button>
+<button onclick="newAnt()" title="Physically swapped the antenna on the selected port? Press this so the model restarts that port's education (old data archived, never deleted)." style="background:#152238;color:#9fb4d0;border:1px solid #26436b;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:13px;margin-right:6px">🔌 NEW ANTENNA</button>
+<button onclick="identifyAnt()" title="Fingerprint whatever is plugged into the selected port (~60 s idle-radio sweep) and match it against every antenna this rig has ever met. Scans do this automatically for free — this button is for an on-demand check." style="background:#152238;color:#9fb4d0;border:1px solid #26436b;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:13px;margin-right:10px">🪪 IDENTIFY</button>
 <button onclick="surf(-1)" title="previous channel (↓ key)" style="background:#152238;color:#9fb4d0;border:1px solid #26436b;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:13px">⏮ CH−</button>
 <button onclick="surf(1)" title="next channel (↑ key)" style="background:#152238;color:#9fb4d0;border:1px solid #26436b;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:13px;margin-right:10px">CH+ ⏭</button>
 <select id="antpick" onchange="fetch('/api/antenna',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({antenna:this.value})})" style="background:#123;color:#cde;border:1px solid #356;padding:2px 6px">
@@ -1845,7 +1949,37 @@ if(s.deeptune&&!s.deeptune.on&&s.deeptune.verdict)
  h+='<div style="color:#8fe0b0;font-size:12px;margin-top:5px">🔬 <b>DEEP TUNE verdict:</b> '+s.deeptune.verdict+'</div>';
 if(s.recipe_note)
  h+='<div style="color:#7f96b3;font-size:11px;margin-top:3px">📋 '+s.recipe_note+'</div>';
+if(s.antid&&s.antid.busy)
+ h+='<div style="color:#9fb4d0;font-size:12px;margin-top:3px">🪪 '+(s.antid.line||'identifying antenna…')+'</div>';
+if(s.antid){
+ if(ANTID_SEQ<0){ANTID_SEQ=s.antid.seq}
+ else if(s.antid.seq>ANTID_SEQ){ANTID_SEQ=s.antid.seq;handleAntid(s.antid.event)}}
 document.getElementById('status').innerHTML=h;}catch(e){}}
+let ANTID_SEQ=-1;
+async function handleAntid(ev){
+if(!ev)return;
+toast('🪪 '+(ev.message||ev.verdict));
+const port=document.getElementById('antpick').value;
+if(ev.verdict==='CHANGED'){
+ setTimeout(async()=>{
+  const same=confirm('🪪 '+ev.message+'  —  OK = SAME antenna (cable or aim drifted; update its profile).  Cancel = DIFFERENT antenna (new profile, fresh learning).');
+  const r=await fetch('/api/antenna_id/resolve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({antenna:port,action:same?'update':'fork'})});
+  toast(await r.json());},800);}
+else if(ev.verdict==='MOVED'){
+ setTimeout(async()=>{
+  if(confirm('🪪 '+ev.message+'  —  attach its learned history to this port?')){
+   const r=await fetch('/api/antenna_id/attach',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({antenna:port})});
+   toast(await r.json());}},800);}
+else if((ev.verdict==='NEW'||ev.verdict==='ADOPTED'||ev.verdict==='RECOGNIZED')&&!ev.name&&ev.profile){
+ setTimeout(async()=>{
+  const nm=prompt('🪪 name this antenna? (e.g. "shed directional" — so the rig can greet it when it reappears; Cancel to skip)');
+  if(nm){const r=await fetch('/api/antenna_id/name',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({profile:ev.profile,name:nm})});
+   toast(await r.json());}},800);}}
+async function identifyAnt(){
+const a=document.getElementById('antpick').value;
+if(!a||a==='auto'){toast('pick the port (Antenna A/B/C) in the dropdown first, then IDENTIFY');return}
+const r=await fetch('/api/identify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({antenna:a})});
+toast(await r.json())}
 async function deepTune(){
 toast('🔬 DEEP TUNE — the channel doctor takes the tuner: baseline, antenna race, gain grid. Verdict + recipe when done. Click any station to abort.');
 const r=await fetch('/api/deeptune',{method:'POST',body:'{}'});toast(await r.json())}
@@ -2330,6 +2464,8 @@ class H(BaseHTTPRequestHandler):
                               if not DT["on"]
                               and time.time() - DT["vt"] < 1800 else ""}
             st["recipe_note"] = STATE.get("recipe_note") or ""
+            st["antid"] = {"seq": ANTID["seq"], "event": ANTID["event"],
+                           "busy": IDENT["on"], "line": IDENT["line"]}
             if st["tuned"]:
                 st.update(live_math())
             self._send(json.dumps(st))
@@ -2482,22 +2618,56 @@ class H(BaseHTTPRequestHandler):
                     "pick the port (Antenna A/B/C) first, then press "
                     "NEW ANTENNA"))
             else:
-                when = tkn.mark_new_antenna(ant)
-                try:
-                    rp = HERE / "lab" / "channel_recipes.json"
-                    rec = json.loads(rp.read_text(encoding="utf-8"))
-                    kept = {k: v for k, v in rec.items()
-                            if v.get("antenna") != ant}
-                    dropped = len(rec) - len(kept)
-                    rp.write_text(json.dumps(kept, indent=1),
-                                  encoding="utf-8")
-                except (OSError, ValueError):
-                    dropped = 0
-                _TK_CACHE["t"] = 0.0
+                when, dropped = fresh_epoch(ant)
                 self._send(json.dumps(
                     f"fresh start for {ant} (epoch {when}): its learned "
                     f"history is archived, {dropped} recipe(s) dropped — "
                     "watch or scan and it relearns the new antenna"))
+        elif self.path == "/api/identify":
+            ant = req.get("antenna")
+            if not ant or ant == "auto":
+                self._send(json.dumps(
+                    "pick the port (Antenna A/B/C) first, then IDENTIFY"))
+            elif radio_busy():
+                self._send(json.dumps(
+                    "radio is busy (TV/scan/meter) — identify needs the "
+                    "tuner idle for ~60 s; stop TV first or just run a "
+                    "SCAN (every scan identifies the antenna for free)"))
+            else:
+                threading.Thread(target=ident_run, args=(ant,),
+                                 daemon=True).start()
+                self._send(json.dumps(
+                    "🪪 identifying the antenna on %s — ~60 s sweep over "
+                    "the market grid, verdict lands as a toast" % ant))
+        elif self.path == "/api/antenna_id/resolve":
+            # answer a CHANGED question: same antenna (update) or a
+            # different one (fork -> fresh profile + fresh epoch)
+            ant = req.get("antenna")
+            action = req.get("action")
+            if not ant or action not in ("update", "fork"):
+                self._send('"bad request: resolve needs antenna + '
+                           'action update|fork"')
+            else:
+                ev = antid_event(aid.resolve_pending(ant, action))
+                if ev.get("needs_epoch"):
+                    fresh_epoch(ant)
+                self._send(json.dumps(ev.get("message", "resolved")))
+        elif self.path == "/api/antenna_id/attach":
+            # user confirmed a MOVED verdict: the profile's history
+            # officially follows the metal onto this port
+            ant = req.get("antenna")
+            if not ant:
+                self._send('"bad request: attach needs antenna"')
+            else:
+                ev = aid.confirm_attach(ant)
+                self._send(json.dumps(ev.get("message", "attached")))
+        elif self.path == "/api/antenna_id/name":
+            pid, name = req.get("profile"), req.get("name")
+            if not pid or not name:
+                self._send('"bad request: name needs profile + name"')
+            else:
+                ev = aid.set_name(pid, name)
+                self._send(json.dumps(ev.get("message", "named")))
         elif self.path == "/api/reset_learning":
             # flush ALL training data: archive (never delete) every
             # learned artifact and start the rig's education over
