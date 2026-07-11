@@ -12,12 +12,14 @@ disk doesn't grow unbounded.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import re
 import signal
 import socket
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -287,6 +289,11 @@ class LiveTVTopBlock(gr.top_block):
                     LOG.info(f"soapy: {soapy_key}={'true' if v == '1' else 'false'} ({env_key})")
                 except Exception as exc:
                     LOG.info(f"soapy: {soapy_key} write failed ({exc!r})")
+
+        # PERSISTENT-RADIO RETUNE (2026-07-10): keep refs so retune() can
+        # re-point the running source without tearing down the flowgraph.
+        self._src = src
+        self._rf = rf_channel
 
         # ── EXACT REPLICA OF run_combo.py fpll_a002_tau20 PIPELINE ──
         # The proven offline chain that gave clean decode:
@@ -665,6 +672,68 @@ class LiveTVTopBlock(gr.top_block):
             self._diag_depad_sink.set_unbuffered(True)
             self.connect(depad, self._diag_depad_sink)
 
+    # ── PERSISTENT-RADIO RETUNE (2026-07-10, STVT_PERSIST_RETUNE=1) ──
+    # Cross-tower channel change WITHOUT killing the process: today every
+    # tune pays 3.2 s process kill + 3.6 s SDRplay driver reopen before the
+    # 1.1 s pilot lock + ~3 s EQ converge even start. The soapy source
+    # exposes runtime setters (the same methods __init__ already calls:
+    # set_frequency / set_antenna / set_gain / write_setting), so a live
+    # chain can re-point the radio in ~0.1 s and let the DSP re-acquire
+    # (FPLL hunts the new pilot, fs_checker re-syncs, EQ cold-retrains —
+    # no runtime tap-reseed hook exists in atsc_equalizer_long's public
+    # API, cold converge is the accepted cost).
+    def retune(self, cmd: dict):
+        rf = int(cmd["rf"])
+        freq = rf_to_freq_hz(rf)
+        src = self._src
+        t0 = time.time()
+        ant = cmd.get("antenna")
+        LOG.info(f"PERSIST-RETUNE: rf {self._rf} -> {rf} "
+                 f"({freq/1e6:.3f} MHz) antenna={ant} "
+                 f"rfgain_sel={cmd.get('rfgain_sel')} ifgr={cmd.get('ifgr')} "
+                 f"dabnotch={cmd.get('dabnotch')}")
+        # antenna first (RSPdx port switch), then frequency — if either
+        # hard-fails we raise so the panel's classic respawn takes over.
+        if ant:
+            src.set_antenna(0, ant)
+        src.set_frequency(0, freq)
+        if cmd.get("ifgr") is not None:
+            try:
+                src.set_gain(0, "IFGR", float(cmd["ifgr"]))
+            except Exception:
+                src.set_gain(0, float(cmd["ifgr"]))
+        if cmd.get("rfgain_sel") is not None:
+            try:
+                src.write_setting("rfgain_sel", str(cmd["rfgain_sel"]))
+            except Exception as exc:
+                LOG.info(f"PERSIST-RETUNE: rfgain_sel write failed ({exc!r})")
+        if cmd.get("dabnotch") is not None:
+            # RSPdx-specific; only matters on UHF<->VHF transitions. A
+            # failure here is logged, not fatal (UHF<->UHF unaffected).
+            try:
+                src.write_setting("dabnotch_ctrl",
+                                  "true" if int(cmd["dabnotch"]) else "false")
+            except Exception as exc:
+                LOG.info(f"PERSIST-RETUNE: dabnotch_ctrl write failed "
+                         f"({exc!r}) — VHF transitions may need respawn")
+        # Rotate live.ts so followers see a FRESH stream (rotation law:
+        # the extractor must never read old-channel bytes as new). The
+        # sink holds the Windows file handle, so unlink is impossible —
+        # file_sink.open() reopens the same path truncated at offset 0,
+        # the exact mechanism the size-rotation watchdog already uses
+        # (never a bare truncate(0): sparse-file trap, see main()).
+        self._ts_sink.open(str(self._ts_path))
+        self._ts_sink.set_unbuffered(True)
+        self._rf = rf
+        if hasattr(self, "_iq_ring"):
+            try:
+                self._iq_ring.meta.update(
+                    {"rf": rf, "antenna": ant or self._iq_ring.meta.get("antenna")})
+            except Exception:
+                pass
+        LOG.info(f"PERSIST-RETUNE: applied in {time.time()-t0:.2f}s — "
+                 "chain re-acquiring (FPLL hunt -> fs sync -> EQ retrain)")
+
 
 def main():
     # Windows: bump process priority so VLC + other apps don't preempt the
@@ -739,11 +808,24 @@ def main():
     LOG.info(f"Live TV starting — RF {args.rf}, TCP port {ATSC_LIVE_TCP_PORT}")
     LOG.info(f"Writing TS to {out}")
 
+    _persist = os.environ.get("STVT_PERSIST_RETUNE") == "1"
+
     # WARM START (2026-07-05): if a tap-cache directory is configured,
     # compose the per-channel+antenna cache file path for the equalizer
     # (which reads STVT_EQ_TAP_CACHE_FILE at construction). Keyed by both
     # because taps are a fingerprint of the full RF path.
     cache_dir = os.environ.get("STVT_EQ_TAP_CACHE")
+    if cache_dir and _persist:
+        # PERSIST-RETUNE trade-off: the equalizer binds the cache FILE at
+        # construction (static getenv in atsc_equalizer_long_impl.cc) and
+        # keeps WRITING its LKG taps there — after an in-place retune it
+        # would pollute the OLD channel's cache with NEW-channel taps.
+        # No runtime rebind exists, so a persistent chain runs cache-less
+        # (cold EQ converge ~3 s is already in the retune budget).
+        LOG.info("tap cache DISABLED (STVT_PERSIST_RETUNE=1: a retuned "
+                 "chain would write new-channel taps into the old "
+                 "channel's cache file)")
+        cache_dir = None
     if cache_dir:
         try:
             os.makedirs(cache_dir, exist_ok=True)
@@ -771,6 +853,63 @@ def main():
         pass
 
     tb.start()
+
+    # ── PERSISTENT-RADIO RETUNE watcher (2026-07-10) ──
+    # Opt-in via STVT_PERSIST_RETUNE=1 (default OFF, zero change unset).
+    # Watches data/tv_live/retune.cmd for JSON
+    #   {"rf":N,"antenna":"...","rfgain_sel":N,"ifgr":N,"dabnotch":0|1}
+    # written atomically by the panel, retunes the RUNNING chain in place
+    # and answers via retune.ack. The panel gates on the ack plus fresh
+    # field-sync telemetry and falls back to classic kill+respawn if
+    # either never arrives — fallback-first by design.
+    if _persist:
+        cmd_path = out.parent / "retune.cmd"
+        ack_path = out.parent / "retune.ack"
+        for _p in (cmd_path, ack_path):     # stale files from a dead session
+            try:
+                _p.unlink()
+            except OSError:
+                pass
+
+        def _retune_watcher():
+            bad_reads = 0
+            while True:
+                time.sleep(0.2)
+                try:
+                    raw = cmd_path.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                try:
+                    cmd = json.loads(raw)
+                except ValueError:
+                    bad_reads += 1
+                    if bad_reads >= 5:      # corrupt file — don't spin on it
+                        try:
+                            cmd_path.unlink()
+                        except OSError:
+                            pass
+                        bad_reads = 0
+                    continue
+                bad_reads = 0
+                try:
+                    cmd_path.unlink()
+                except OSError:
+                    pass
+                try:
+                    tb.retune(cmd)
+                    ack = {"ok": True, "rf": cmd.get("rf"), "t": time.time()}
+                except Exception as e:
+                    LOG.error(f"PERSIST-RETUNE failed: {e!r}")
+                    ack = {"ok": False, "error": str(e), "t": time.time()}
+                _tmp = ack_path.parent / (ack_path.name + ".tmp")
+                try:
+                    _tmp.write_text(json.dumps(ack), encoding="utf-8")
+                    os.replace(_tmp, ack_path)
+                except OSError:
+                    pass
+
+        threading.Thread(target=_retune_watcher, daemon=True).start()
+        LOG.info(f"PERSIST-RETUNE: watcher armed on {cmd_path}")
 
     # File-rotation watchdog: when live.ts > rotate-gb, restart write
     rotate_bytes = int(args.rotate_gb * 1e9)
