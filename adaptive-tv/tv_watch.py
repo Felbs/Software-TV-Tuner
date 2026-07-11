@@ -94,6 +94,45 @@ def ipc(command, req=None):
 def log(m): print(f"[{time.strftime('%H:%M:%S')}] {m}", flush=True)
 
 
+def pid_packet_counts(pids, max_bytes=6_000_000):
+    """How many TS packets does live.ts actually CARRY per pid (tail
+    sample)? A PMT can declare streams the broadcaster never transmits
+    (2026-07-11: WDVM-SD lists a Spanish SAP with zero packets ever) —
+    mapping such a ghost makes copy-mode ffmpeg die at header time
+    ('sample rate not set') and the whole extraction fails. One chunked
+    read at extractor start (not a poll loop)."""
+    counts = {p: 0 for p in pids}
+    try:
+        size = LIVE.stat().st_size
+        with open(LIVE, "rb") as f:
+            f.seek(max(0, size - max_bytes))
+            data = f.read(max_bytes)
+        off = next((o for o in range(188)
+                    if all(data[o + i * 188] == 0x47 for i in range(5))), None)
+        if off is None:
+            return counts
+        for i in range(off, len(data) - 188, 188):
+            if data[i] != 0x47:
+                continue
+            pid = ((data[i + 1] & 0x1F) << 8) | data[i + 2]
+            if pid in counts:
+                counts[pid] += 1
+    except OSError:
+        pass
+    return counts
+
+
+def drop_ghost_streams(vids, others, label):
+    """Keep video unconditionally; drop declared-but-silent extras."""
+    counts = pid_packet_counts(list(vids) + list(others))
+    kept = [p for p in others if counts.get(p, 0) >= 5]
+    ghosts = [p for p in others if counts.get(p, 0) < 5]
+    if ghosts:
+        log(f"{label}: dropping ghost stream PIDs {ghosts} "
+            "(declared in PMT, zero packets on air)")
+    return kept
+
+
 class Extractor:
     """tail(live.ts) -> ffmpeg -map 0:p:PROG -c copy -> live_solo.ts
 
@@ -148,7 +187,11 @@ class Extractor:
             if not vids or not auds:
                 return None
             auds.sort()
-            self.pids = vids[:1] + [a[1] for a in auds] + subs
+            extras = drop_ghost_streams(vids[:1],
+                                        [a[1] for a in auds] + subs, "full")
+            if not extras:
+                return None           # every audio is a ghost: video mode
+            self.pids = vids[:1] + extras
             self.n_subs = len(subs)
             maps = []
             for pid in self.pids:
@@ -164,7 +207,12 @@ class Extractor:
         fast = False
         if self.mode == "cached" and self.pids:
             # layout known from a previous tune: no discovery probe, and
-            # the demuxer needs only a small window (stream shape known)
+            # the demuxer needs only a small window (stream shape known).
+            # Ghost-proof: never map a declared-but-silent PID (it kills
+            # copy-mode ffmpeg at header time and fails the whole tune)
+            vid, extras = self.pids[:1], self.pids[1:]
+            live_extras = drop_ghost_streams(vid, extras, "cached")
+            self.pids = vid + live_extras
             maps = []
             for pid in self.pids:
                 maps += ["-map", f"0:i:{pid}"]
