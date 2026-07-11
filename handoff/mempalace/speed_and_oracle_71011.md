@@ -220,6 +220,24 @@ button shipped (callsign immutable, name user's). UI renamed
 "ANTENNA FINGERPRINT SCAN" (math in tooltip). The \n-in-PAGE trap bit
 a SECOND time (nickname prompt) — NEVER put \n in PAGE JS strings.
 
+**FINAL CHECKPOINT 7/11 evening — WSL ERA BEGINS:** user declared
+happy with the code; WSL Claude Code session opened, given the paste
+prompt (read handoff/WSL_HANDOFF_20260711.md → bootstrap build →
+compile sweep → selftests → replay validation vs reference numbers →
+commit to wsl-port branch ONLY, never main-linux without live test).
+Late-session ships: GHOST-SAP fix (d41ca59 — PMT-declared zero-packet
+audio streams killed whole extraction; extractor now counts real
+packets per PID before mapping — WDVM 25.1 sound restored); 4-TIER
+knob bars (green well/yellow struggles/red bad/BROWN no-decode, dark=
+untrained); knob card IDENTITY-SCOPED (bd58a31 — rows_for_profile:
+history follows the recognized antenna, fixed "watching TV under a
+brown bar"); PRIVACY SCRUB (6c34f42): repo tree = zero email, zero
+username (27 files → sys.executable/portable paths); PRE-push
+identifier sweep now law. Shutdown state: 25.1 playing WITH sound,
+ports = Total vision (A) / Phillips (B) / discone (C), HF-YSHDI shed
+directional benched; swap-test + nickname-persistence experiment
+still pending user's cable hands; repo through 6c34f42.
+
 NEXT QUEUE: feature governor (computer-agnostic dial-in via OsO
 headroom), arsenal-piece bisect, README 10s-tuning section,
 knob-audit fix pass (DVR path = different decoder), label unification
