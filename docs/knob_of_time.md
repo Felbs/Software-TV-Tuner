@@ -145,9 +145,14 @@ while the viewer sleeps.
 
 ## 6. Where the model acts
 
-1. **The NERD card** — 24-hour sparkline (`▁▂▅▇`… with `·` for
-   unknown hours), this hour's predicted dB, best/worst hours, and a
-   live sample counter that ticks up each watched minute.
+1. **The NERD card** — 24 per-hour bars that *grow* with training
+   data (height ∝ log samples) and take color only from the verdict
+   (green = reliably decodes: MER above the cliff AND measured loss
+   low; red = confidently bad; dark stub = unknown). Knowledge and
+   verdict are deliberately separate axes — a channel can be fully
+   *learned* to be *bad*, and the card must say both. Plus this
+   hour's predicted dB, best/worst hours, and a live sample counter
+   that ticks up each watched minute.
 2. **The guide** — glitchy channels get "usually better around Xh"
    when the data supports it.
 3. **The tune path itself** — when the current hour's bin says a
@@ -162,10 +167,20 @@ while the viewer sleeps.
 
 - **Cold start:** day one honestly shows "no history yet — watch or
   scan and I'll learn." Nothing is seeded; curves appear within days.
-- **Moved antenna / changed rig:** recency decay retires the old
-  world in weeks; a deliberate re-scan accelerates it.
-- **Renamed antennas:** old and new labels coexist until decay
-  retires the old one (cosmetic, self-healing).
+- **Swapped hardware on a port:** the 🔌 NEW ANTENNA control writes an
+  *epoch marker* — rows older than the epoch stop counting toward
+  that label's model (archived, never deleted), recipes naming the
+  port are dropped, and the bars honestly collapse to stubs and
+  regrow. Without the button, recency decay still retires the old
+  world in a couple of weeks — the button just makes the funeral
+  immediate.
+- **Model accuracy drift:** the oracle is *audited continuously* —
+  each watched minute on a confidently-modeled channel logs a
+  (predicted, measured) MER pair, and the Market Brain card reports
+  rolling mean absolute error. If the model ever goes stale, this
+  number confesses first.
+- **Full reset:** 🧹 reset-all-learning archives every learned
+  artifact with a timestamp and returns the rig to a blank slate.
 
 ## 8. Case study: the scanner antenna that couldn't do TV
 
@@ -198,7 +213,14 @@ lines, imported by the panel; also runnable standalone):
 | `hint(rf, rows)` | the guarded "usually better around Xh" or None |
 | `antenna_by_hour(rf, rows)` | learned territories |
 | `nerd_card(rf, rows)` | text sparkline block (also used by the UI) |
+| `mark_new_antenna(ant)` / `antenna_epochs()` | port-swap epoch markers (the 🔌 button) |
 | `harvest()/backfill()` | one-time miners for pre-existing lab logs |
+
+Companion modules: `time_knob_prior.py` (validated cross-channel
+transfer — the per-antenna VHF/UHF regime fingerprint, with
+leave-one-out error bars; hour-curves deliberately do NOT transfer,
+they measured as channel-private) and `scan_planner.py` (learned scan
+ordering + dead-verdict memory with mandatory periodic full looks).
 
 Related reading: [science.md §15.5](science.md) (the short version and
 the laws that led here), [README](../README.md) for the feature tour.
