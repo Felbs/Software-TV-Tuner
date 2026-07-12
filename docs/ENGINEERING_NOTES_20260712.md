@@ -127,3 +127,26 @@ Then the Knob of Time follows the antenna through any port shuffle.
   (evening-worst) surfacing in the data; Knob-of-Time material even
   for a channel the profile can't yet decode. FOX best-of-night
   0.0035%. Rig has needed zero interventions since the ladder ended.
+- **08:15 — THE NEON EQ PORT SHIPPED (items 1 + 1b done).**
+  `STVT_EQ_S16` cherry-picked from pi-port-stvt b0eadbc (one conflict:
+  both lineages added fast paths at the same seam — kept both; our
+  lineage's STVT_EQ_FFT overlap-save path discovered in the process).
+  x86 regression: packet count exact, TEI within the rail's true
+  run-to-run band (two runs of ONE binary differ ±1 TEI — the
+  "deterministic rail" is deterministic-within-a-band, not bit-strict).
+  Pi replay gate: S16=1 metrics IDENTICAL to float (0.413% / 2119 /
+  382800). LIVE NBC RF34: 79%-garbage → **0.000% cc-err, 0 oso, 2367
+  KB/s** chain-only; full stack initially re-overloaded via mpv's
+  full-res 1080i deinterlace → ported June's **lowdeint** (lowres=1 +
+  bwdif, height-cached in the PID cache so launches apply decoder-open
+  flags immediately) → **full stack: 2349 KB/s, 0 oso, 0.455%**. Pi
+  profile now: fused + fold + minbuf 8MB + LONG EQ + S16 + lowdeint —
+  the strong equalizer at real-time on 4 ARM cores. Trilemma closed.
+- **CORRECTION to the 03:43 entry:** the overnight FPLL_ALPHA=0.001
+  "rejection" was a NULL TEST — the incumbent already ran the chain
+  default 0.001, so both arms were identical configs and the observed
+  delta was pure measurement noise. The "third non-transfer case" claim
+  is RETRACTED (the law still stands on FUSED_GAIN + hour-curves). The
+  autobot's conservative accept did the right thing for the wrong
+  reason; future experiment ladders must read the INCUMBENT's effective
+  value before claiming a comparison.
