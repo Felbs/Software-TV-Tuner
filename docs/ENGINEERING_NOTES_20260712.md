@@ -94,3 +94,19 @@ Then the Knob of Time follows the antenna through any port shuffle.
 - **00:20** — unit active, FOX soak at 2369 KB/s full rate. mpv died
   again post-retune (pattern #2 confirmed → item 2 above). Notes v1
   written.
+- **00:30** — "chain keeps dying (SDRplay crashing)" stage message =
+  FOSSIL of the experiment-phase manual kills; service uptime 4h37m
+  clean. Doctor lesson: check WHO terminated a process before
+  diagnosing (kill-by-hand vs died-alone are different diseases).
+- **01:59** — first full rotation done. Experiments: 16MB buffers
+  REJECTED (rate dip + oso), 4MB REJECTED (tie), RRC=3 REJECTED (worse
+  both axes) — the hand-tuned profile survives three challenges; noise
+  discipline behaving. **HEADLINE: NBC RF34 soaked at cc-err 79.2%**
+  (near-full rate, 0 oso, other channels 0.05-0.1%) — the stock EQ
+  fails THAT channel's multipath specifically. This is item-1/item-4's
+  per-channel-EQ case proven by field data: the lean profile needs a
+  recipe escape hatch (strong-but-multipath channels get the long EQ
+  and eat the overflows, or wait for the S16 NEON port). Rotation
+  re-hits NBC ~02:30 — second data point incoming without
+  intervention. Also: FOX soak logged cc-err "None" (ts_err returned
+  no samples) — measurement bug to check in pi_overnight.py, minor.
