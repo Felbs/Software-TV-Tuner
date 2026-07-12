@@ -73,6 +73,19 @@ private:
     int d_mod12_pending = -1;         // v2 debounce: phase must repeat
 
     void filterN(const float* input_samples, float* output_samples, int nsamples);
+    // 2026-06-11 int16 NEON data-path filter (STVT_EQ_S16=1). The legacy
+    // filterN calls the VOLK dispatcher once per output symbol (~10.76M
+    // calls/s — dispatch+alignment-check overhead INDEPENDENT of tap count,
+    // which is why the 256→96-tap experiment showed no speedup). This path
+    // quantizes the segment window to Q10 int16 and the taps to Q11, then runs
+    // a register-blocked 4-outputs-per-pass NEON vmlal_s16 kernel: taps loads
+    // shared across 4 outputs, shifted windows built with vext in registers.
+    // Measured on the A72 @2.0GHz (fir_bench.c): 21.7 Msamp/s vs 9.1 for the
+    // per-sample float path = 2.38x, before counting the dispatch savings.
+    // Quantization SNR ~70 dB — far above what the ±1..±7 slicer needs.
+    // Adaptation (adaptN/RLS/DD) stays float; only the passive data filtering
+    // (312 of 313 segments) takes this path.
+    void filterN_s16(const float* input_samples, float* output_samples, int nsamples);
     void adaptN(const float* input_samples,
                 const float* training_pattern,
                 float* output_samples,
@@ -115,6 +128,10 @@ private:
 
     float data_mem[gr::dtv::ATSC_DATA_SEGMENT_LENGTH + NTAPS];
     float data_mem2[gr::dtv::ATSC_DATA_SEGMENT_LENGTH];
+    // int16 staging for filterN_s16 (+16 pad: the blocked kernel reads one
+    // vector past the last window; pad is zeroed once in the ctor).
+    int16_t d_xq[gr::dtv::ATSC_DATA_SEGMENT_LENGTH + NTAPS + 16];
+    int16_t d_tq[NTAPS];
     unsigned short d_flags;
     short d_segno;
 
