@@ -379,8 +379,23 @@ def observe(sig, port, store=None, ts=None, save=True, path=PROFILES,
         cur_pid = None
     scores = {}
     details = {}
+    g_scores = {}
     for pid, prof in store["profiles"].items():
         s, d = similarity(prof["signature"], sig)
+        g_scores[pid] = s
+        # PER-PORT PASSPORTS (2026-07-11, the port-physics law made real):
+        # the print = antenna x cable x PORT ELECTRONICS, so one blended
+        # signature can't recognize an antenna across ports (passive
+        # antennas especially "bend per socket"). A profile may carry a
+        # reference print PER PORT it has been confirmed on; match this
+        # port's passport too and take the better score. After one
+        # confirmed sighting per (antenna, port) pairing, swaps stop
+        # landing in the gray zone.
+        pref = (prof.get("port_refs") or {}).get(port)
+        if pref is not None:
+            s2, d2 = similarity(pref, sig)
+            if s2 > s:
+                s, d = s2, d2
         scores[pid], details[pid] = s, d
     best_pid = max(scores, key=scores.get) if scores else None
     best = scores.get(best_pid, 0.0)
@@ -409,7 +424,15 @@ def observe(sig, port, store=None, ts=None, save=True, path=PROFILES,
     # 1. the port's resident still matches -> RECOGNIZED
     if cur_pid and cur >= T_RECOGNIZED:
         prof = store["profiles"][cur_pid]
-        prof["signature"] = _ema_merge(prof["signature"], sig)
+        # refresh this port's passport (create it on first recognition)
+        refs = prof.setdefault("port_refs", {})
+        refs[port] = (_ema_merge(refs[port], sig) if port in refs else sig)
+        # global print: same-port EMA as always — but only when the GLOBAL
+        # score itself still resembles this antenna, so a passport-driven
+        # recognition can't drag the global print toward another port's
+        # electronics (the cross-port pollution that degraded swaps)
+        if g_scores.get(cur_pid, 0.0) >= T_CHANGED:
+            prof["signature"] = _ema_merge(prof["signature"], sig)
         _sight(prof, ts, port, cur)
         ev = {"verdict": "RECOGNIZED", "profile": cur_pid,
               "name": prof["name"], "score": cur, "detail": details[cur_pid],
@@ -453,6 +476,9 @@ def observe(sig, port, store=None, ts=None, save=True, path=PROFILES,
         prof["port_history"].append({"port": port, "start": ts, "end": None,
                                      "confirmed": False})
         _sight(prof, ts, port, best)
+        # start this port's passport: the antenna has arrived at a new
+        # socket — its print HERE is the reference for future visits
+        prof.setdefault("port_refs", {})[port] = sig
         store["port_current"][port] = best_pid
         for op in [k for k, v in store["port_current"].items()
                    if v == best_pid and k != port]:
@@ -532,12 +558,39 @@ def resolve_pending(port, action, path=PROFILES):
     ts = datetime.now().replace(microsecond=0).isoformat()
     if action == "update":
         prof = store["profiles"][q["profile"]]
-        prof["signature"] = _ema_merge(prof["signature"], q["signature"])
+        # PER-PORT PASSPORT (2026-07-11): the user just ATTESTED this is
+        # the same antenna on this port — that sighting becomes THIS
+        # PORT's reference print. The global print is no longer
+        # cross-port blended (EMA-dragging a port-B print 25% toward
+        # port-A electronics is what made every later match worse).
+        refs = prof.setdefault("port_refs", {})
+        refs[port] = (_ema_merge(refs[port], q["signature"])
+                      if port in refs else q["signature"])
         _sight(prof, q["ts"], port, q["score"])
+        # and INSTALL it as the port's resident (the old code left
+        # port_current pointing at the previous tenant after a
+        # confirmed swap, so the next sweep re-asked the same question)
+        old_pid = store["port_current"].get(port)
+        if old_pid and old_pid != q["profile"]:
+            _close_span(store["profiles"].get(old_pid, {"port_history": []}),
+                        port, ts)
+        open_ports = [sp for sp in prof["port_history"]
+                      if sp.get("end") is None and sp["port"] == port]
+        if not open_ports:
+            for sp in prof["port_history"]:
+                if sp.get("end") is None:
+                    sp["end"] = ts
+            prof["port_history"].append({"port": port, "start": ts,
+                                         "end": None, "confirmed": True})
+        for op in [k for k, v in store["port_current"].items()
+                   if v == q["profile"] and k != port]:
+            store["port_current"].pop(op)
+        store["port_current"][port] = q["profile"]
         ev = {"verdict": "UPDATED", "profile": q["profile"],
               "name": prof["name"], "needs_epoch": False,
               "message": "profile %s updated — drift accepted as the same "
-                         "antenna" % (prof["name"] or q["profile"])}
+                         "antenna (port passport saved for %s)"
+                         % (prof["name"] or q["profile"], port)}
     else:
         old = store["profiles"].get(q["profile"])
         if old:
