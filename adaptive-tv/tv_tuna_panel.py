@@ -290,13 +290,28 @@ def run_scan():
         # one had locks, restore the prior and stash the dud for study.
         dur = int(time.time() - SCAN["t0"]) if SCAN["t0"] else 0
         if prev.exists() and locks_in(SCAN_PATH) == 0 and locks_in(prev) > 0:
+            dud_txt = SCAN_PATH.read_text(encoding="utf-8")
             SCAN_PATH.with_name("scan_dud.json").write_text(
-                SCAN_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+                dud_txt, encoding="utf-8")
             SCAN_PATH.write_text(prev.read_text(encoding="utf-8"),
                                  encoding="utf-8")
+            # a zero-lock sweep is still a valid FINGERPRINT: an antenna
+            # that can't decode anything (discone on UHF) still hears a
+            # distinctive spectrum. Identify from the dud so enrollment
+            # never requires decodable TV (2026-07-11 port-C lesson).
+            id_note = ""
+            try:
+                ev = antid_event(aid.observe_scan(scan=json.loads(dud_txt)))
+                if ev.get("name"):
+                    id_note = " · 🪪 %s" % ev["name"]
+                elif ev.get("verdict") not in (None, "UNUSABLE", "NOOP"):
+                    id_note = " · 🪪 antenna %s" % ev["verdict"].lower()
+            except Exception:
+                pass
             SCAN.update({"pct": 100, "t0": None,
                          "line": f"scan ({dur}s) found NO locks — kept the "
-                                 "previous good channel map (dud saved aside)"})
+                                 "previous good channel map (dud saved "
+                                 f"aside){id_note}"})
         else:
             # antenna auto-ID: the scan's phase-1 sweep is a free
             # fingerprint — match it against the profile ledger (zero
