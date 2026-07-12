@@ -928,10 +928,16 @@ def base_env(rf):
         # IQ_RING=0: the 35 s raw-IQ ring writes ~50 MB/s to disk — on a
         # WSL VHD that I/O fights the 8 MS/s TCP stream (measured: 224
         # overflows in 40 s with the ring, 0 without on direct chains).
+        # STVT_CHAIN_EQ: machines that can't run the long float EQ in
+        # real time set this to "stock" (Pi 5 measured 2026-07-11:
+        # long EQ = 1763 KB/s / 14.8 oso/min even with fused+minbuf;
+        # stock EQ = 2366 KB/s / ZERO overflows — a lean chain that
+        # holds real-time beats a fancy chain that overflows).
         env.update({"STVT_VITERBI": "hard", "STVT_RS": "stock",
                     "STVT_SOVA": "0", "STVT_TURBO": "0",
                     "STVT_RFNOTCH": "0", "STVT_EQ_CIR": "0",
-                    "STVT_RRC_SYMS": "4", "STVT_IQ_RING": "0"})
+                    "STVT_RRC_SYMS": "4", "STVT_IQ_RING": "0",
+                    "STVT_EQ": os.environ.get("STVT_CHAIN_EQ", "long")})
     return env
 
 def kill_watch():
