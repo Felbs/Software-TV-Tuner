@@ -743,6 +743,59 @@ def flat_start(rf):
     threading.Thread(target=flat_loop, args=(rf,), daemon=True).start()
 
 # ── tuning / recording actions ─────────────────────────────────────
+def _pilot_autopilot(rf, rfsel, ifgr, default_ant):
+    """ANTENNA AUTOPILOT (2026-07-11, 'the whole point of the fingerprint'):
+    port-keyed habits tune the wrong socket after a physical swap — FOX was
+    aimed at a port whose antenna had left (pilot +27 there vs +51 on the
+    port next door) and the picture died. When the user hasn't pinned an
+    antenna and the tuner is free, race THIS channel's pilot across every
+    occupied port (~3-8 s each over the remote transport) and follow the
+    strongest signal. The fingerprint ledger supplies the occupied-port
+    list and antenna names for the verdict line. Returns the winning port,
+    or None to keep the default (needs +3 dB to overrule a calibrated
+    default — a wash respects the recipe)."""
+    try:
+        led = aid.load_profiles()
+        cur = led.get("port_current") or {}
+        ports = sorted(set(cur.keys()) | {default_ant})
+        names = {}
+        for port, pid in cur.items():
+            nm = (led.get("profiles", {}).get(pid) or {}).get("name")
+            if nm:
+                names[port] = nm
+    except Exception:
+        return None
+    if len(ports) < 2:
+        return None
+    set_stage(6, "🧭 antenna autopilot — racing this channel's pilot "
+                 "across %d ports" % len(ports))
+    freq = int(aid.rf_to_mhz(rf) * 1e6)
+    readings = {}
+    for port in ports:
+        try:
+            out = subprocess.run(
+                [PY, "-u", str(TOOLS / "sdr_sweep.py"), "--mode", "atsc",
+                 "--antenna", port, "--rfgain-sel", str(rfsel),
+                 "--ifgr", str(ifgr), "--dwell-sec", "0.25",
+                 "--settle-sec", "0.1", "--freq", str(freq)],
+                capture_output=True, text=True, timeout=30).stdout
+            readings[port] = json.loads(out)[0].get("pilot_snr_db", -99.0)
+        except Exception:
+            continue
+    if not readings:
+        return None
+    line = "  ".join("%s %+.0f" % (names.get(p, p), s)
+                     for p, s in sorted(readings.items()))
+    best = max(readings, key=readings.get)
+    base = readings.get(default_ant, -99.0)
+    print("[autopilot] RF%s pilots: %s" % (rf, line), flush=True)
+    if best != default_ant and readings[best] >= base + 3.0:
+        set_stage(8, "🧭 autopilot: %s — following %s"
+                     % (line, names.get(best, best)))
+        return best
+    return None
+
+
 def base_env(rf):
     rfsel, ifgr = GAINS.get(rf, DEFAULT_GAIN)
     # DEEP TUNE recipe consult (2026-07-10 late): a measured recipe
@@ -770,6 +823,17 @@ def base_env(rf):
     # belief-map auto as the fallback
     _ant = (STATE.get("ant_override") or (recipe or {}).get("antenna")
             or antenna_for(rf))
+    # antenna autopilot: recipes/beliefs are keyed by PORT LABEL and go
+    # stale the moment antennas physically move — measure, don't trust.
+    # Skipped when the user pinned an antenna or the chain is up (hop/
+    # persistent-retune paths keep the tuner busy).
+    if not STATE.get("ant_override") and not chain_running():
+        _picked = _pilot_autopilot(rf, rfsel, ifgr, _ant)
+        if _picked:
+            note += (" · 🧭 autopilot moved this tune to %s" % _picked
+                     if note else "🧭 autopilot: strongest signal on %s"
+                     % _picked)
+            _ant = _picked
     if recipe:
         if (STATE.get("ant_override")
                 and STATE["ant_override"] != recipe.get("antenna")):
