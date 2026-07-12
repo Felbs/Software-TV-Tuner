@@ -180,15 +180,59 @@ def _carrierness(p):
     return min(1.0, max(0.0, (p - 20.0) / 20.0))
 
 
+KNEE_RIPPLE_NS = 8.0    # Δ ripple-delay (ns) where cable similarity hits 0.5
+                        # (measured 2026-07-11: same antenna repeats within
+                        # ~1 ns; different antenna systems differ by 14-27 ns)
+
+
+def _ripple_ns(sig):
+    """Electrical cable-length signature, receive-only (2026-07-11, the
+    user's 'measure the resistance' idea made practical): reflections
+    between a mismatched antenna and the tuner bounce inside the coax and
+    carve a PERIODIC ripple into the frequency response with spacing
+    Δf = c·VF/2L. The cepstrum (DFT of the detrended response curve)
+    peaks at the round-trip delay τ = 2L/(c·VF) — a per-antenna-SYSTEM
+    constant that travels with the antenna+cable across ports, unlike
+    the response shape which bends per socket. Returns τ in ns, or None
+    when there's no confident ripple (well-matched system / too few
+    points). Measured on the real rig: Total vision 45 ns (~5.8 m),
+    Phillips 19 ns (~2.4 m), discone 33 ns (~4.2 m); repeat sweeps of
+    the same antenna agree within ~1 ns."""
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+    f = [fi for fi in sig.get("freqs_mhz", []) if fi >= 473.0]
+    if len(f) < 12:
+        return None
+    idx = {fi: i for i, fi in enumerate(sig["freqs_mhz"])}
+    r = np.array([sig["resp"][idx[fi]] for fi in f], dtype=float)
+    fa = np.array(f, dtype=float)
+    r = r - np.polyval(np.polyfit(fa, r, 2), fa)   # remove antenna slope
+    n = 8 * len(r)
+    spec = np.abs(np.fft.rfft(r * np.hanning(len(r)), n))
+    tau = np.fft.rfftfreq(n, d=6e6)
+    keep = tau > 8e-9                              # below: broad shape, not cable
+    if not keep.any():
+        return None
+    pk = int(np.argmax(spec[keep]))
+    if spec[keep][pk] < 1.5 * (spec[keep].mean() + 1e-12):
+        return None                                # no confident ripple
+    return round(float(tau[keep][pk]) * 1e9, 1)
+
+
 def similarity(sa, sb):
-    """(score 0..1, detail dict). Three shape comparisons over the shared
+    """(score 0..1, detail dict). Shape comparisons over the shared
     frequency grid, all restricted to INFORMATIVE frequencies (dead
     channels agree trivially between any two sweeps and must not vote):
       s_level   spread of the floor-referenced level difference
       s_pilot   spread of the pilot-SNR difference
       s_carrier union-weighted agreement of continuous carrier strength
                 (which stations exist and how solidly — the DC market's
-                towers are shared, so the WEIGHT is what discriminates)."""
+                towers are shared, so the WEIGHT is what discriminates)
+      s_cable   cable-length ripple agreement (_ripple_ns) when both
+                sweeps show a confident ripple — the port-independent
+                component (the cable travels with the antenna)."""
     if not sa or not sb:
         return 0.0, {"error": "missing signature"}
     ia = {f: i for i, f in enumerate(sa["freqs_mhz"])}
@@ -219,7 +263,15 @@ def similarity(sa, sb):
     s_carrier = 1.0 - num / den if den > 1e-9 else 0.5
     det.update(s_level=round(s_level, 3), s_pilot=round(s_pilot, 3),
                s_carrier=round(s_carrier, 3))
-    score = 0.30 * s_level + 0.30 * s_pilot + 0.40 * s_carrier
+    ta, tb = _ripple_ns(sa), _ripple_ns(sb)
+    if ta is not None and tb is not None:
+        det.update(ripple_ns_a=ta, ripple_ns_b=tb)
+        s_cable = _knee(abs(ta - tb), KNEE_RIPPLE_NS)
+        det["s_cable"] = round(s_cable, 3)
+        score = (0.25 * s_level + 0.25 * s_pilot + 0.30 * s_carrier
+                 + 0.20 * s_cable)
+    else:
+        score = 0.30 * s_level + 0.30 * s_pilot + 0.40 * s_carrier
     return round(score, 3), det
 
 
@@ -424,6 +476,17 @@ def observe(sig, port, store=None, ts=None, save=True, path=PROFILES,
     # 1. the port's resident still matches -> RECOGNIZED
     if cur_pid and cur >= T_RECOGNIZED:
         prof = store["profiles"][cur_pid]
+        # a >=T_RECOGNIZED fingerprint match IS confirmation — make sure
+        # this port has an open CONFIRMED span, or the ports panel keeps
+        # saying "no antenna recognized" about an antenna the ledger
+        # recognizes at 97% (2026-07-11 display gap)
+        span = next((sp for sp in prof["port_history"]
+                     if sp.get("end") is None and sp["port"] == port), None)
+        if span is None:
+            prof["port_history"].append({"port": port, "start": ts,
+                                         "end": None, "confirmed": True})
+        else:
+            span["confirmed"] = True
         # refresh this port's passport (create it on first recognition)
         refs = prof.setdefault("port_refs", {})
         refs[port] = (_ema_merge(refs[port], sig) if port in refs else sig)
