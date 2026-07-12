@@ -122,3 +122,8 @@ Then the Knob of Time follows the antenna through any port shuffle.
   hour-curves, now FPLL α). Machine-local calibration is a LAW —
   governor v2's measured self-calibration (item 4) is the systemic
   answer. Run now in pure soak mode; rig stable all night so far.
+- **05:53** — 6 h stable, pure soak. NBC cc-err DECLINING through the
+  night: 79.2 → 64.7 → 42.7 → 42.6% — a time-of-day multipath curve
+  (evening-worst) surfacing in the data; Knob-of-Time material even
+  for a channel the profile can't yet decode. FOX best-of-night
+  0.0035%. Rig has needed zero interventions since the ladder ended.
