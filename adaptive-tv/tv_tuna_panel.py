@@ -766,6 +766,16 @@ def _pilot_autopilot(rf, rfsel, ifgr, default_ant):
     except Exception:
         return None
     if len(ports) < 2:
+        # thin ledger (fresh install): race the tuner's full port set,
+        # not just what's enrolled — a blank brain must still FIND the
+        # antenna a station lives on (2026-07-11 from-zero exam: FOX was
+        # unreachable because only port A was known). Override for other
+        # hardware with STVT_PORTS="Antenna A,Antenna B".
+        extra = os.environ.get("STVT_PORTS",
+                               "Antenna A,Antenna B,Antenna C")
+        ports = sorted(set(ports)
+                       | {p.strip() for p in extra.split(",") if p.strip()})
+    if len(ports) < 2:
         return None
     set_stage(6, "🧭 antenna autopilot — racing this channel's pilot "
                  "across %d ports" % len(ports))
