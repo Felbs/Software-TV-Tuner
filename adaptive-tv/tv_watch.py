@@ -448,17 +448,33 @@ def main():
         # WSLg/Wayland: the gpu VO black-screens under WSLg — wlshm is the
         # June-proven reliable path (override with STVT_MPV_VO).
         cmd += [f"--vo={os.environ.get('STVT_MPV_VO', 'wlshm')}"]
-        # 1080i broadcasts (NBC/CBS/PBS) NEED a deinterlacer: with
-        # hwdec=no + wlshm nothing deinterlaces and both fields render
-        # woven — combing on motion, "very bad quality" (2026-07-11,
-        # RF34 WRC 1080i field_order=tt). mpv's deinterlace only touches
-        # frames FLAGGED interlaced, so 720p FOX passes through untouched.
-        cmd += ["--deinterlace=yes"]
     if marginal:
         # show-all removed 7/10: it forces pre-keyframe garbage frames
         # onto the screen — the opposite of anti-mosh
         cmd += ["--vd-lavc-skipframe=none", "--framedrop=no"]
     mpv = subprocess.Popen(cmd)
+
+    if not IS_WIN:
+        # FORMAT-AWARE DEINTERLACE (2026-07-11): 1080-line ATSC is always
+        # interlaced and NEEDS yadif (woven-field combing without it, the
+        # RF34 WRC lesson) — but a blanket --deinterlace=yes was a trap:
+        # FOX flags its 720p60 frames interlaced, yadif field-doubled
+        # them to 119.88 fps and the software wlshm VO choked (sound
+        # played over a stuck picture). ATSC has no 720i, so the honest
+        # rule is BY HEIGHT: >=1080 -> deinterlace on, else off. Height
+        # is read from mpv itself once the first frames decode.
+        def _auto_deint():
+            for _ in range(40):                     # up to ~20 s
+                time.sleep(0.5)
+                h = ipc(["get_property", "video-params/h"], req=411)
+                if h:
+                    if int(h) >= 1080:
+                        ipc(["set_property", "deinterlace", True])
+                        log("auto-deinterlace ON (%s-line interlaced)" % h)
+                    else:
+                        log("auto-deinterlace off (%sp progressive)" % h)
+                    return
+        threading.Thread(target=_auto_deint, daemon=True).start()
     time.sleep(6)
 
     if muxmode:
