@@ -110,3 +110,15 @@ Then the Knob of Time follows the antenna through any port shuffle.
   re-hits NBC ~02:30 — second data point incoming without
   intervention. Also: FOX soak logged cc-err "None" (ts_err returned
   no samples) — measurement bug to check in pi_overnight.py, minor.
+- **03:43** — ladder COMPLETE, all five experiments honestly rejected;
+  the hand-tuned profile is confirmed optimal on every axis tested.
+  **NBC RF34 failure CONFIRMED** (79.2% then 64.7% cc-err, hours
+  apart; all other channels 0.014-0.17%) — reproducible, channel-
+  specific stock-EQ multipath failure. Morning decision: per-channel
+  recipe (long EQ = watchable-but-glitchy 14.8 oso/min) vs wait for
+  the S16 NEON port (the real fix). ALSO: FPLL_ALPHA=0.001 — a proven
+  WSL RF36 win — HURT the Pi (rate −108, oso +9): third confirmed
+  "tuning does not transfer between machines" case (FUSED_GAIN,
+  hour-curves, now FPLL α). Machine-local calibration is a LAW —
+  governor v2's measured self-calibration (item 4) is the systemic
+  answer. Run now in pure soak mode; rig stable all night so far.
