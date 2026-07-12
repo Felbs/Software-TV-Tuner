@@ -302,17 +302,28 @@ def run_scan():
             # fingerprint — match it against the profile ledger (zero
             # extra radio time). Failure here never breaks a scan.
             id_note = ""
+            id_name = ""
             try:
                 ev = antid_event(aid.observe_scan())
                 if ev.get("needs_epoch"):
                     fresh_epoch(json.loads(SCAN_PATH.read_text(
                         encoding="utf-8")).get("antenna"))
-                if ev.get("verdict") == "RECOGNIZED" and ev.get("name"):
-                    id_note = " · 🪪 %s" % ev["name"]
-                elif ev.get("verdict") in ("NEW", "MOVED", "CHANGED"):
-                    id_note = " · 🪪 antenna %s" % ev["verdict"].lower()
+                # observe_scan returns UPDATED for a recognized antenna whose
+                # reference just got EMA-refreshed (not the literal
+                # "RECOGNIZED") — treat every same-antenna verdict as a
+                # recognition so the grid plainly names who it found.
+                v = ev.get("verdict")
+                if ev.get("name") and v in ("RECOGNIZED", "UPDATED",
+                                            "ADOPTED", "MOVED"):
+                    id_name = ev["name"]
+                    tag = {"MOVED": "moved here",
+                           "ADOPTED": "enrolled"}.get(v, "recognized")
+                    id_note = " · 🪪 %s (%s)" % (ev["name"], tag)
+                elif v in ("NEW", "CHANGED", "ASK"):
+                    id_note = " · 🪪 antenna %s" % v.lower()
             except Exception:
                 pass
+            stash_scan(id_name)
             SCAN.update({"pct": 100, "t0": None,
                          "line": f"scan complete in {dur}s — guide "
                                  f"refreshed{id_note}"})
@@ -320,6 +331,59 @@ def run_scan():
         SCAN["line"] = f"scan failed: {e}"
     finally:
         SCAN["running"] = False
+
+# ── per-antenna scan memory (user feature 2026-07-11) ─────────────
+# Every finished scan is attached to the antenna the fingerprint
+# recognized, so each antenna keeps its own last guide grid and the
+# user can toggle the grid between antennas without rescanning.
+SCANS_DIR = HERE / "lab" / "scans"
+
+def stash_scan(name_hint=""):
+    try:
+        d = json.loads(SCAN_PATH.read_text(encoding="utf-8"))
+        key = (name_hint or d.get("antenna") or "unknown").strip()
+        slug = re.sub(r"[^A-Za-z0-9._-]+", "_", key)[:60] or "unknown"
+        SCANS_DIR.mkdir(parents=True, exist_ok=True)
+        (SCANS_DIR / (slug + ".json")).write_text(
+            json.dumps({"key": key, "scan": d}), encoding="utf-8")
+    except Exception:
+        pass
+
+def list_scans():
+    out = []
+    try:
+        for f in sorted(SCANS_DIR.glob("*.json")):
+            try:
+                w = json.loads(f.read_text(encoding="utf-8"))
+                sc = w.get("scan") or {}
+                out.append({
+                    "file": f.stem, "key": w.get("key") or f.stem,
+                    "antenna": sc.get("antenna"),
+                    "scanned_at": sc.get("scanned_at"),
+                    "locks": sum(1 for c in sc.get("channels", [])
+                                 if c.get("lock"))})
+            except Exception:
+                continue
+    except OSError:
+        pass
+    return out
+
+def select_scan(file_stem):
+    """Make a stashed scan the ACTIVE guide grid (non-destructive: every
+    antenna's scan stays stashed; this only swaps what the grid shows)."""
+    # slug whitelist — the stem must be exactly what stash_scan produces
+    # (no separators), so a crafted path can never escape SCANS_DIR
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,60}", file_stem or ""):
+        return False
+    f = SCANS_DIR / (file_stem + ".json")
+    if not f.exists():
+        return False
+    try:
+        w = json.loads(f.read_text(encoding="utf-8"))
+        SCAN_PATH.write_text(json.dumps(w["scan"]), encoding="utf-8")
+        return True
+    except Exception:
+        return False
 
 # ── waterfall sweeper ──────────────────────────────────────────────
 WF = {"rows": [], "freqs": None, "status": "starting", "row_id": 0}
@@ -1862,6 +1926,7 @@ canvas{width:100%;image-rendering:pixelated;display:block;border-radius:4px}
 <option value="Antenna C">Antenna C</option>
 </select>
 <span style="color:#8aa">— you pick the antenna, the code decodes whatever it's given</span></div>
+<div id="scanmem" style="margin:4px 0"></div>
 <div id="grid">loading guide…</div></div>
 <div id="pageN" style="display:none">
   <div class="cards" id="mathcards"></div>
@@ -2066,7 +2131,34 @@ toast(await r.json())}
 async function deepTune(){
 toast('🔬 DEEP TUNE — the channel doctor takes the tuner: baseline, antenna race, gain grid. Verdict + recipe when done. Click any station to abort.');
 const r=await fetch('/api/deeptune',{method:'POST',body:'{}'});toast(await r.json())}
+let SCANMEM=[];
+async function loadScans(){try{
+const scans=await (await fetch('/api/scans')).json();
+SCANMEM=scans;
+const el=document.getElementById('scanmem'); if(!el)return;
+if(!scans.length){el.innerHTML='';return}
+el.textContent='';
+const lbl=document.createElement('span');
+lbl.style.cssText='color:#9fb4d0;font-size:12px';
+lbl.textContent='🗂 antenna grids: ';
+el.appendChild(lbl);
+scans.forEach((s,i)=>{
+  const when=(s.scanned_at||'').slice(11,16);
+  const b=document.createElement('button');
+  b.className='tune';
+  b.style.cssText='font-size:12px;padding:2px 8px;margin:2px';
+  b.title="show this antenna's last scan in the grid";
+  b.textContent=`${s.key} · ${s.locks} ch${when?' · '+when:''}`;
+  b.onclick=()=>pickScan(i);           // DOM-built: antenna names can
+  el.appendChild(b);                   // contain quotes safely
+});}catch(e){}}
+async function pickScan(i){
+const s=SCANMEM[i]; if(!s)return;
+await fetch('/api/scan_select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file:s.file})});
+toast('🗂 grid switched to '+s.key+"'s last scan");
+loadGrid();}
 async function loadGrid(){const g=await (await fetch('/api/grid')).json();
+loadScans();
 SURF=[];
 let h='<table><tr><th>station</th>';g.slots.forEach(s=>h+='<th>'+s+'</th>');h+='<th></th></tr>';
 let lastRf=null;
@@ -2553,6 +2645,8 @@ class H(BaseHTTPRequestHandler):
             self._send(json.dumps(out))
         elif self.path == "/api/grid":
             self._send(json.dumps(grid_json()))
+        elif self.path == "/api/scans":
+            self._send(json.dumps(list_scans()))
         elif self.path == "/api/status":
             st = {k: STATE[k] for k in ("rf", "prog", "virtual", "name", "tuning")}
             st["ant"] = STATE.get("ant_override") or "auto"
@@ -2652,6 +2746,12 @@ class H(BaseHTTPRequestHandler):
                              args=(rf, prog, virt, req.get("name", "")),
                              daemon=True).start()
             self._send('"tuning"')
+        elif self.path == "/api/scan_select":
+            f = str(req.get("file") or "")
+            if select_scan(f):
+                self._send('"ok"')
+            else:
+                self._send('"unknown scan"')
         elif self.path == "/api/stop":
             threading.Thread(target=stop_tv, daemon=True).start()
             self._send('"stopped"')
