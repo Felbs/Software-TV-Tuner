@@ -3043,5 +3043,9 @@ if __name__ == "__main__":
         threading.Thread(target=sweeper, daemon=True).start()
     threading.Thread(target=flight_recorder, daemon=True).start()
     threading.Thread(target=chain_doctor, daemon=True).start()
-    print(f"TV Tuna panel: http://localhost:{PORT}", flush=True)
-    Panel(("127.0.0.1", PORT), H).serve_forever()
+    # STVT_PANEL_BIND: bind address. Default localhost-only (private
+    # cockpit). Headless boxes driven over the LAN (the Pi rig) set
+    # 0.0.0.0 so the browser/orchestrator can reach the UI remotely.
+    bind = os.environ.get("STVT_PANEL_BIND", "127.0.0.1")
+    print(f"TV Tuna panel: http://{bind or 'localhost'}:{PORT}", flush=True)
+    Panel((bind, PORT), H).serve_forever()
