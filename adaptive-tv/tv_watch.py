@@ -448,32 +448,72 @@ def main():
         # WSLg/Wayland: the gpu VO black-screens under WSLg — wlshm is the
         # June-proven reliable path (override with STVT_MPV_VO).
         cmd += [f"--vo={os.environ.get('STVT_MPV_VO', 'wlshm')}"]
+    # STVT_DEINT (2026-07-12, ported from the June Pi lineage):
+    #   auto     (default) full-res yadif toggled at runtime for 1080-line
+    #            content — right for machines with CPU headroom
+    #   lowdeint June Pi recipe: half-res decode (lowres=1) + bwdif
+    #            send_frame — full-res software deinterlace does NOT fit
+    #            small boards (measured: NBC 1080i re-overloaded the Pi 5
+    #            chain, 4.3 oso/min + 2.2% cc-err through the full stack)
+    #   off      never deinterlace
+    LOWDEINT_FLAGS = ["--vd-lavc-o=lowres=1",
+                      "--vf=lavfi=[bwdif=mode=send_frame:deint=interlaced]"]
+    deint_mode = os.environ.get("STVT_DEINT", "auto")
+    lowdeint_applied = False
+    if (not IS_WIN and deint_mode == "lowdeint"
+            and (hit or {}).get("vheight", 0) >= 1080):
+        # decoder-open options — must ride the launch; height cached by a
+        # previous visit (see _auto_deint below)
+        cmd += LOWDEINT_FLAGS
+        lowdeint_applied = True
+        log("lowdeint at launch (cached %s-line)" % hit["vheight"])
     if marginal:
         # show-all removed 7/10: it forces pre-keyframe garbage frames
         # onto the screen — the opposite of anti-mosh
         cmd += ["--vd-lavc-skipframe=none", "--framedrop=no"]
-    mpv = subprocess.Popen(cmd)
+    mpv_h = {"p": subprocess.Popen(cmd)}
 
     if not IS_WIN:
         # FORMAT-AWARE DEINTERLACE (2026-07-11): 1080-line ATSC is always
-        # interlaced and NEEDS yadif (woven-field combing without it, the
-        # RF34 WRC lesson) — but a blanket --deinterlace=yes was a trap:
-        # FOX flags its 720p60 frames interlaced, yadif field-doubled
-        # them to 119.88 fps and the software wlshm VO choked (sound
-        # played over a stuck picture). ATSC has no 720i, so the honest
-        # rule is BY HEIGHT: >=1080 -> deinterlace on, else off. Height
-        # is read from mpv itself once the first frames decode.
+        # interlaced and NEEDS a deinterlacer (woven-field combing, the
+        # RF34 WRC lesson) — but FOX flags its 720p60 frames interlaced
+        # and a blanket yadif field-doubled them to 119.88 fps (choked
+        # the software VO). ATSC has no 720i, so the rule is BY HEIGHT.
+        # Height is read from mpv once frames decode, then CACHED so
+        # lowdeint launches can apply decoder-open flags immediately.
         def _auto_deint():
             for _ in range(40):                     # up to ~20 s
                 time.sleep(0.5)
                 h = ipc(["get_property", "video-params/h"], req=411)
-                if h:
-                    if int(h) >= 1080:
+                if not h:
+                    continue
+                h = int(h)
+                try:                                # remember for next launch
+                    if RF != "?":
+                        c = load_pid_cache()
+                        e = c.get(key) or {}
+                        if e.get("vheight") != h:
+                            e["vheight"] = h
+                            c[key] = e
+                            save_pid_cache(c)
+                except Exception:
+                    pass
+                if h >= 1080:
+                    if deint_mode == "lowdeint" and not lowdeint_applied:
+                        # first visit to a 1080i channel in lowdeint mode:
+                        # decoder-open flags need one relaunch (cached after)
+                        log("lowdeint: relaunching player for %s-line" % h)
+                        try:
+                            mpv_h["p"].kill()
+                        except Exception:
+                            pass
+                        mpv_h["p"] = subprocess.Popen(cmd + LOWDEINT_FLAGS)
+                    elif deint_mode == "auto":
                         ipc(["set_property", "deinterlace", True])
                         log("auto-deinterlace ON (%s-line interlaced)" % h)
-                    else:
-                        log("auto-deinterlace off (%sp progressive)" % h)
-                    return
+                else:
+                    log("auto-deinterlace off (%sp progressive)" % h)
+                return
         threading.Thread(target=_auto_deint, daemon=True).start()
     time.sleep(6)
 
@@ -591,7 +631,7 @@ def main():
     # first CC cycle ~20 s in (flushes any startup caption garbage that
     # slipped through), then every 8 min as before
     last_cc = time.time() - 460
-    while mpv.poll() is None:
+    while mpv_h["p"].poll() is None:
         time.sleep(5)
         if ex is not None and not ex.alive():
             log(f"extractor died — restarting it (mode={ex.mode})")
