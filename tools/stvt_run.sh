@@ -59,7 +59,22 @@ export STVT_FPLL_FOLD="${STVT_FPLL_FOLD:-1}"
 # read inside the C++ work(), so it also applies to tv_replay/DVR with no wiring.
 export STVT_FPLL_BLOCK_NCO="${STVT_FPLL_BLOCK_NCO:-1}"
 export STVT_RS=stock STVT_VITERBI=hard STVT_EQ=long
-export STVT_SPS="${STVT_SPS:-1.1}" STVT_RRC_SYMS="${STVT_RRC_SYMS:-4}" STVT_TEISCRUB="${STVT_TEISCRUB:-0}"
+# SPS default bumped 1.1 -> 1.3: on this box (Ryzen 1600X, native RSPdx) SPS 1.3
+# is markedly more robust on marginal signal than the old lean 1.1 — validated
+# on a real RF36 capture pushed to the decode cliff (tools/native_sps_11v13.py):
+# at cliff-edge noise 1000, TEI-bad 5.6% @1.3 vs 11.8% @1.1 (2x fewer RS fails),
+# and 1.3 beat 1.1 at every level tested. 1.3 is less front-end work than tv_live's
+# own 1.5 default, which live-decodes real-time here with margin, so 1.3 is safe
+# real-time. STVT_SPS=1.1 reverts the lean profile on a slower CPU.
+export STVT_SPS="${STVT_SPS:-1.3}" STVT_RRC_SYMS="${STVT_RRC_SYMS:-4}" STVT_TEISCRUB="${STVT_TEISCRUB:-0}"
+# Per-antenna gain profile: stvt_autocal.py writes ~/.stvt_autocal.env (STVT_IFGR
+# + eq knobs) — source it here so a calibrated box "just works". Only load it when
+# the user hasn't set STVT_IFGR explicitly, so an inline override still wins. This
+# is the intended autocal hookup (the writer says "an env file the run-scripts
+# source"); without it a passive antenna never locks at the active-antenna default.
+if [ -z "${STVT_IFGR:-}" ] && [ -f "$HOME/.stvt_autocal.env" ]; then
+  set -a; . "$HOME/.stvt_autocal.env"; set +a
+fi
 export STVT_IFGR="${STVT_IFGR:-59}" STVT_RFGAIN_SEL="${STVT_RFGAIN_SEL:-5}" STVT_ANTENNA="${STVT_ANTENNA:-Antenna A}"
 
 log(){ echo "$(printf '%(%H:%M:%S)T' -1) $*" | tee -a "$RUNLOG" ; }

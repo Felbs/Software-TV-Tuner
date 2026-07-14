@@ -63,3 +63,4 @@ tools/scan_temp/
 
 # Overnight report from the cleanup branch (review artifact, not source)
 OVERNIGHT_REPORT.md
+iq_captures/
