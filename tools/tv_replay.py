@@ -119,6 +119,21 @@ class ReplayTopBlock(gr.top_block):
 
         scaler = blocks.multiply_const_cc(32768.0)
 
+        # STVT_ADD_NOISE=<amp>: inject complex AWGN right after scaling to push a
+        # clean capture toward the decode cliff (deterministic per STVT_NOISE_SEED).
+        # This is the marginal-signal test lever — a clean signal has nothing for
+        # the error-correction/recovery knobs to fix, so calibrate a capture to the
+        # cliff edge and sweep the levers that only matter on weak reception.
+        _noise_amp = float(os.environ.get("STVT_ADD_NOISE", "0"))
+        noise_src = noise_add = None
+        if _noise_amp > 0:
+            noise_src = analog.noise_source_c(
+                analog.GR_GAUSSIAN, _noise_amp,
+                int(os.environ.get("STVT_NOISE_SEED", "42")))
+            noise_add = blocks.add_cc()
+            LOG.info(f"STVT_ADD_NOISE amp={_noise_amp} seed="
+                     f"{os.environ.get('STVT_NOISE_SEED','42')}")
+
         nb = None
         if int(os.environ.get("STVT_NB", "0")):
             nb = atscplus.atsc_noise_blanker(
@@ -201,6 +216,7 @@ class ReplayTopBlock(gr.top_block):
         ts_file.set_unbuffered(True)
 
         chain_blocks = [src, scaler]
+        if noise_add is not None: chain_blocks.append(noise_add)
         if nb is not None:       chain_blocks.append(nb)
         if resamp is not None:   chain_blocks.append(resamp)
         if notch is not None:    chain_blocks.append(notch)
@@ -234,6 +250,9 @@ class ReplayTopBlock(gr.top_block):
             LOG.info(f"min_output_buffer: items={_min_buf} bytes={_min_buf_bytes}")
 
         self.connect(*chain_blocks)
+        # AWGN injector second input (port 1 of the add_cc spliced after scaler).
+        if noise_add is not None:
+            self.connect(noise_src, (noise_add, 1))
 
         for a, b in [(fs_check, equalizer), (equalizer, viterbi),
                      (viterbi, deinterleaver), (deinterleaver, rs), (rs, derand)]:
