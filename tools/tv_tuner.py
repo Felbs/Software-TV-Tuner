@@ -291,6 +291,16 @@ CHAIN_DEFAULTS = {
     "STVT_RFGAIN_SEL": "3",
     "STVT_ANTENNA":    "Antenna A",
 }
+# FEATURE GOVERNOR seed (2026-07-11, born on the WSL port): soft Viterbi
+# + the full RRC-8 matched filter miss the real-time deadline on
+# WSL-over-SoapyRemote (measured: 10,728 source overflows, 1.15% loss on
+# a channel the lean chain decodes at 0.0%) — and an overflowing scan
+# chain under-reports lockable channels. Non-Windows machines start
+# LEAN; force with STVT_CHAIN_PROFILE=full after an overflow-gated A/B
+# (OsO == 0) proves the hardware can afford the heavy levers.
+if (os.environ.get("STVT_CHAIN_PROFILE")
+        or ("full" if sys.platform == "win32" else "lean")) == "lean":
+    CHAIN_DEFAULTS.update({"STVT_VITERBI": "hard", "STVT_RRC_SYMS": "4"})
 
 
 def env_with_sdrplay() -> dict:
@@ -1174,6 +1184,22 @@ def run_scan(region: dict | None = None,
             atsc1_carrier = (pilot_snr >= pilot_snr_threshold_db
                              and pilot_sharp >= pilot_sharpness_threshold_db
                              and vsb_asym >= vsb_asymmetry_threshold_db)
+            # STRONG-PILOT RESCUE (2026-07-11, born on the WSL port): the
+            # sniff is a heuristic and can read a few dB soft (remote
+            # transports, marginal propagation moments). Measured twice
+            # on RF36 the same evening: sniffed sharp 25.0 vs the 26.25
+            # gate (hard-rejected) while the demod decoded 0.007% loss;
+            # then sniffed SNR +33 (rejected again) while the demod
+            # decoded 0.000% at full rate. If the pilot alone clears the
+            # strict SNR bar and sharpness shows a real pilot, that
+            # earns a REAL lock attempt; the ~9 s MER early-verdict
+            # keeps wrong guesses cheap. The demod is ground truth —
+            # the sniff doesn't get a veto over it.
+            pilot_rescue = (not atsc1_carrier
+                            and pilot_snr >= pilot_snr_threshold_db
+                            and pilot_sharp >= 18.0)
+            if pilot_rescue:
+                atsc1_carrier = True
             # Weak ATSC 1.0 gate (only checked in include_weak mode):
             # all three relaxed thresholds present. Catches carriers that
             # HDHomeRun's hardware front-end can resolve but our software
@@ -1199,6 +1225,8 @@ def run_scan(region: dict | None = None,
                        "vsb_asymmetry_db": vsb_asym,
                        "atsc3_db": atsc3_score,
                        "hot": atsc1_carrier}
+                if pilot_rescue:
+                    rec["pilot_rescue"] = True
                 if atsc1_carrier:
                     hot_atsc.append((atsc_rf, rec))
                 elif weak_atsc1 and include_weak:

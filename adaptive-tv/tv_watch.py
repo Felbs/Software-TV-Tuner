@@ -14,14 +14,23 @@ Usage: python tv_watch.py [program] [marginal] [mux]
   marginal  add show-all/no-skip decode flags (cliff-edge forced video)
   mux       legacy mode: play the whole mux file directly (all tracks)
 """
-import json, os, subprocess, sys, threading, time
+import json, os, shutil, subprocess, sys, threading, time
 from pathlib import Path
 
-MPV = r"C:\Program Files\MPV Player\mpv.exe"
-FFMPEG = r"C:\ffmpeg\bin\ffmpeg.exe"
-LIVE = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live\live.ts")
-SOLO = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live\live_solo.ts")
-IPC = r"\\.\pipe\mpv-tvtuna-super"
+IS_WIN = sys.platform == "win32"
+HERE = Path(__file__).resolve().parent
+if IS_WIN:
+    MPV = r"C:\Program Files\MPV Player\mpv.exe"
+    FFMPEG = r"C:\ffmpeg\bin\ffmpeg.exe"
+    _LIVE_DIR = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live")
+    IPC = r"\\.\pipe\mpv-tvtuna-super"
+else:   # platform layer: PATH binaries, in-repo live dir, unix IPC socket
+    MPV = shutil.which("mpv") or "mpv"
+    FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
+    _LIVE_DIR = HERE.parent / "tools" / "data" / "tv_live"
+    IPC = "/tmp/mpv-tvtuna-super"
+LIVE = _LIVE_DIR / "live.ts"
+SOLO = _LIVE_DIR / "live_solo.ts"
 MUXBPS = 19_392_658 / 8
 
 # MEMORY-TUNE (2026-07-10): PID/program-layout cache. Discovery (the 20 MB
@@ -71,22 +80,45 @@ def pmt_pids(prog, timeout=5):
     except Exception:
         return None
 
+def _ipc_scan(buf, req):
+    for line in buf.split(b"\n"):
+        if not line.strip(): continue
+        try: r = json.loads(line)
+        except ValueError: continue
+        if r.get("request_id") == req:
+            return r.get("data")
+    return None
+
 def ipc(command, req=None):
     msg = {"command": command}
     if req is not None: msg["request_id"] = req
+    data = json.dumps(msg).encode() + b"\n"
     try:
-        with open(IPC, "r+b", buffering=0) as p:
-            p.write(json.dumps(msg).encode() + b"\n")
+        if IS_WIN:   # mpv IPC = named pipe on Windows (plain file open works)
+            with open(IPC, "r+b", buffering=0) as p:
+                p.write(data)
+                if req is None: return True
+                t0 = time.time(); buf = b""
+                while time.time() - t0 < 3:
+                    buf += p.read(4096)
+                    got = _ipc_scan(buf, req)
+                    if got is not None: return got
+            return None
+        # Linux/Mac: mpv IPC = unix domain socket
+        import socket
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(3)
+            s.connect(IPC)
+            s.sendall(data)
             if req is None: return True
             t0 = time.time(); buf = b""
             while time.time() - t0 < 3:
-                buf += p.read(4096)
-                for line in buf.split(b"\n"):
-                    if not line.strip(): continue
-                    try: r = json.loads(line)
-                    except ValueError: continue
-                    if r.get("request_id") == req:
-                        return r.get("data")
+                try: chunk = s.recv(4096)
+                except OSError: break
+                if not chunk: break
+                buf += chunk
+                got = _ipc_scan(buf, req)
+                if got is not None: return got
     except OSError:
         return None
     return None
@@ -223,7 +255,13 @@ class Extractor:
             maps = ["-map", f"0:p:{self.prog}:v:0", "-an"]
         self.ff = subprocess.Popen(
             [FFMPEG, "-hide_banner", "-loglevel", "error",
-             "-fflags", "+genpts+igndts+nobuffer",   # discardcorrupt removed 7/10: the I-frame killer (anti-mosh)
+             # CC-salad forensics 2026-07-11: garbled captions
+             # ("PORTIA4093H@" letter-salad) were proven ON-AIR — ffmpeg
+             # decoded the same salad from the RAW mux (program 3, 19:00
+             # show), while the 18:50 show's captions decoded clean
+             # through this exact pipeline. These flags are innocent.
+             # discardcorrupt removed 7/10: the I-frame killer (anti-mosh)
+             "-fflags", "+genpts+igndts+nobuffer",
              "-err_detect", "ignore_err",
              "-analyzeduration", "2000000" if fast else "10000000",
              "-probesize", "3000000" if fast else "20000000",
@@ -275,11 +313,30 @@ def solo_edge():
 
 def seek_live_solo():
     ipc(["set_property", "pause", False])
-    # duration of a growing TS is unreliable; seek by percent near the end
-    ipc(["seek", "98", "absolute-percent+keyframes"])
+    # Seek to the LIVE EDGE with a small cushion, SIZE-INDEPENDENTLY.
+    # 2026-07-13: the old "98%" seek jumped back MINUTES once live_solo grew
+    # to hours of uptime (98% of a 2.5 h file = ~3 min behind) — that was
+    # the resync LOOP the user saw. Seek to (duration - cushion) instead:
+    # always ~a few seconds from the edge no matter how long the file is.
+    # mpv DOES track a live duration for the growing TS (verified: dur/pos
+    # agree to ~1 s); fall back to 98% only if it can't report one yet.
+    cushion = float(os.environ.get("STVT_LIVE_CUSHION", "4"))
+    dur = ipc(["get_property", "duration"], req=71)
+    if isinstance(dur, (int, float)) and dur > cushion + 2:
+        ipc(["seek", str(round(dur - cushion, 1)), "absolute+keyframes"])
+    else:
+        ipc(["seek", "98", "absolute-percent+keyframes"])
 
 def main():
     args = sys.argv[1:]
+    # Headless / tuner-only mode: the Pi has no HW MPEG-2 decode, so when it is
+    # acting purely as an HDHomeRun tuner (streaming to Jellyfin/Plex/etc.) it
+    # should not launch a local player at all — 100% of its CPU goes to the
+    # tuner chain. The panel still launches this script per tune; it just no-ops.
+    if os.environ.get("STVT_HEADLESS", "0") not in ("0", "", "false", "no"):
+        log("STVT_HEADLESS=1 — tuner-only mode; no local player "
+            "(the HDHomeRun server / media client handles playback)")
+        return
     prog = int(args[0]) if args and args[0].isdigit() else 3
     marginal = "marginal" in args
     muxmode = "mux" in args
@@ -403,11 +460,86 @@ def main():
            "--sub-create-cc-track=yes",
            f"--title=TV Tuna — program {prog}" + (" (solo)" if not muxmode else ""),
            ]
+    # captions OFF by default: showing the CC track at startup renders it
+    # glitched until toggled (mpv's cc_dec needs the stream established first).
+    # The track is still created + selectable — press 'v' (or set STVT_CC=on) to
+    # show it; it renders clean once the stream is up.
+    _cc_on = os.environ.get("STVT_CC", "off").lower() not in ("off", "0", "no", "false")
+    cmd.append("--sid=1" if _cc_on else "--sid=no")
+    # STVT_MPV_EXTRA: space-separated extra mpv flags — the experiment
+    # hook (A/B player knobs without code edits). Empty by default.
+    cmd += [f for f in os.environ.get("STVT_MPV_EXTRA", "").split() if f]
+    if not IS_WIN:
+        # WSLg/Wayland: the gpu VO black-screens under WSLg — wlshm is the
+        # June-proven reliable path (override with STVT_MPV_VO).
+        cmd += [f"--vo={os.environ.get('STVT_MPV_VO', 'wlshm')}"]
+    # STVT_DEINT (2026-07-12, ported from the June Pi lineage):
+    #   auto     (default) full-res yadif toggled at runtime for 1080-line
+    #            content — right for machines with CPU headroom
+    #   lowdeint June Pi recipe: half-res decode (lowres=1) + bwdif
+    #            send_frame — full-res software deinterlace does NOT fit
+    #            small boards (measured: NBC 1080i re-overloaded the Pi 5
+    #            chain, 4.3 oso/min + 2.2% cc-err through the full stack)
+    #   off      never deinterlace
+    LOWDEINT_FLAGS = ["--vd-lavc-o=lowres=1",
+                      "--vf=lavfi=[bwdif=mode=send_frame:deint=interlaced]"]
+    deint_mode = os.environ.get("STVT_DEINT", "auto")
+    lowdeint_applied = False
+    if (not IS_WIN and deint_mode == "lowdeint"
+            and (hit or {}).get("vheight", 0) >= 1080):
+        # decoder-open options — must ride the launch; height cached by a
+        # previous visit (see _auto_deint below)
+        cmd += LOWDEINT_FLAGS
+        lowdeint_applied = True
+        log("lowdeint at launch (cached %s-line)" % hit["vheight"])
     if marginal:
         # show-all removed 7/10: it forces pre-keyframe garbage frames
         # onto the screen — the opposite of anti-mosh
         cmd += ["--vd-lavc-skipframe=none", "--framedrop=no"]
-    mpv = subprocess.Popen(cmd)
+    mpv_h = {"p": subprocess.Popen(cmd)}
+
+    if not IS_WIN:
+        # FORMAT-AWARE DEINTERLACE (2026-07-11): 1080-line ATSC is always
+        # interlaced and NEEDS a deinterlacer (woven-field combing, the
+        # RF34 WRC lesson) — but FOX flags its 720p60 frames interlaced
+        # and a blanket yadif field-doubled them to 119.88 fps (choked
+        # the software VO). ATSC has no 720i, so the rule is BY HEIGHT.
+        # Height is read from mpv once frames decode, then CACHED so
+        # lowdeint launches can apply decoder-open flags immediately.
+        def _auto_deint():
+            for _ in range(40):                     # up to ~20 s
+                time.sleep(0.5)
+                h = ipc(["get_property", "video-params/h"], req=411)
+                if not h:
+                    continue
+                h = int(h)
+                try:                                # remember for next launch
+                    if RF != "?":
+                        c = load_pid_cache()
+                        e = c.get(key) or {}
+                        if e.get("vheight") != h:
+                            e["vheight"] = h
+                            c[key] = e
+                            save_pid_cache(c)
+                except Exception:
+                    pass
+                if h >= 1080:
+                    if deint_mode == "lowdeint" and not lowdeint_applied:
+                        # first visit to a 1080i channel in lowdeint mode:
+                        # decoder-open flags need one relaunch (cached after)
+                        log("lowdeint: relaunching player for %s-line" % h)
+                        try:
+                            mpv_h["p"].kill()
+                        except Exception:
+                            pass
+                        mpv_h["p"] = subprocess.Popen(cmd + LOWDEINT_FLAGS)
+                    elif deint_mode == "auto":
+                        ipc(["set_property", "deinterlace", True])
+                        log("auto-deinterlace ON (%s-line interlaced)" % h)
+                else:
+                    log("auto-deinterlace off (%sp progressive)" % h)
+                return
+        threading.Thread(target=_auto_deint, daemon=True).start()
     time.sleep(6)
 
     if muxmode:
@@ -492,11 +624,13 @@ def main():
         log(f"mux tracks by PMT: vid={vid} aid={aud} sid={sub} "
             f"(wanted v={want_v} a={a_want} s={want_s})")
     else:
-        # CC: loaded but HIDDEN — off by default, and one click of the OSC
-        # sub button (or 'v') shows it instantly. Force-selecting it
-        # visible at startup made the toggle need a full off/on cycle.
+        # CC track SELECTED (sid=1) so one 'v' press shows it instantly, but
+        # HIDDEN by default (STVT_CC=off) — showing it at startup renders
+        # glitched until toggled. Set STVT_CC=on to show it immediately.
         ipc(["set_property", "sid", 1])
-        ipc(["set_property", "sub-visibility", "no"])
+        _cc_vis = os.environ.get("STVT_CC", "off").lower() not in (
+            "off", "0", "no", "false")
+        ipc(["set_property", "sub-visibility", "yes" if _cc_vis else "no"])
         # AUDIO RULE (2026-07-05): English is the default; other languages
         # are optional translations behind the # key. Trust language TAGS
         # first (mpv --alang already does when they exist); only when the
@@ -524,7 +658,7 @@ def main():
     # first CC cycle ~20 s in (flushes any startup caption garbage that
     # slipped through), then every 8 min as before
     last_cc = time.time() - 460
-    while mpv.poll() is None:
+    while mpv_h["p"].poll() is None:
         time.sleep(5)
         if ex is not None and not ex.alive():
             log(f"extractor died — restarting it (mode={ex.mode})")
@@ -532,6 +666,30 @@ def main():
             ex.kill()
             ex = Extractor(prog, mode=mode, pids=pids); ex.start()
             time.sleep(3)
+        # SOLO ROTATION (2026-07-13): live_solo.ts grows ~0.6 MB/s and never
+        # truncated — 3.5 GB after 6 h uptime, which would eventually fill
+        # the disk. Recycle it past a cap. The seek-live-edge fix means
+        # playback rides the tail regardless of size, so the cap is LARGE
+        # and this fires rarely (~hourly) — a ~2 s reload blip, not the
+        # every-few-minutes churn a small cap would need.
+        try:
+            cap = int(os.environ.get("STVT_SOLO_CAP_MB", "1536")) * 1024 * 1024
+            if ex is not None and SOLO.exists() and SOLO.stat().st_size > cap:
+                log(f"live_solo rotate ({SOLO.stat().st_size//1048576} MB > cap)")
+                mode, pids = ex.mode, ex.pids
+                ex.kill()
+                ex = Extractor(prog, mode=mode, pids=pids); ex.start()
+                for _ in range(24):          # wait for the fresh file to fill
+                    time.sleep(0.5)
+                    if SOLO.exists() and SOLO.stat().st_size > 3_000_000:
+                        break
+                ipc(["loadfile", str(SOLO), "replace"])
+                time.sleep(2)
+                seek_live_solo()
+                last_pos = None
+                continue
+        except OSError:
+            pass
         pos = ipc(["get_property", "time-pos"], req=5)
         eof = ipc(["get_property", "eof-reached"], req=5)
         paused = ipc(["get_property", "pause"], req=5)
