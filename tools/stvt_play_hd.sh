@@ -48,7 +48,12 @@ log(){ echo "$(printf '%(%H:%M:%S)T' -1) $*" >> "$SUPLOG"; }
 #   no    : combing visible on 1080i motion.
 # deint=interlaced applies the filter ONLY to frames flagged interlaced, so
 # progressive 720p channels (Fox) pass through untouched.
-case "${STVT_DEINT:-field}" in
+case "${STVT_DEINT:-auto}" in
+  # auto (DEFAULT): resolved per-program in launch() from the video field order —
+  # progressive channels (Fox 720p60) get NO deint filter at all (clean, and it
+  # avoids the yadif cc_fifo caption fps-doubling); interlaced (1080i) gets full
+  # 60fps send_field deint. This is the robust fix for "glitchy progressive".
+  auto)      DEINT_FLAG="AUTO";;
   # low: decode 1080i at HALF resolution (960x540). ~1/4 the decode cost and
   # interlace combing collapses into sub-pixel blur — no filter needed at
   # all. The soft trade is minor on a sub-1080 panel. The only mode measured
@@ -88,6 +93,21 @@ launch(){
   vh=$(timeout 8 ffprobe -v error -show_entries program=program_id:stream=height \
         -of compact -i "$F" 2>/dev/null | grep -F "program_id=$PROG|" \
         | grep -oE 'height=[0-9]+' | head -1 | cut -d= -f2)
+  # AUTO deint: probe THIS program's field order and deinterlace only genuinely
+  # interlaced content. progressive -> no filter (no cc_fifo fps-doubling);
+  # interlaced -> 60fps send_field; unknown/empty -> safe send_frame conditional.
+  if [ "$deint" = "AUTO" ]; then
+    local fo
+    fo=$(timeout 8 ffprobe -v error -probesize 5M -analyzeduration 5M \
+          -show_entries program=program_id:stream=field_order -of compact \
+          -i "$F" 2>/dev/null | grep -F "program_id=$PROG|" \
+          | grep -oE 'field_order=[a-z]+' | head -1 | cut -d= -f2)
+    case "$fo" in
+      progressive) deint="--deinterlace=no"; log "prog $PROG PROGRESSIVE ($fo) — no deint" ;;
+      tt|bb|tb|bt) deint="--vf=lavfi=[yadif=mode=send_field:deint=interlaced]"; log "prog $PROG INTERLACED ($fo) — 60fps deint" ;;
+      *)           deint="--vf=lavfi=[yadif=mode=send_frame:deint=interlaced]"; log "prog $PROG field order unknown ('$fo') — safe conditional deint" ;;
+    esac
+  fi
   if [ -n "$vh" ] && [ "$vh" -lt 720 ]; then
     deint="--vf=lavfi=[bwdif=mode=send_frame:deint=interlaced]"
     fit="--autofit-larger='${STVT_FIT:-90%x90%}' --autofit-smaller='${STVT_FIT:-90%x90%}'"
@@ -126,8 +146,11 @@ launch(){
   # EIA-608/708 closed captions; mpv can surface them as a sub track, and when
   # the framerate was being doubled they rendered as gibberish. Keep them hidden
   # and don't auto-select a sub track unless the user opts in.
-  local subflags="--sub-visibility=no --no-sub-auto"
-  [ "${STVT_CC:-0}" = "1" ] && subflags="--sub-visibility=yes"
+  # --sid=no = select NO subtitle track at all (definitive off — mpv was still
+  # auto-selecting the embedded eia_608 CC track, which rendered as gibberish;
+  # --sub-visibility=no alone only HID a still-selected track). STVT_CC=1 shows it.
+  local subflags="--sid=no --sub-visibility=no --no-sub-auto"
+  [ "${STVT_CC:-0}" = "1" ] && subflags="--sid=1 --sub-visibility=yes"
   # Video error CONCEALMENT — what a TV does that we didn't: when a macroblock
   # arrives corrupt, interpolate it (guess motion vectors + deblock) from the
   # previous frame / neighbours instead of rendering garbage blocks. The signal
