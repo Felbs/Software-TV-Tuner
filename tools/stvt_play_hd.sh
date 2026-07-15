@@ -19,7 +19,10 @@
 #   tailMB  : how many MB from the live edge to start (default 25 ≈ ~20s cushion).
 set -u
 PROG="${1:-3}"
-BACKMB="${2:-25}"
+# Start further behind live (was 25) so mpv keeps a real forward cushion — a
+# drained cache (observed Cache: 0.0s) turns every brief chain drought into a
+# visible skip. 40MB ≈ ~32s behind live; trades latency for smoothness.
+BACKMB="${2:-40}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 F="$HERE/data/tv_live/live.ts"
 MPVLOG="/tmp/stvt_mpv.log"
@@ -150,7 +153,12 @@ launch(){
   # auto-selecting the embedded eia_608 CC track, which rendered as gibberish;
   # --sub-visibility=no alone only HID a still-selected track). STVT_CC=1 shows it.
   local subflags="--sid=no --sub-visibility=no --no-sub-auto"
-  [ "${STVT_CC:-0}" = "1" ] && subflags="--sid=1 --sub-visibility=yes"
+  # STVT_CC=1: show captions via mpv's own ffmpeg CC decoder (--sub-create-cc-track
+  # makes a subtitle track from the video's embedded A/53 EIA-608 and mpv selects
+  # it). This is the robust path — ffmpeg decodes these cleanly at 60fps whereas
+  # atsc_cc.py (the OSD bridge) does not. The old gibberish was the deint field-
+  # doubling corrupting the caption stream, which the auto field-order fix removed.
+  [ "${STVT_CC:-0}" = "1" ] && subflags="--sub-create-cc-track=yes --sid=1 --sub-visibility=yes"
   # Video error CONCEALMENT — what a TV does that we didn't: when a macroblock
   # arrives corrupt, interpolate it (guess motion vectors + deblock) from the
   # previous frame / neighbours instead of rendering garbage blocks. The signal
@@ -175,8 +183,8 @@ launch(){
       $ff_lowdelay -probesize 5M -analyzeduration 5M -err_detect ignore_err \
       -f mpegts -i - -map 0:p:$PROG:0 -map 0:p:$PROG:1? -map 0:p:$PROG:2? -map 0:p:$PROG:3? \
       -c copy -flush_packets 1 -f mpegts - | \
-    mpv - --vo=${STVT_MPV_VO:-gpu} --hwdec=${STVT_MPV_HWDEC:-no} --cache=yes --cache-secs=${STVT_CACHE_SECS:-8} --demuxer-max-bytes=128MiB \
-      --demuxer-readahead-secs=${STVT_CACHE_SECS:-8} --cache-pause=no --cache-pause-initial=no \
+    mpv - --vo=${STVT_MPV_VO:-gpu} --hwdec=${STVT_MPV_HWDEC:-no} --cache=yes --cache-secs=${STVT_CACHE_SECS:-30} --demuxer-max-bytes=128MiB \
+      --demuxer-readahead-secs=${STVT_CACHE_SECS:-30} --cache-pause=no --cache-pause-initial=no \
       $deint $aflimit $ec $subflags \
       --video-sync=$vsync \
       --alang=${STVT_ALANG:-eng,en} \
