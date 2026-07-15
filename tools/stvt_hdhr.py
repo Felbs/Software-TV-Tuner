@@ -208,39 +208,96 @@ def _wait_lock(rf, timeout=40):
     return []
 
 
+def _spawn_chain(rf):
+    """(Re)spawn tv_live on `rf` — full state reset. Caller MUST hold _tune_lock.
+    Returns the sorted program list on lock, [] on failure."""
+    global _cur_rf, _chain
+    if _chain is not None:
+        try:
+            _chain.terminate(); _chain.wait(timeout=5)
+        except Exception:
+            try:
+                _chain.kill()
+            except Exception:
+                pass
+    subprocess.run(["pkill", "-f", "[t]v_live.py"], check=False)
+    time.sleep(1)
+    try:
+        LIVE.unlink()
+    except OSError:
+        pass
+    env = {**os.environ, **TUNE_ENV}
+    _chain = subprocess.Popen(
+        ["python3", "tv_live.py", "--rf", str(rf),
+         "--rotate-gb", os.environ.get("STVT_ROTATE_GB", "8")],
+        cwd=str(TOOLS), env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL, start_new_session=True)
+    _cur_rf = rf
+    return _wait_lock(rf)
+
+
 def ensure_tuned(rf):
     """Tune the single SDR to `rf` if not already there. Returns the sorted
     program list (truthy) on lock, [] on failure."""
-    global _cur_rf, _chain
     with _tune_lock:
         if _cur_rf == rf and chain_alive():
             progs = pat_programs(LIVE)
             if progs:
                 return progs
-        # (re)spawn the chain on rf
-        if _chain is not None:
-            try:
-                _chain.terminate(); _chain.wait(timeout=5)
-            except Exception:
-                try:
-                    _chain.kill()
-                except Exception:
-                    pass
-        subprocess.run(["pkill", "-f", "[t]v_live.py"], check=False)
-        time.sleep(1)
-        try:
-            LIVE.unlink()
-        except OSError:
-            pass
-        env = {**os.environ, **TUNE_ENV}
-        _chain = subprocess.Popen(
-            ["python3", "tv_live.py", "--rf", str(rf),
-             "--rotate-gb", os.environ.get("STVT_ROTATE_GB", "8")],
-            cwd=str(TOOLS), env=env,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL, start_new_session=True)
-        _cur_rf = rf
-        return _wait_lock(rf)
+        return _spawn_chain(rf)
+
+
+# ---- drought watchdog --------------------------------------------------------
+DROUGHT_PIDS = int(os.environ.get("STVT_HDHR_DROUGHT_PIDS", "150"))
+DROUGHT_STRIKES = int(os.environ.get("STVT_HDHR_DROUGHT_STRIKES", "3"))
+SUPERVISE = os.environ.get("STVT_HDHR_SUPERVISE", "1") == "1"
+_SUP_INTERVAL = int(os.environ.get("STVT_HDHR_SUP_INTERVAL", "15"))
+
+
+def _live_unique_pids(nbytes=2_000_000):
+    """(#unique PIDs, #packets) in the last nbytes of live.ts."""
+    try:
+        sz = LIVE.stat().st_size
+        with open(LIVE, "rb") as f:
+            f.seek(max(0, sz - nbytes)); d = f.read()
+    except OSError:
+        return 0, 0
+    pids = set(); i = d.find(b"\x47"); n = 0
+    while i >= 0 and i + 188 <= len(d):
+        if d[i] == 0x47:
+            pids.add(((d[i + 1] & 0x1f) << 8) | d[i + 2]); n += 1; i += 188
+        else:
+            i += 1
+    return len(pids), n
+
+
+def _supervisor():
+    """Watch live.ts for a sustained decode DROUGHT — locked carrier but garbage
+    output, seen as hundreds/thousands of unique PIDs (a healthy mux is ~20-50).
+    On DROUGHT_STRIKES consecutive strikes, RESTART the chain: a full state reset,
+    the proven cure for the MOD-12/OsO stream-phase slip that the in-chain
+    re-acquire doesn't reliably clear on a slower CPU. This gives the streaming
+    path the same self-healing stvt_run.sh has (a soak measured a ~12-minute
+    unsupervised drought on RF36 — restart cuts that to ~1 minute)."""
+    strikes = 0
+    while True:
+        time.sleep(_SUP_INTERVAL)
+        if _cur_rf is None or not chain_alive():
+            strikes = 0; continue
+        uniq, n = _live_unique_pids()
+        if n > 0 and uniq > DROUGHT_PIDS:
+            strikes += 1
+            if strikes >= DROUGHT_STRIKES:
+                rf = _cur_rf
+                print(f"[stvt_hdhr] DROUGHT on RF{rf} ({uniq} PIDs, "
+                      f"{strikes} strikes) — restarting chain", flush=True)
+                with _tune_lock:
+                    if _cur_rf == rf and chain_alive():
+                        _spawn_chain(rf)
+                strikes = 0
+        else:
+            strikes = 0
 
 
 _active_lock = threading.Lock()
@@ -392,9 +449,11 @@ class H(BaseHTTPRequestHandler):
 
 
 def main():
+    if SUPERVISE:
+        threading.Thread(target=_supervisor, daemon=True).start()
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), H)
     print(f"[stvt_hdhr] serving on {BASE}  ({len(load_lineup())} channels)  "
-          f"discover: {BASE}/discover.json", flush=True)
+          f"discover: {BASE}/discover.json  supervise={SUPERVISE}", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
