@@ -57,7 +57,13 @@ case "${STVT_DEINT:-field}" in
   # low+yadif: deinterlace AT the halved resolution (~1/4 the filter cost
   # that failed at 1080) — removes residual half-res combing on motion.
   lowdeint)  DEINT_FLAG="--vd-lavc-o=lowres=1 --vf=lavfi=[bwdif=mode=send_frame:deint=interlaced]";;
-  field|yes) DEINT_FLAG="--deinterlace=yes";;
+  # field: full 60fps deint, but INTERLACED-ONLY via lavfi yadif (send_field =
+  # one frame per field = 60fps from 1080i). deint=interlaced means yadif skips
+  # frames flagged progressive, so 720p60 (Fox) passes through untouched. The old
+  # `--deinterlace=yes` was mpv's UNCONDITIONAL deinterlacer: it doubled
+  # progressive 59.94fps -> 119.88fps (the fps=120000/1001 in the cc_fifo error),
+  # which made 720p channels glitchy and garbled their captions.
+  field|yes) DEINT_FLAG="--vf=lavfi=[yadif=mode=send_field:deint=interlaced]";;
   # lavfi wrapper, NOT mpv's own yadif: mpv runs its filter on the single
   # video thread (measured: 2944 drops + video 61s behind audio), while the
   # lavfi graph slice-threads yadif across all cores.
@@ -116,6 +122,12 @@ launch(){
   #     slips through is clamped, never full-scale. STVT_AUDIO_LIMIT=0 disables.
   local aflimit="--af=alimiter=limit=0.9:level=disabled"
   [ "${STVT_AUDIO_LIMIT:-1}" = "0" ] && aflimit=""
+  # Captions OFF by default (STVT_CC=1 to show). ATSC programs carry embedded
+  # EIA-608/708 closed captions; mpv can surface them as a sub track, and when
+  # the framerate was being doubled they rendered as gibberish. Keep them hidden
+  # and don't auto-select a sub track unless the user opts in.
+  local subflags="--sub-visibility=no --no-sub-auto"
+  [ "${STVT_CC:-0}" = "1" ] && subflags="--sub-visibility=yes"
   # Video error CONCEALMENT — what a TV does that we didn't: when a macroblock
   # arrives corrupt, interpolate it (guess motion vectors + deblock) from the
   # previous frame / neighbours instead of rendering garbage blocks. The signal
@@ -142,7 +154,7 @@ launch(){
       -c copy -flush_packets 1 -f mpegts - | \
     mpv - --vo=${STVT_MPV_VO:-gpu} --hwdec=${STVT_MPV_HWDEC:-no} --cache=yes --cache-secs=${STVT_CACHE_SECS:-8} --demuxer-max-bytes=128MiB \
       --demuxer-readahead-secs=${STVT_CACHE_SECS:-8} --cache-pause=no --cache-pause-initial=no \
-      $deint $aflimit $ec \
+      $deint $aflimit $ec $subflags \
       --video-sync=$vsync \
       --alang=${STVT_ALANG:-eng,en} \
       $fit \
