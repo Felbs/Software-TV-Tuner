@@ -259,6 +259,8 @@ All knobs are env vars read by `tv_live.py` (defaults in parentheses):
 | `STVT_ANTENNA` | `Antenna A` | SDRplay antenna port |
 | `STVT_FPLL_FOLD` | `0` | Fold the DC-blocker + AGC into the FPLL's output loop (one pass instead of three blocks). Bit-exact; ~6% less CPU. `stvt_run.sh` sets `1`. |
 | `STVT_FPLL_BLOCK_NCO` | `0` | Block-wise carrier loop in the FPLL — generate the NCO mixer by complex recurrence and run the loop filter once per block instead of per sample. Decode-identical; ~6–8% less CPU on top of the fold. `stvt_run.sh` sets `1`. |
+| `STVT_RXF_FUSED` | `0` | Fuse the resampler + matched filter into one fixed-ratio stage — replaces the CPU-heavy arbitrary polyphase resampler. ~+4% real-time on a CPU-bound box; locks clean. See [`docs/smooth-live-recipe.md`](docs/smooth-live-recipe.md). |
+| `STVT_CC` | `0` | Closed captions. `1` = extract the video's embedded EIA-608 (`mpv --sub-create-cc-track`) and show them. |
 
 > **Performance defaults.** `tools/stvt_run.sh` — the recommended way to watch —
 > enables `STVT_FPLL_FOLD=1` and `STVT_FPLL_BLOCK_NCO=1` by default. Together they
