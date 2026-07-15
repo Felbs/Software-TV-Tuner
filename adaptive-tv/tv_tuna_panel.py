@@ -16,7 +16,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-TOOLS = Path(r"Z:\src\magic-tv-decoder\tools")
+IS_WIN = sys.platform == "win32"
+# tools/ dir — platform layer: env override, in-repo sibling, Windows rig path.
+_tools_candidates = [
+    Path(p) for p in ([os.environ["STVT_TOOLS_DIR"]]
+                      if os.environ.get("STVT_TOOLS_DIR") else [])
+] + [HERE.parent / "tools", Path(r"Z:\src\magic-tv-decoder\tools")]
+TOOLS = next((p for p in _tools_candidates if (p / "tv_live.py").exists()),
+             _tools_candidates[-1])
 sys.path.insert(0, str(TOOLS)); sys.path.insert(0, str(HERE))
 from stvt_epg import load_epg, SCAN_PATH
 from tv_lab import ts_metrics
@@ -25,7 +32,17 @@ import deep_tune as dtn   # DEEP TUNE channel doctor (2026-07-10 late)
 import antenna_id as aid  # antenna auto-identification (2026-07-11)
 
 PY = sys.executable
-LIVE = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live\live.ts")
+LIVE = TOOLS / "data" / "tv_live" / "live.ts"
+# FEATURE GOVERNOR seed (2026-07-11, born on the WSL port): the full
+# Windows decode arsenal (soft Viterbi + SOVA + TURBO + RFNOTCH + RRC 8)
+# misses the real-time deadline on WSL-over-SoapyRemote — measured
+# 10,728 source overflows / 1.15% loss / 1606 KB/s on an RF34 that the
+# lean chain decodes at 2400 KB/s / 0.0%. Law (this file, DD eviction):
+# never run a live feature the machine can't afford. Start every
+# non-Windows machine LEAN; force with STVT_CHAIN_PROFILE=full|lean
+# after an overflow-gated A/B proves the hardware (OsO == 0).
+LEAN_CHAIN = (os.environ.get("STVT_CHAIN_PROFILE")
+              or ("full" if IS_WIN else "lean")) == "lean"
 CHAIN_LOG = HERE / "lab" / "panel_chain.log"
 PORT = 8642
 
@@ -273,29 +290,55 @@ def run_scan():
         # one had locks, restore the prior and stash the dud for study.
         dur = int(time.time() - SCAN["t0"]) if SCAN["t0"] else 0
         if prev.exists() and locks_in(SCAN_PATH) == 0 and locks_in(prev) > 0:
+            dud_txt = SCAN_PATH.read_text(encoding="utf-8")
             SCAN_PATH.with_name("scan_dud.json").write_text(
-                SCAN_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+                dud_txt, encoding="utf-8")
             SCAN_PATH.write_text(prev.read_text(encoding="utf-8"),
                                  encoding="utf-8")
+            # a zero-lock sweep is still a valid FINGERPRINT: an antenna
+            # that can't decode anything (discone on UHF) still hears a
+            # distinctive spectrum. Identify from the dud so enrollment
+            # never requires decodable TV (2026-07-11 port-C lesson).
+            id_note = ""
+            try:
+                ev = antid_event(aid.observe_scan(scan=json.loads(dud_txt)))
+                if ev.get("name"):
+                    id_note = " · 🪪 %s" % ev["name"]
+                elif ev.get("verdict") not in (None, "UNUSABLE", "NOOP"):
+                    id_note = " · 🪪 antenna %s" % ev["verdict"].lower()
+            except Exception:
+                pass
             SCAN.update({"pct": 100, "t0": None,
                          "line": f"scan ({dur}s) found NO locks — kept the "
-                                 "previous good channel map (dud saved aside)"})
+                                 "previous good channel map (dud saved "
+                                 f"aside){id_note}"})
         else:
             # antenna auto-ID: the scan's phase-1 sweep is a free
             # fingerprint — match it against the profile ledger (zero
             # extra radio time). Failure here never breaks a scan.
             id_note = ""
+            id_name = ""
             try:
                 ev = antid_event(aid.observe_scan())
                 if ev.get("needs_epoch"):
                     fresh_epoch(json.loads(SCAN_PATH.read_text(
                         encoding="utf-8")).get("antenna"))
-                if ev.get("verdict") == "RECOGNIZED" and ev.get("name"):
-                    id_note = " · 🪪 %s" % ev["name"]
-                elif ev.get("verdict") in ("NEW", "MOVED", "CHANGED"):
-                    id_note = " · 🪪 antenna %s" % ev["verdict"].lower()
+                # observe_scan returns UPDATED for a recognized antenna whose
+                # reference just got EMA-refreshed (not the literal
+                # "RECOGNIZED") — treat every same-antenna verdict as a
+                # recognition so the grid plainly names who it found.
+                v = ev.get("verdict")
+                if ev.get("name") and v in ("RECOGNIZED", "UPDATED",
+                                            "ADOPTED", "MOVED"):
+                    id_name = ev["name"]
+                    tag = {"MOVED": "moved here",
+                           "ADOPTED": "enrolled"}.get(v, "recognized")
+                    id_note = " · 🪪 %s (%s)" % (ev["name"], tag)
+                elif v in ("NEW", "CHANGED", "ASK"):
+                    id_note = " · 🪪 antenna %s" % v.lower()
             except Exception:
                 pass
+            stash_scan(id_name)
             SCAN.update({"pct": 100, "t0": None,
                          "line": f"scan complete in {dur}s — guide "
                                  f"refreshed{id_note}"})
@@ -304,18 +347,93 @@ def run_scan():
     finally:
         SCAN["running"] = False
 
+# ── per-antenna scan memory (user feature 2026-07-11) ─────────────
+# Every finished scan is attached to the antenna the fingerprint
+# recognized, so each antenna keeps its own last guide grid and the
+# user can toggle the grid between antennas without rescanning.
+SCANS_DIR = HERE / "lab" / "scans"
+
+def stash_scan(name_hint=""):
+    try:
+        d = json.loads(SCAN_PATH.read_text(encoding="utf-8"))
+        key = (name_hint or d.get("antenna") or "unknown").strip()
+        slug = re.sub(r"[^A-Za-z0-9._-]+", "_", key)[:60] or "unknown"
+        SCANS_DIR.mkdir(parents=True, exist_ok=True)
+        (SCANS_DIR / (slug + ".json")).write_text(
+            json.dumps({"key": key, "scan": d}), encoding="utf-8")
+    except Exception:
+        pass
+
+def list_scans():
+    out = []
+    try:
+        for f in sorted(SCANS_DIR.glob("*.json")):
+            try:
+                w = json.loads(f.read_text(encoding="utf-8"))
+                sc = w.get("scan") or {}
+                out.append({
+                    "file": f.stem, "key": w.get("key") or f.stem,
+                    "antenna": sc.get("antenna"),
+                    "scanned_at": sc.get("scanned_at"),
+                    "locks": sum(1 for c in sc.get("channels", [])
+                                 if c.get("lock"))})
+            except Exception:
+                continue
+    except OSError:
+        pass
+    return out
+
+def select_scan(file_stem):
+    """Make a stashed scan the ACTIVE guide grid (non-destructive: every
+    antenna's scan stays stashed; this only swaps what the grid shows)."""
+    # slug whitelist — the stem must be exactly what stash_scan produces
+    # (no separators), so a crafted path can never escape SCANS_DIR
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,60}", file_stem or ""):
+        return False
+    f = SCANS_DIR / (file_stem + ".json")
+    if not f.exists():
+        return False
+    try:
+        w = json.loads(f.read_text(encoding="utf-8"))
+        SCAN_PATH.write_text(json.dumps(w["scan"]), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
 # ── waterfall sweeper ──────────────────────────────────────────────
 WF = {"rows": [], "freqs": None, "status": "starting", "row_id": 0}
 WF_LOCK = threading.Lock()
 SWEEP_LO, SWEEP_HI, HOP = 473e6, 605e6, 6e6   # UHF TV band, 6 MHz hops
 
 def chain_running():
-    r = subprocess.run(["powershell", "-NoProfile", "-Command",
-                        "(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" "
-                        "| Where-Object { $_.CommandLine -match 'tv_live' }).Count"],
+    if IS_WIN:
+        r = subprocess.run(["powershell", "-NoProfile", "-Command",
+                            "(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" "
+                            "| Where-Object { $_.CommandLine -match 'tv_live' }).Count"],
+                           capture_output=True, text=True, timeout=20)
+        try: return int((r.stdout or "0").strip() or 0) > 0
+        except ValueError: return False
+    # Linux: pgrep called directly (no shell wrapper) can't self-match —
+    # the pgrep-self-match trap only bites pattern-in-wrapper invocations.
+    r = subprocess.run(["pgrep", "-f", r"tv_live\.py"],
                        capture_output=True, text=True, timeout=20)
-    try: return int((r.stdout or "0").strip() or 0) > 0
-    except ValueError: return False
+    return bool(r.stdout.strip())
+
+def mpv_up():
+    """Is the mpv player process alive? (platform layer)
+
+    In STVT_HEADLESS (tuner-only) mode there is no local player by design, so
+    the tune-completion gates that wait for mpv would otherwise stall the full
+    150 s. Report 'up' immediately — a headless tune is complete once the chain
+    locks, not when a player that will never start appears."""
+    if os.environ.get("STVT_HEADLESS", "0") not in ("0", "", "false", "no"):
+        return True
+    if IS_WIN:
+        r = subprocess.run(["tasklist", "/FI", "IMAGENAME eq mpv.exe"],
+                           capture_output=True, text=True)
+        return "mpv.exe" in (r.stdout or "")
+    r = subprocess.run(["pgrep", "-x", "mpv"], capture_output=True, text=True)
+    return bool(r.stdout.strip())
 
 def sweeper():
     import numpy as np
@@ -647,6 +765,69 @@ def flat_start(rf):
     threading.Thread(target=flat_loop, args=(rf,), daemon=True).start()
 
 # ── tuning / recording actions ─────────────────────────────────────
+def _pilot_autopilot(rf, rfsel, ifgr, default_ant):
+    """ANTENNA AUTOPILOT (2026-07-11, 'the whole point of the fingerprint'):
+    port-keyed habits tune the wrong socket after a physical swap — FOX was
+    aimed at a port whose antenna had left (pilot +27 there vs +51 on the
+    port next door) and the picture died. When the user hasn't pinned an
+    antenna and the tuner is free, race THIS channel's pilot across every
+    occupied port (~3-8 s each over the remote transport) and follow the
+    strongest signal. The fingerprint ledger supplies the occupied-port
+    list and antenna names for the verdict line. Returns the winning port,
+    or None to keep the default (needs +3 dB to overrule a calibrated
+    default — a wash respects the recipe)."""
+    try:
+        led = aid.load_profiles()
+        cur = led.get("port_current") or {}
+        ports = sorted(set(cur.keys()) | {default_ant})
+        names = {}
+        for port, pid in cur.items():
+            nm = (led.get("profiles", {}).get(pid) or {}).get("name")
+            if nm:
+                names[port] = nm
+    except Exception:
+        return None
+    if len(ports) < 2:
+        # thin ledger (fresh install): race the tuner's full port set,
+        # not just what's enrolled — a blank brain must still FIND the
+        # antenna a station lives on (2026-07-11 from-zero exam: FOX was
+        # unreachable because only port A was known). Override for other
+        # hardware with STVT_PORTS="Antenna A,Antenna B".
+        extra = os.environ.get("STVT_PORTS",
+                               "Antenna A,Antenna B,Antenna C")
+        ports = sorted(set(ports)
+                       | {p.strip() for p in extra.split(",") if p.strip()})
+    if len(ports) < 2:
+        return None
+    set_stage(6, "🧭 antenna autopilot — racing this channel's pilot "
+                 "across %d ports" % len(ports))
+    freq = int(aid.rf_to_mhz(rf) * 1e6)
+    readings = {}
+    for port in ports:
+        try:
+            out = subprocess.run(
+                [PY, "-u", str(TOOLS / "sdr_sweep.py"), "--mode", "atsc",
+                 "--antenna", port, "--rfgain-sel", str(rfsel),
+                 "--ifgr", str(ifgr), "--dwell-sec", "0.25",
+                 "--settle-sec", "0.1", "--freq", str(freq)],
+                capture_output=True, text=True, timeout=30).stdout
+            readings[port] = json.loads(out)[0].get("pilot_snr_db", -99.0)
+        except Exception:
+            continue
+    if not readings:
+        return None
+    line = "  ".join("%s %+.0f" % (names.get(p, p), s)
+                     for p, s in sorted(readings.items()))
+    best = max(readings, key=readings.get)
+    base = readings.get(default_ant, -99.0)
+    print("[autopilot] RF%s pilots: %s" % (rf, line), flush=True)
+    if best != default_ant and readings[best] >= base + 3.0:
+        set_stage(8, "🧭 autopilot: %s — following %s"
+                     % (line, names.get(best, best)))
+        return best
+    return None
+
+
 def base_env(rf):
     rfsel, ifgr = GAINS.get(rf, DEFAULT_GAIN)
     # DEEP TUNE recipe consult (2026-07-10 late): a measured recipe
@@ -666,13 +847,25 @@ def base_env(rf):
                 + (f" — recipe from {age:.0f} days ago"
                    if age > dtn.STALE_DAYS else ""))
     env = os.environ.copy()
-    env["PATH"] = (r"C:\Program Files\SDRplay\API\x64;C:\ffmpeg\bin;"
-                   + env.get("PATH", ""))
+    if IS_WIN:   # SDRplay API DLL + bundled ffmpeg (Windows only; Linux uses PATH)
+        env["PATH"] = (r"C:\Program Files\SDRplay\API\x64;C:\ffmpeg\bin;"
+                       + env.get("PATH", ""))
     # user override first (the user picks the antenna; the code's job
     # is to decode whatever it's given) — recipe antenna next, then
     # belief-map auto as the fallback
     _ant = (STATE.get("ant_override") or (recipe or {}).get("antenna")
             or antenna_for(rf))
+    # antenna autopilot: recipes/beliefs are keyed by PORT LABEL and go
+    # stale the moment antennas physically move — measure, don't trust.
+    # Skipped when the user pinned an antenna or the chain is up (hop/
+    # persistent-retune paths keep the tuner busy).
+    if not STATE.get("ant_override") and not chain_running():
+        _picked = _pilot_autopilot(rf, rfsel, ifgr, _ant)
+        if _picked:
+            note += (" · 🧭 autopilot moved this tune to %s" % _picked
+                     if note else "🧭 autopilot: strongest signal on %s"
+                     % _picked)
+            _ant = _picked
     if recipe:
         if (STATE.get("ant_override")
                 and STATE["ant_override"] != recipe.get("antenna")):
@@ -736,27 +929,67 @@ def base_env(rf):
                 # time-knob v2: scans append quality samples here
                 "STVT_QUALITY_HISTORY": str(HERE / "lab"
                                             / "quality_history.csv")})
+    if LEAN_CHAIN:
+        # governor: June-proven WSL real-time set — decode essentials +
+        # cheap bookkeeping; the heavy levers wait for a proven machine.
+        # IQ_RING=0: the 35 s raw-IQ ring writes ~50 MB/s to disk — on a
+        # WSL VHD that I/O fights the 8 MS/s TCP stream (measured: 224
+        # overflows in 40 s with the ring, 0 without on direct chains).
+        # STVT_CHAIN_EQ: machines that can't run the long float EQ in
+        # real time set this to "stock" (Pi 5 measured 2026-07-11:
+        # long EQ = 1763 KB/s / 14.8 oso/min even with fused+minbuf;
+        # stock EQ = 2366 KB/s / ZERO overflows — a lean chain that
+        # holds real-time beats a fancy chain that overflows).
+        env.update({"STVT_VITERBI": "hard", "STVT_RS": "stock",
+                    "STVT_SOVA": "0", "STVT_TURBO": "0",
+                    "STVT_RFNOTCH": "0", "STVT_EQ_CIR": "0",
+                    "STVT_RRC_SYMS": "4", "STVT_IQ_RING": "0",
+                    "STVT_EQ": os.environ.get("STVT_CHAIN_EQ", "long")})
+        # PER-CHANNEL EQ (2026-07-12, the saturation lesson): the strong
+        # EQ costs ~302% CPU on a Pi 5 — with player+UI that is ~93%
+        # saturation and ambient jitter punctures it ~3 oso/min. Most
+        # channels don't need it (FOX on stock = 0.0035% overnight);
+        # only real-multipath channels (NBC RF34: 43-79% garbage on
+        # stock) earn the heavy EQ. lab/eq_map.json: {"34": "long",
+        # "default": "stock"} — measured need, not vibes.
+        try:
+            eq_map = json.loads((HERE / "lab" / "eq_map.json")
+                                .read_text(encoding="utf-8"))
+            env["STVT_EQ"] = eq_map.get(str(rf), eq_map.get("default",
+                                                            env["STVT_EQ"]))
+        except (OSError, ValueError):
+            pass
     return env
 
 def kill_watch():
     """Kill only the player side (tv_watch/mpv/ffmpeg) — the chain keeps
     decoding. This is what makes same-mux hops instant."""
-    subprocess.run(["powershell", "-NoProfile", "-Command",
-                    "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
-                    "Where-Object { $_.CommandLine -match 'tv_watch' } | "
-                    "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
-                    "-ErrorAction SilentlyContinue }"], capture_output=True)
-    subprocess.run(["taskkill", "/F", "/IM", "mpv.exe"], capture_output=True)
-    subprocess.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True)
+    if IS_WIN:
+        subprocess.run(["powershell", "-NoProfile", "-Command",
+                        "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+                        "Where-Object { $_.CommandLine -match 'tv_watch' } | "
+                        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
+                        "-ErrorAction SilentlyContinue }"], capture_output=True)
+        subprocess.run(["taskkill", "/F", "/IM", "mpv.exe"], capture_output=True)
+        subprocess.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True)
+        return
+    subprocess.run(["pkill", "-f", r"tv_watch\.py"], capture_output=True)
+    subprocess.run(["pkill", "-x", "mpv"], capture_output=True)
+    subprocess.run(["pkill", "-x", "ffmpeg"], capture_output=True)
 
 def kill_tv():
-    subprocess.run(["powershell", "-NoProfile", "-Command",
-                    "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
-                    "Where-Object { $_.CommandLine -match 'tv_live|tv_watch' } | "
-                    "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
-                    "-ErrorAction SilentlyContinue }"], capture_output=True)
-    subprocess.run(["taskkill", "/F", "/IM", "mpv.exe"], capture_output=True)
-    subprocess.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True)
+    if IS_WIN:
+        subprocess.run(["powershell", "-NoProfile", "-Command",
+                        "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+                        "Where-Object { $_.CommandLine -match 'tv_live|tv_watch' } | "
+                        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
+                        "-ErrorAction SilentlyContinue }"], capture_output=True)
+        subprocess.run(["taskkill", "/F", "/IM", "mpv.exe"], capture_output=True)
+        subprocess.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True)
+        return
+    subprocess.run(["pkill", "-f", r"tv_live\.py|tv_watch\.py"], capture_output=True)
+    subprocess.run(["pkill", "-x", "mpv"], capture_output=True)
+    subprocess.run(["pkill", "-x", "ffmpeg"], capture_output=True)
 
 def set_stage(pct, msg):
     STATE.update({"stage": msg, "stage_pct": pct})
@@ -1095,10 +1328,7 @@ def tune(rf, prog, virtual, name, force_respawn=False):
             while time.time() - t0 < 120:
                 if GEN[0] != my_gen:
                     return
-                r = subprocess.run(["tasklist", "/FI",
-                                    "IMAGENAME eq mpv.exe"],
-                                   capture_output=True, text=True)
-                if "mpv.exe" in (r.stdout or ""):
+                if mpv_up():
                     break
                 time.sleep(1)
             set_stage(100, "")
@@ -1230,10 +1460,7 @@ def tune(rf, prog, virtual, name, force_respawn=False):
             while time.time() - t2 < 120:
                 if GEN[0] != my_gen:
                     return
-                r = subprocess.run(["tasklist", "/FI",
-                                    "IMAGENAME eq mpv.exe"],
-                                   capture_output=True, text=True)
-                if "mpv.exe" in (r.stdout or ""):
+                if mpv_up():
                     break
                 time.sleep(1)
             set_stage(100, "")
@@ -1463,9 +1690,7 @@ def tune(rf, prog, virtual, name, force_respawn=False):
             player_up = False
             while time.time() - t0 < 150:
                 if GEN[0] != my_gen: return
-                r = subprocess.run(["tasklist", "/FI", "IMAGENAME eq mpv.exe"],
-                                   capture_output=True, text=True)
-                if "mpv.exe" in (r.stdout or ""):
+                if mpv_up():
                     player_up = True
                     break
                 time.sleep(1)
@@ -1817,6 +2042,7 @@ canvas{width:100%;image-rendering:pixelated;display:block;border-radius:4px}
 <option value="Antenna C">Antenna C</option>
 </select>
 <span style="color:#8aa">— you pick the antenna, the code decodes whatever it's given</span></div>
+<div id="scanmem" style="margin:4px 0"></div>
 <div id="grid">loading guide…</div></div>
 <div id="pageN" style="display:none">
   <div class="cards" id="mathcards"></div>
@@ -2021,7 +2247,34 @@ toast(await r.json())}
 async function deepTune(){
 toast('🔬 DEEP TUNE — the channel doctor takes the tuner: baseline, antenna race, gain grid. Verdict + recipe when done. Click any station to abort.');
 const r=await fetch('/api/deeptune',{method:'POST',body:'{}'});toast(await r.json())}
+let SCANMEM=[];
+async function loadScans(){try{
+const scans=await (await fetch('/api/scans')).json();
+SCANMEM=scans;
+const el=document.getElementById('scanmem'); if(!el)return;
+if(!scans.length){el.innerHTML='';return}
+el.textContent='';
+const lbl=document.createElement('span');
+lbl.style.cssText='color:#9fb4d0;font-size:12px';
+lbl.textContent='🗂 antenna grids: ';
+el.appendChild(lbl);
+scans.forEach((s,i)=>{
+  const when=(s.scanned_at||'').slice(11,16);
+  const b=document.createElement('button');
+  b.className='tune';
+  b.style.cssText='font-size:12px;padding:2px 8px;margin:2px';
+  b.title="show this antenna's last scan in the grid";
+  b.textContent=`${s.key} · ${s.locks} ch${when?' · '+when:''}`;
+  b.onclick=()=>pickScan(i);           // DOM-built: antenna names can
+  el.appendChild(b);                   // contain quotes safely
+});}catch(e){}}
+async function pickScan(i){
+const s=SCANMEM[i]; if(!s)return;
+await fetch('/api/scan_select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file:s.file})});
+toast('🗂 grid switched to '+s.key+"'s last scan");
+loadGrid();}
 async function loadGrid(){const g=await (await fetch('/api/grid')).json();
+loadScans();
 SURF=[];
 let h='<table><tr><th>station</th>';g.slots.forEach(s=>h+='<th>'+s+'</th>');h+='<th></th></tr>';
 let lastRf=null;
@@ -2508,6 +2761,8 @@ class H(BaseHTTPRequestHandler):
             self._send(json.dumps(out))
         elif self.path == "/api/grid":
             self._send(json.dumps(grid_json()))
+        elif self.path == "/api/scans":
+            self._send(json.dumps(list_scans()))
         elif self.path == "/api/status":
             st = {k: STATE[k] for k in ("rf", "prog", "virtual", "name", "tuning")}
             st["ant"] = STATE.get("ant_override") or "auto"
@@ -2607,6 +2862,12 @@ class H(BaseHTTPRequestHandler):
                              args=(rf, prog, virt, req.get("name", "")),
                              daemon=True).start()
             self._send('"tuning"')
+        elif self.path == "/api/scan_select":
+            f = str(req.get("file") or "")
+            if select_scan(f):
+                self._send('"ok"')
+            else:
+                self._send('"unknown scan"')
         elif self.path == "/api/stop":
             threading.Thread(target=stop_tv, daemon=True).start()
             self._send('"stopped"')
@@ -2796,9 +3057,16 @@ def chain_doctor():
             alive = 0
             for pr in psutil.process_iter(["name", "cmdline"]):
                 try:
-                    if pr.info["name"] == "python.exe" and any(
-                            "tv_live" in (c or "")
-                            for c in (pr.info["cmdline"] or [])):
+                    # match by CMDLINE, not interpreter name: the chain runs
+                    # as "python.exe" on Windows but "python3" on Linux/Pi.
+                    # The old name=="python.exe" gate made chain_doctor blind
+                    # on every non-Windows box — it saw an alive chain as
+                    # dead and "healed" (re-tuned) it ~4x in the first 3 min
+                    # after each tune, dropping lock and churning the SDR
+                    # into the "intermittent" freezes (2026-07-12 Pi). The
+                    # tv_live.py token is the portable, specific signal.
+                    if any("tv_live.py" in (c or "")
+                           for c in (pr.info["cmdline"] or [])):
                         alive += 1
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
@@ -2834,5 +3102,9 @@ if __name__ == "__main__":
         threading.Thread(target=sweeper, daemon=True).start()
     threading.Thread(target=flight_recorder, daemon=True).start()
     threading.Thread(target=chain_doctor, daemon=True).start()
-    print(f"TV Tuna panel: http://localhost:{PORT}", flush=True)
-    Panel(("127.0.0.1", PORT), H).serve_forever()
+    # STVT_PANEL_BIND: bind address. Default localhost-only (private
+    # cockpit). Headless boxes driven over the LAN (the Pi rig) set
+    # 0.0.0.0 so the browser/orchestrator can reach the UI remotely.
+    bind = os.environ.get("STVT_PANEL_BIND", "127.0.0.1")
+    print(f"TV Tuna panel: http://{bind or 'localhost'}:{PORT}", flush=True)
+    Panel((bind, PORT), H).serve_forever()

@@ -58,7 +58,15 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 PROFILES = HERE / "lab" / "antenna_profiles.json"
-TOOLS = Path(r"Z:\src\magic-tv-decoder\tools")
+# tools/ dir (sdr_sweep.py lives there). Platform layer: env override first,
+# then the in-repo sibling (Linux clone / any checkout), then the Windows
+# rig's absolute path (Z:\src\adaptive-tv is deployed beside the repo there).
+_tools_candidates = [
+    Path(p) for p in ([os.environ["STVT_TOOLS_DIR"]]
+                      if os.environ.get("STVT_TOOLS_DIR") else [])
+] + [HERE.parent / "tools", Path(r"Z:\src\magic-tv-decoder\tools")]
+TOOLS = next((p for p in _tools_candidates if (p / "sdr_sweep.py").exists()),
+             _tools_candidates[-1])
 SCAN_JSON = Path(os.path.expanduser("~")) / ".tv_tuner" / "scan.json"
 
 # similarity thresholds (calibrated 2026-07-11 on real saved sweeps:
@@ -172,15 +180,59 @@ def _carrierness(p):
     return min(1.0, max(0.0, (p - 20.0) / 20.0))
 
 
+KNEE_RIPPLE_NS = 8.0    # Δ ripple-delay (ns) where cable similarity hits 0.5
+                        # (measured 2026-07-11: same antenna repeats within
+                        # ~1 ns; different antenna systems differ by 14-27 ns)
+
+
+def _ripple_ns(sig):
+    """Electrical cable-length signature, receive-only (2026-07-11, the
+    user's 'measure the resistance' idea made practical): reflections
+    between a mismatched antenna and the tuner bounce inside the coax and
+    carve a PERIODIC ripple into the frequency response with spacing
+    Δf = c·VF/2L. The cepstrum (DFT of the detrended response curve)
+    peaks at the round-trip delay τ = 2L/(c·VF) — a per-antenna-SYSTEM
+    constant that travels with the antenna+cable across ports, unlike
+    the response shape which bends per socket. Returns τ in ns, or None
+    when there's no confident ripple (well-matched system / too few
+    points). Measured on the real rig: Total vision 45 ns (~5.8 m),
+    Phillips 19 ns (~2.4 m), discone 33 ns (~4.2 m); repeat sweeps of
+    the same antenna agree within ~1 ns."""
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+    f = [fi for fi in sig.get("freqs_mhz", []) if fi >= 473.0]
+    if len(f) < 12:
+        return None
+    idx = {fi: i for i, fi in enumerate(sig["freqs_mhz"])}
+    r = np.array([sig["resp"][idx[fi]] for fi in f], dtype=float)
+    fa = np.array(f, dtype=float)
+    r = r - np.polyval(np.polyfit(fa, r, 2), fa)   # remove antenna slope
+    n = 8 * len(r)
+    spec = np.abs(np.fft.rfft(r * np.hanning(len(r)), n))
+    tau = np.fft.rfftfreq(n, d=6e6)
+    keep = tau > 8e-9                              # below: broad shape, not cable
+    if not keep.any():
+        return None
+    pk = int(np.argmax(spec[keep]))
+    if spec[keep][pk] < 1.5 * (spec[keep].mean() + 1e-12):
+        return None                                # no confident ripple
+    return round(float(tau[keep][pk]) * 1e9, 1)
+
+
 def similarity(sa, sb):
-    """(score 0..1, detail dict). Three shape comparisons over the shared
+    """(score 0..1, detail dict). Shape comparisons over the shared
     frequency grid, all restricted to INFORMATIVE frequencies (dead
     channels agree trivially between any two sweeps and must not vote):
       s_level   spread of the floor-referenced level difference
       s_pilot   spread of the pilot-SNR difference
       s_carrier union-weighted agreement of continuous carrier strength
                 (which stations exist and how solidly — the DC market's
-                towers are shared, so the WEIGHT is what discriminates)."""
+                towers are shared, so the WEIGHT is what discriminates)
+      s_cable   cable-length ripple agreement (_ripple_ns) when both
+                sweeps show a confident ripple — the port-independent
+                component (the cable travels with the antenna)."""
     if not sa or not sb:
         return 0.0, {"error": "missing signature"}
     ia = {f: i for i, f in enumerate(sa["freqs_mhz"])}
@@ -211,7 +263,15 @@ def similarity(sa, sb):
     s_carrier = 1.0 - num / den if den > 1e-9 else 0.5
     det.update(s_level=round(s_level, 3), s_pilot=round(s_pilot, 3),
                s_carrier=round(s_carrier, 3))
-    score = 0.30 * s_level + 0.30 * s_pilot + 0.40 * s_carrier
+    ta, tb = _ripple_ns(sa), _ripple_ns(sb)
+    if ta is not None and tb is not None:
+        det.update(ripple_ns_a=ta, ripple_ns_b=tb)
+        s_cable = _knee(abs(ta - tb), KNEE_RIPPLE_NS)
+        det["s_cable"] = round(s_cable, 3)
+        score = (0.25 * s_level + 0.25 * s_pilot + 0.30 * s_carrier
+                 + 0.20 * s_cable)
+    else:
+        score = 0.30 * s_level + 0.30 * s_pilot + 0.40 * s_carrier
     return round(score, 3), det
 
 
@@ -371,8 +431,23 @@ def observe(sig, port, store=None, ts=None, save=True, path=PROFILES,
         cur_pid = None
     scores = {}
     details = {}
+    g_scores = {}
     for pid, prof in store["profiles"].items():
         s, d = similarity(prof["signature"], sig)
+        g_scores[pid] = s
+        # PER-PORT PASSPORTS (2026-07-11, the port-physics law made real):
+        # the print = antenna x cable x PORT ELECTRONICS, so one blended
+        # signature can't recognize an antenna across ports (passive
+        # antennas especially "bend per socket"). A profile may carry a
+        # reference print PER PORT it has been confirmed on; match this
+        # port's passport too and take the better score. After one
+        # confirmed sighting per (antenna, port) pairing, swaps stop
+        # landing in the gray zone.
+        pref = (prof.get("port_refs") or {}).get(port)
+        if pref is not None:
+            s2, d2 = similarity(pref, sig)
+            if s2 > s:
+                s, d = s2, d2
         scores[pid], details[pid] = s, d
     best_pid = max(scores, key=scores.get) if scores else None
     best = scores.get(best_pid, 0.0)
@@ -401,7 +476,26 @@ def observe(sig, port, store=None, ts=None, save=True, path=PROFILES,
     # 1. the port's resident still matches -> RECOGNIZED
     if cur_pid and cur >= T_RECOGNIZED:
         prof = store["profiles"][cur_pid]
-        prof["signature"] = _ema_merge(prof["signature"], sig)
+        # a >=T_RECOGNIZED fingerprint match IS confirmation — make sure
+        # this port has an open CONFIRMED span, or the ports panel keeps
+        # saying "no antenna recognized" about an antenna the ledger
+        # recognizes at 97% (2026-07-11 display gap)
+        span = next((sp for sp in prof["port_history"]
+                     if sp.get("end") is None and sp["port"] == port), None)
+        if span is None:
+            prof["port_history"].append({"port": port, "start": ts,
+                                         "end": None, "confirmed": True})
+        else:
+            span["confirmed"] = True
+        # refresh this port's passport (create it on first recognition)
+        refs = prof.setdefault("port_refs", {})
+        refs[port] = (_ema_merge(refs[port], sig) if port in refs else sig)
+        # global print: same-port EMA as always — but only when the GLOBAL
+        # score itself still resembles this antenna, so a passport-driven
+        # recognition can't drag the global print toward another port's
+        # electronics (the cross-port pollution that degraded swaps)
+        if g_scores.get(cur_pid, 0.0) >= T_CHANGED:
+            prof["signature"] = _ema_merge(prof["signature"], sig)
         _sight(prof, ts, port, cur)
         ev = {"verdict": "RECOGNIZED", "profile": cur_pid,
               "name": prof["name"], "score": cur, "detail": details[cur_pid],
@@ -445,6 +539,9 @@ def observe(sig, port, store=None, ts=None, save=True, path=PROFILES,
         prof["port_history"].append({"port": port, "start": ts, "end": None,
                                      "confirmed": False})
         _sight(prof, ts, port, best)
+        # start this port's passport: the antenna has arrived at a new
+        # socket — its print HERE is the reference for future visits
+        prof.setdefault("port_refs", {})[port] = sig
         store["port_current"][port] = best_pid
         for op in [k for k, v in store["port_current"].items()
                    if v == best_pid and k != port]:
@@ -524,12 +621,39 @@ def resolve_pending(port, action, path=PROFILES):
     ts = datetime.now().replace(microsecond=0).isoformat()
     if action == "update":
         prof = store["profiles"][q["profile"]]
-        prof["signature"] = _ema_merge(prof["signature"], q["signature"])
+        # PER-PORT PASSPORT (2026-07-11): the user just ATTESTED this is
+        # the same antenna on this port — that sighting becomes THIS
+        # PORT's reference print. The global print is no longer
+        # cross-port blended (EMA-dragging a port-B print 25% toward
+        # port-A electronics is what made every later match worse).
+        refs = prof.setdefault("port_refs", {})
+        refs[port] = (_ema_merge(refs[port], q["signature"])
+                      if port in refs else q["signature"])
         _sight(prof, q["ts"], port, q["score"])
+        # and INSTALL it as the port's resident (the old code left
+        # port_current pointing at the previous tenant after a
+        # confirmed swap, so the next sweep re-asked the same question)
+        old_pid = store["port_current"].get(port)
+        if old_pid and old_pid != q["profile"]:
+            _close_span(store["profiles"].get(old_pid, {"port_history": []}),
+                        port, ts)
+        open_ports = [sp for sp in prof["port_history"]
+                      if sp.get("end") is None and sp["port"] == port]
+        if not open_ports:
+            for sp in prof["port_history"]:
+                if sp.get("end") is None:
+                    sp["end"] = ts
+            prof["port_history"].append({"port": port, "start": ts,
+                                         "end": None, "confirmed": True})
+        for op in [k for k, v in store["port_current"].items()
+                   if v == q["profile"] and k != port]:
+            store["port_current"].pop(op)
+        store["port_current"][port] = q["profile"]
         ev = {"verdict": "UPDATED", "profile": q["profile"],
               "name": prof["name"], "needs_epoch": False,
               "message": "profile %s updated — drift accepted as the same "
-                         "antenna" % (prof["name"] or q["profile"])}
+                         "antenna (port passport saved for %s)"
+                         % (prof["name"] or q["profile"], port)}
     else:
         old = store["profiles"].get(q["profile"])
         if old:
