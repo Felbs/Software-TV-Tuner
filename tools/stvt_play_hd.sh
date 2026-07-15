@@ -149,8 +149,12 @@ launch(){
   # --sid=no = select NO subtitle track at all (definitive off — mpv was still
   # auto-selecting the embedded eia_608 CC track, which rendered as gibberish;
   # --sub-visibility=no alone only HID a still-selected track). STVT_CC=1 shows it.
+  # STVT_CC=1: --sub-create-cc-track=yes makes mpv's ffmpeg CC decoder extract the
+  # video's embedded A/53 EIA-608 into a selectable sub track (--sid=1). Verified
+  # readable at 59.94fps; the old gibberish was deint field-doubling (fixed by the
+  # auto field-order patch). Note atsc_cc.py, the OSD bridge, is silent on 60p.
   local subflags="--sid=no --sub-visibility=no --no-sub-auto"
-  [ "${STVT_CC:-0}" = "1" ] && subflags="--sid=1 --sub-visibility=yes"
+  [ "${STVT_CC:-0}" = "1" ] && subflags="--sub-create-cc-track=yes --sid=1 --sub-visibility=yes"
   # Video error CONCEALMENT — what a TV does that we didn't: when a macroblock
   # arrives corrupt, interpolate it (guess motion vectors + deblock) from the
   # previous frame / neighbours instead of rendering garbage blocks. The signal
