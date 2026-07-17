@@ -12,7 +12,7 @@ Jellyfin install. Config via environment variables:
   STVT_TUNER  tuner base URL            (default http://raspberrypi.local:5004)
 
 Example:
-  JF_PASS='my-password' STVT_TUNER='http://192.168.4.76:5004' python3 jf_setup.py
+  JF_PASS='my-password' STVT_TUNER='http://192.168.1.100:5004' python3 jf_setup.py
 
 Jellyfin 10.11 rejects a blank password. To reset a Jellyfin to first-run:
   sudo systemctl stop jellyfin
