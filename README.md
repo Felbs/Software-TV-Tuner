@@ -349,11 +349,10 @@ bootstrap.sh            Linux one-shot setup
 
 ## Development history
 
-The full development lab — experiment scripts, campaign logs, and the
-project's engineering notes — live on the
-[`lab-archive`](https://github.com/Felbs/Software-TV-Tuner/tree/lab-archive)
-branch. It's kept out of the main tree so the software stays simple, but
-it's all there if you want to see how the decoder was built.
+This decoder was built through months of live-antenna campaigns. The
+experiment scripts, campaign logs, and engineering notes are kept in the
+project's private archives so this tree stays simple — curious how a
+particular piece was built? Open an issue and ask.
 
 ## License
 
