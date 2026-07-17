@@ -75,74 +75,19 @@ hardware after every decoder improvement — the cliff moves.**
 
 ---
 
-## Install — Windows (~10 minutes)
+## Install
 
-**You need:**
+Pick your platform — each guide is a short, copy-paste walkthrough:
 
-1. **GNU Radio 3.10+** — easiest via
-   [`radioconda`](https://github.com/ryanvolz/radioconda) (free).
-2. **A SoapySDR-supported SDR** — reference setup is an SDRplay RSPdx
-   (install the SDRplay API v3 driver from sdrplay.com). RTL-SDR,
-   HackRF, Airspy, BladeRF also work (see table below).
-3. **ffmpeg** — [full build](https://www.gyan.dev/ffmpeg/builds/)
-   extracted to `C:\ffmpeg\`.
-4. **Any antenna.** Amplified/directional TV antennas work best, but
-   the software adapts to whatever you have — that's the point.
+| Platform | Guide |
+|---|---|
+| 🪟 **Windows** | [docs/install/windows.md](docs/install/windows.md) |
+| 🐧 **Linux** | [docs/install/linux.md](docs/install/linux.md) |
+| 🍓 **Raspberry Pi** | [docs/install/raspberry-pi.md](docs/install/raspberry-pi.md) |
 
-**Steps:**
+All three run the same tuner — the only difference is how you install the
+dependencies and build the decoder module.
 
-```powershell
-# 1. Clone
-git clone https://github.com/Felbs/Software-TV-Tuner.git
-cd Software-TV-Tuner
-
-# 2. Build the C++ decoder module (VS 2022 BuildTools + NMake)
-gr-atscplus\_build.bat
-
-# 3. Verify the blocks load
-python -c "from gnuradio import atscplus; print(dir(atscplus))"
-
-# 4. Player runtime deps
-python -m pip install opencv-python sounddevice
-
-# 5. Run
-python tools\tv_tuner.py
-```
-
-> Building after editing `gr-atscplus` C++? `_rebuild.bat` compiles but
-> does **not** install — follow it with `cmake --install` or Python
-> imports the stale module.
-
-## Install — Linux (~5 minutes)
-
-Tested on Ubuntu 22.04/24.04 bare metal. `bootstrap.sh` does the whole
-setup: apt-installs GNU Radio + ffmpeg + SoapySDR, builds and installs
-gr-atscplus, pip-installs player extras.
-
-```bash
-git clone https://github.com/Felbs/Software-TV-Tuner.git
-cd Software-TV-Tuner
-chmod +x bootstrap.sh && ./bootstrap.sh
-python3 tools/tv_tuner.py
-```
-
-**SDRplay on Linux** needs the vendor API + SoapySDRPlay3 built from
-source:
-
-```bash
-wget https://www.sdrplay.com/software/SDRplay_RSP_API-Linux-3.15.2.run
-chmod +x SDRplay_RSP_API-Linux-3.15.2.run && sudo ./SDRplay_RSP_API-Linux-3.15.2.run
-sudo systemctl enable --now sdrplay
-sudo apt-get install -y libsoapysdr-dev
-git clone https://github.com/pothosware/SoapySDRPlay3.git
-cd SoapySDRPlay3 && mkdir build && cd build
-cmake .. && make -j"$(nproc)" && sudo make install && sudo ldconfig
-SoapySDRUtil --probe   # should list your RSP device
-```
-
-**WSL2 is build-only**: the chain builds and locks, but WSL2's USB/NAT
-passthrough loses ~1.8% of samples, which Reed-Solomon can't survive.
-Run natively.
 
 ## Run
 
@@ -398,9 +343,17 @@ adaptive-tv/            universal antenna calibration + diagnostics
                         shootout, quality_judge, auto_tv, ...) plus
                         tv_tuna_panel.py (web UI) and time_knob.py
                         (learned per-channel hour curves)
-docs/                   science explainer + capture recipe
+docs/                   install guides, science explainer, capture recipe
 bootstrap.sh            Linux one-shot setup
 ```
+
+## Development history
+
+The full development lab — experiment scripts, campaign logs, and the
+project's engineering notes — live on the
+[`lab-archive`](https://github.com/Felbs/Software-TV-Tuner/tree/lab-archive)
+branch. It's kept out of the main tree so the software stays simple, but
+it's all there if you want to see how the decoder was built.
 
 ## License
 
