@@ -125,11 +125,22 @@ if ($buildCode -ne 0) {
 # -- 6. player extras + verify ----------------------------------------------
 & $py -m pip install --quiet opencv-python sounddevice
 Write-Host "[o] player extras installed"
+
+# -- 7. leave a double-clickable launcher behind ------------------------------
+$bat = @"
+@echo off
+set "RADIOCONDA=$conda"
+set "PATH=%RADIOCONDA%;%RADIOCONDA%\Library\bin;%RADIOCONDA%\Scripts;C:\Program Files\SDRplay\API\x64;%PATH%"
+"%RADIOCONDA%\python.exe" "%~dp0tools\tv_tuner.py" %*
+pause
+"@
+Set-Content -Path "$here\run_tv.bat" -Value $bat -Encoding ascii
+Write-Host "[o] created run_tv.bat - double-click it to start the tuner"
 Write-Host ""
 & $py "$here\tools\doctor.py"
 if ($LASTEXITCODE -eq 0) {
     Write-Host ""
-    Write-Host "=== Done. Run it: ===" -ForegroundColor Cyan
-    Write-Host "  $py $here\tools\tv_tuner.py"
+    Write-Host "=== Done. Start the tuner any time by double-clicking: ===" -ForegroundColor Cyan
+    Write-Host "  $here\run_tv.bat"
 }
 exit $LASTEXITCODE
