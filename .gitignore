@@ -74,3 +74,7 @@ adaptive-tv/lab/
 
 run_tv.bat
 run_tv_panel.bat
+adaptive-tv/belief_map.json
+adaptive-tv/cube_map.json
+adaptive-tv/cube_state.json
+adaptive-tv/cube_log.jsonl
