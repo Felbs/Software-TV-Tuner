@@ -20,15 +20,20 @@ from pathlib import Path
 IS_WIN = sys.platform == "win32"
 HERE = Path(__file__).resolve().parent
 if IS_WIN:
-    MPV = r"C:\Program Files\MPV Player\mpv.exe"
-    FFMPEG = r"C:\ffmpeg\bin\ffmpeg.exe"
-    _LIVE_DIR = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live")
+    MPV = (os.environ.get("MPV_EXE") or shutil.which("mpv")
+           or r"C:\Program Files\MPV Player\mpv.exe")
+    FFMPEG = (os.environ.get("FFMPEG_EXE") or shutil.which("ffmpeg")
+              or r"C:\ffmpeg\bin\ffmpeg.exe")
     IPC = r"\\.\pipe\mpv-tvtuna-super"
-else:   # platform layer: PATH binaries, in-repo live dir, unix IPC socket
+else:   # platform layer: PATH binaries, unix IPC socket
     MPV = shutil.which("mpv") or "mpv"
     FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
-    _LIVE_DIR = HERE.parent / "tools" / "data" / "tv_live"
     IPC = "/tmp/mpv-tvtuna-super"
+# live dir: the repo's own tools/data/tv_live (chain and watcher in the
+# same tree). Split deployments (chain in one tree, watcher in another)
+# point STVT_LIVE_DIR at the chain's output dir.
+_LIVE_DIR = Path(os.environ.get("STVT_LIVE_DIR")
+                 or (HERE.parent / "tools" / "data" / "tv_live"))
 LIVE = _LIVE_DIR / "live.ts"
 SOLO = _LIVE_DIR / "live_solo.ts"
 MUXBPS = 19_392_658 / 8
