@@ -48,5 +48,8 @@ the SDRplay DLLs are all on the path.
   built module into place) or Python keeps importing the stale one.
 - Stuck? See [Troubleshooting](../../README.md#troubleshooting) in the
   README (the `--probe` device check catches most SDR issues).
+- Prefer a Linux environment without leaving Windows? The tuner also
+  runs fully inside **WSL**, with Windows serving the SDR over the
+  network — see the [WSL guide](wsl.md).
 
 Next: [what to run once it's installed →](../../README.md#run)

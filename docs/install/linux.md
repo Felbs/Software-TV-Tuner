@@ -12,7 +12,7 @@ It's idempotent — safe to re-run.
 ```bash
 git clone https://github.com/Felbs/Software-TV-Tuner.git
 cd Software-TV-Tuner
-chmod +x bootstrap.sh && ./bootstrap.sh
+./bootstrap.sh              # add --sdrplay if your SDR is an SDRplay (see below)
 python3 tools/tv_tuner.py
 ```
 
@@ -22,15 +22,19 @@ SDRplay radios need the vendor API plus `SoapySDRPlay3` built from source
 (RTL-SDR and others work out of the box via `soapysdr-module-all`):
 
 ```bash
+# 1. vendor API (interactive EULA - can't be scripted)
 wget https://www.sdrplay.com/software/SDRplay_RSP_API-Linux-3.15.2.run
 chmod +x SDRplay_RSP_API-Linux-3.15.2.run && sudo ./SDRplay_RSP_API-Linux-3.15.2.run
 sudo systemctl enable --now sdrplay
-sudo apt-get install -y libsoapysdr-dev
-git clone https://github.com/pothosware/SoapySDRPlay3.git
-cd SoapySDRPlay3 && mkdir build && cd build
-cmake .. && make -j"$(nproc)" && sudo make install && sudo ldconfig
+# 2. the Soapy plugin - bootstrap automates this part:
+./bootstrap.sh --sdrplay
 SoapySDRUtil --probe   # should list your RSP device
 ```
+
+Tip for sustained 8 MS/s on slower machines: if long runs show rising
+`OsO` (overflow) counts, enlarge SoapySDRPlay3's ring buffer before
+building (`SoapySDRPlay.hpp`: bump the buffer to `262144` × `32`
+elements) — the stock size under-buffers the live TV chain.
 
 ## Manual gr-atscplus build
 
@@ -45,9 +49,10 @@ cmake .. && make -j"$(nproc)" && sudo make install && sudo ldconfig
 
 ## Notes
 
-- **WSL2 is build-only.** The chain builds and locks under WSL2, but its
-  USB/NAT passthrough drops ~1.8% of samples — more than Reed-Solomon can
-  repair. Run on native Linux for real decoding.
+- **WSL2 works — but not over USB passthrough** (that path drops ~1.8%
+  of samples, more than Reed-Solomon can repair). The working pattern is
+  serving the SDR from Windows over SoapyRemote and decoding in WSL —
+  full recipe in the [WSL guide](wsl.md).
 - On a Raspberry Pi, follow the [Raspberry Pi guide](raspberry-pi.md)
   instead — same base, with Pi-specific tips.
 

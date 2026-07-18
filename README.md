@@ -83,6 +83,7 @@ Pick your platform — each guide is a short, copy-paste walkthrough:
 |---|---|
 | 🪟 **Windows** | [docs/install/windows.md](docs/install/windows.md) |
 | 🐧 **Linux** | [docs/install/linux.md](docs/install/linux.md) |
+| 🪟🐧 **WSL** | [docs/install/wsl.md](docs/install/wsl.md) |
 | 🍓 **Raspberry Pi** | [docs/install/raspberry-pi.md](docs/install/raspberry-pi.md) |
 
 All three run the same tuner — the only difference is how you install the
