@@ -71,3 +71,5 @@ adaptive-tv/lab/
 # runtime-generated telemetry / logs (not part of the shipped software)
 *.jsonl
 *.log
+
+run_tv.bat
