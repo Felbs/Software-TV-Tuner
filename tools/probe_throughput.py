@@ -1,4 +1,4 @@
-"""Stream-throughput diagnostic: open the SDR, set up a real RX stream
+﻿"""Stream-throughput diagnostic: open the SDR, set up a real RX stream
 identical to tv_live's, pull samples for N seconds, and report:
 
     - samples actually delivered  vs.  samples expected at the
@@ -8,7 +8,7 @@ identical to tv_live's, pull samples for N seconds, and report:
     - any flags returned per buffer (catches OVERFLOW signaling).
 
 Use when SoapySDRUtil --probe and probe_sdr.py both look correct but
-the GNU Radio flowgraph still produces zero PN511 hits — i.e. the
+the GNU Radio flowgraph still produces zero PN511 hits â€” i.e. the
 short bursts work but real-time streaming doesn't (a classic
 WSL2 / USB-over-IP failure mode).
 
@@ -65,7 +65,7 @@ def measure(seconds: float = 2.5, sample_rate: float = 8_000_000,
     actual = sdr.getSampleRate(SOAPY_SDR_RX, 0)
     rx = sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32)
     sdr.activateStream(rx)
-    buf = np.zeros(8192, np.complex64)
+    buf = np.zeros(262144, np.complex64)
     total = overflows = timeouts = errors = 0
     head_pwr = None
     deadline = time.time() + seconds
@@ -91,13 +91,19 @@ def measure(seconds: float = 2.5, sample_rate: float = 8_000_000,
 
 LINK_FIX_HINT = (
     "the USB link is dropping samples under load. Fixes, in order:\n"
-    "    1. plug the SDR into a USB 3 port (blue tab / SS), directly on\n"
-    "       the PC - no hub, no extension cable\n"
-    "    2. reseat the plug firmly\n"
-    "    3. swap the USB cable (a failing USB 3 cable silently falls\n"
-    "       back to USB 2 = half rate; extend on the ANTENNA side with\n"
+    "    1. restart the SDR driver service (Windows: restart the\n"
+    "       'SDRplay API Service' in services.msc / Restart-Service\n"
+    "       SDRplayAPIService) and try again - the first session after\n"
+    "       any replug or crash is often a dud\n"
+    "    2. plug the SDR directly into a rear-panel USB port - no hub,\n"
+    "       no extension cable - and reseat the plug firmly\n"
+    "    3. swap the USB cable (short; extend on the ANTENNA side with\n"
     "       coax, never the USB side)\n"
-    "    4. re-run:  python tools/probe_throughput.py")
+    "    4. if delivery sits near exactly 50% no matter what you swap:\n"
+    "       REBOOT the PC. Hot-replugging an SDR repeatedly can wedge\n"
+    "       the USB host controller itself into a degraded state that\n"
+    "       only a reboot clears (cost us an afternoon to learn).\n"
+    "    5. re-run:  python tools/probe_throughput.py")
 
 
 def main() -> int:
@@ -118,7 +124,7 @@ def main() -> int:
     ap.add_argument("--stream-args", default="",
                     help="SoapySDR stream args (passed to setupStream). "
                          "For SoapyRemote use 'prot=tcp' to force TCP "
-                         "transport (slower, but guaranteed lossless — fixes "
+                         "transport (slower, but guaranteed lossless â€” fixes "
                          "RS-decode failures from UDP drops).")
     args = ap.parse_args()
 
@@ -152,7 +158,7 @@ def main() -> int:
     else:
         rx = sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32)
     sdr.activateStream(rx)
-    buf = np.zeros(8192, np.complex64)
+    buf = np.zeros(262144, np.complex64)
     expected = int(actual_rate * args.seconds)
     print(f"[probe-tp] streaming {args.seconds:.1f}s; expecting "
           f"~{expected:,} samples at {actual_rate/1e6:.3f} MS/s")
@@ -192,24 +198,24 @@ def main() -> int:
     print(f"[probe-tp] read timeouts:     {timeouts}")
     print(f"[probe-tp] read errors:       {errors}")
     if head_pwr is not None:
-        print(f"[probe-tp] first-buffer mean |x|²: {head_pwr:.6e}")
+        print(f"[probe-tp] first-buffer mean |x|Â²: {head_pwr:.6e}")
         print(f"[probe-tp] first-buffer DC offset: {head_dc:+.4f}")
 
     # Diagnosis hints.
     print()
     if delivered_pct < 90:
-        print("[probe-tp] ⚠  significant under-delivery — USB/host can't keep")
+        print("[probe-tp] âš   significant under-delivery â€” USB/host can't keep")
         print("[probe-tp]    up at the requested rate. On WSL2 this is the")
         print("[probe-tp]    usbipd-over-TCP bottleneck; lower the rate")
         print("[probe-tp]    (try 6 MS/s) or run native Linux.")
     elif overflows > 0:
-        print("[probe-tp] ⚠  driver reported overflow events — the host process")
+        print("[probe-tp] âš   driver reported overflow events â€” the host process")
         print("[probe-tp]    isn't draining buffers fast enough.")
     elif head_pwr is not None and head_pwr < 1e-7:
-        print("[probe-tp] ⚠  near-zero signal power — antenna unplugged, wrong")
+        print("[probe-tp] âš   near-zero signal power â€” antenna unplugged, wrong")
         print("[probe-tp]    antenna port, or RF gain too low.")
     else:
-        print("[probe-tp] ✓  stream looks healthy at the SoapySDR level.")
+        print("[probe-tp] âœ“  stream looks healthy at the SoapySDR level.")
         print("[probe-tp]    If tv_live still doesn't decode, the issue is")
         print("[probe-tp]    inside GNU Radio (block versions, sample-rate")
         print("[probe-tp]    handoff, or buffer alignment), not the SDR feed.")
