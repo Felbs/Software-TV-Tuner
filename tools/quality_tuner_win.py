@@ -54,13 +54,14 @@ import shutil
 import signal
 import subprocess
 import sys
+import sys
 import time
 from collections import deque
 from pathlib import Path
 
 # -------------------------- paths ----------------------------------
 REPO = Path(__file__).resolve().parents[1]
-PY = r"C:\Users\user\radioconda\python.exe"
+PY = sys.executable
 TV_LIVE = REPO / "tools" / "tv_live.py"
 FFMPEG = r"C:\ffmpeg\bin\ffmpeg.exe"
 FFPROBE = r"C:\ffmpeg\bin\ffprobe.exe"

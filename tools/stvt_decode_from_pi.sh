@@ -15,7 +15,11 @@
 # (e.g. tools/stvt_run.sh adopts a running chain, or stvt_play_hd / mpv).
 set -u
 RF="${1:-15}"
-PI_IP="${2:-192.168.4.27}"
+PI_IP="${2:-${STVT_PI_IP:-}}"
+if [ -z "$PI_IP" ]; then
+    echo "usage: $0 <rf> <pi_ip>   (or set STVT_PI_IP)"
+    exit 1
+fi
 PORT="${STVT_REMOTE_PORT:-55132}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

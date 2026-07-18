@@ -1,3 +1,18 @@
+# STVT handoff — Raspberry Pi branch (`pi-port-stvt`)
+
+**You're on the Pi branch.** Setup: [docs/install/raspberry-pi.md]
+(docs/install/raspberry-pi.md) — clone, `./bootstrap.sh`, `python3
+tools/doctor.py`. Everything runs on stock Raspberry Pi OS (64-bit),
+standalone: **no Windows, no WSL, no second computer required.** The
+optional split-decode mode (Pi serves IQ, a faster Linux box decodes)
+is in [docs/pi_split_decode.md](docs/pi_split_decode.md).
+
+Historical engineering notes below (from the WSL-era port this branch
+descends from — kept because the SoapyRemote-not-usbip lesson and the
+throughput numbers still apply).
+
+---
+
 # STVT handoff — 2026-05-31 (branch `wsl-port-stvt-v2`, the WSL version)
 
 ## UPDATE 2026-05-31 (later) — LIVE DECODE WORKS on the Threadripper (WSL)
