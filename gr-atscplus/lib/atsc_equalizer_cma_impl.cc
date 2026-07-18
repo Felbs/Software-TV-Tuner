@@ -1,5 +1,10 @@
 /* -*- c++ -*- */
 /*
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * Original gr-atscplus block (not from gr-dtv); shares the module's
+ * plinfo/segment conventions with the gr-dtv-derived blocks.
+ *
  * Tier 6 (2026-05-02): CMA + DFE equalizer for gr-atscplus.
  *
  * Drop-in replacement for atsc_equalizer_long. Differences from Tier 3:
