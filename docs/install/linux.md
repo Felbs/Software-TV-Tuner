@@ -13,6 +13,7 @@ It's idempotent — safe to re-run.
 git clone https://github.com/Felbs/Software-TV-Tuner.git
 cd Software-TV-Tuner
 ./bootstrap.sh              # add --sdrplay if your SDR is an SDRplay (see below)
+python3 tools/doctor.py     # every dependency checked, fixes printed
 python3 tools/tv_tuner.py
 ```
 

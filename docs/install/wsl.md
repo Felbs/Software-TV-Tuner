@@ -83,5 +83,6 @@ SDR plugged in directly, you'd simply omit it.
 | `no available RSP devices found` | something else holds the radio (close other SDR apps), or restart the Windows `SDRplayAPIService` |
 | probe can't connect to `127.0.0.1:55132` | NAT-mode WSL — use the host IP from `ip route show default` |
 | build dies with a GCC internal compiler error | out-of-memory: re-run `./bootstrap.sh` (it retries `-j2`), or `MAKE_JOBS=2 ./bootstrap.sh` |
+| anything else | `python3 tools/doctor.py` — checks every dependency and prints the fix |
 
 Next: [what to run once it's installed →](../../README.md#run)

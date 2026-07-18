@@ -10,11 +10,15 @@ scanner / supervisor experiments tuned for the Pi's core count).
 ## Base install
 
 ```bash
-git clone https://github.com/Felbs/Software-TV-Tuner.git
+git clone -b pi-port-stvt https://github.com/Felbs/Software-TV-Tuner.git
 cd Software-TV-Tuner
-git checkout pi-port-stvt
-chmod +x bootstrap.sh && ./bootstrap.sh
+./bootstrap.sh
+python3 tools/doctor.py     # every dependency checked, fixes printed
 ```
+
+Use a **64-bit** Raspberry Pi OS. If the build runs out of memory on a
+Pi 4 (GCC "internal compiler error"), re-run with `MAKE_JOBS=2
+./bootstrap.sh`.
 
 A **Pi 5** is strongly recommended — it has the headroom to decode a
 channel in real time. A **Pi 4** works too, but is happiest in the
