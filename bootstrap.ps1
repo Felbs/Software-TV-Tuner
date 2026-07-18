@@ -126,16 +126,24 @@ if ($buildCode -ne 0) {
 & $py -m pip install --quiet opencv-python sounddevice
 Write-Host "[o] player extras installed"
 
-# -- 7. leave a double-clickable launcher behind ------------------------------
-$bat = @"
+# -- 7. leave double-clickable launchers behind -------------------------------
+$env_prolog = @"
 @echo off
 set "RADIOCONDA=$conda"
 set "PATH=%RADIOCONDA%;%RADIOCONDA%\Library\bin;%RADIOCONDA%\Scripts;C:\Program Files\SDRplay\API\x64;%PATH%"
+"@
+Set-Content -Path "$here\run_tv.bat" -Value ($env_prolog + @"
+
 "%RADIOCONDA%\python.exe" "%~dp0tools\tv_tuner.py" %*
 pause
-"@
-Set-Content -Path "$here\run_tv.bat" -Value $bat -Encoding ascii
-Write-Host "[o] created run_tv.bat - double-click it to start the tuner"
+"@) -Encoding ascii
+Set-Content -Path "$here\run_tv_panel.bat" -Value ($env_prolog + @"
+
+start "" /min cmd /c "timeout /t 5 >nul & start "" http://localhost:8642"
+"%RADIOCONDA%\python.exe" "%~dp0adaptive-tv\tv_tuna_panel.py"
+pause
+"@) -Encoding ascii
+Write-Host "[o] created run_tv.bat (terminal tuner) and run_tv_panel.bat (web UI - opens your browser)"
 Write-Host ""
 & $py "$here\tools\doctor.py"
 if ($LASTEXITCODE -eq 0) {
