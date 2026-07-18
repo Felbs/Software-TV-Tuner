@@ -1,5 +1,8 @@
 # Install on Windows
 
+> 📺 **Prefer to watch?** The whole install, from clone to live TV,
+> in one take: https://youtu.be/jhsTTnoqGTs
+
 Roughly 10 minutes. The reference setup is an SDRplay RSPdx, but any
 SoapySDR-supported SDR works.
 

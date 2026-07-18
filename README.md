@@ -7,8 +7,17 @@ module (`gr-atscplus`) decodes 8-VSB into a live MPEG-TS; a CLI
 tunes, plays, records to MP4, re-streams to RTMP, and overlays closed
 captions.
 
+📺 **Watch the full Windows install, from clone to live TV, in one take:**
+https://youtu.be/jhsTTnoqGTs
+
 New in this release: **`adaptive-tv/` — a universal tuning layer that
-calibrates itself to any antenna.** It measures the live MER
+calibrates itself to whatever antenna you plug in.** It will *try*
+any antenna — our lab rig has pulled watchable TV from a discone
+scanner antenna and $10 rabbit ears — but **dedicated TV antennas
+work best**: broadcast TV is horizontally polarized, and TV antennas
+are built to match (a vertical whip gives away real dB to
+cross-polarization before the software ever gets a vote). Whatever
+you have, the tuner measures it honestly. It measures the live MER
 (Modulation Error Ratio) straight out of the decoder's own equalizer,
 grid-searches the gain settings, surveys channels, A/Bs the recovery
 options, and tells you honestly — in dB — whether an antenna can
