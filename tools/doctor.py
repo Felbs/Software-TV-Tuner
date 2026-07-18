@@ -110,6 +110,21 @@ def main():
             real = [l for l in labels if "audio" not in str(l).lower()]
             if real:
                 ok("SDR found: " + "; ".join(str(r)[:50] for r in real[:3]))
+                # full-rate link check: gappy USB looks like a bad antenna
+                try:
+                    import probe_throughput as _ptp
+                    lk = _ptp.measure(seconds=2.0)
+                    if lk["delivered_pct"] >= 99.5 and lk["overflows"] <= 25:
+                        ok(f"USB link sustains full rate "
+                           f"({lk['delivered_pct']:.1f}% delivered)")
+                    else:
+                        fail(f"USB link gaps under load "
+                             f"({lk['delivered_pct']:.0f}% delivered, "
+                             f"{lk['overflows']} overflows)",
+                             _ptp.LINK_FIX_HINT)
+                except Exception as e:
+                    warn(f"link check skipped ({str(e)[:50]})",
+                         "SDR may be in use by another program")
             elif labels:
                 fail("SoapySDR only sees audio devices (no SDR)",
                      "three usual causes: (1) another program is USING the "
