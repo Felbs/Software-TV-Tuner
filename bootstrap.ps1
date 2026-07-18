@@ -146,9 +146,27 @@ pause
 Write-Host "[o] created run_tv.bat (terminal tuner) and run_tv_panel.bat (web UI - opens your browser)"
 Write-Host ""
 & $py "$here\tools\doctor.py"
-if ($LASTEXITCODE -eq 0) {
-    Write-Host ""
-    Write-Host "=== Done. Start the tuner any time by double-clicking: ===" -ForegroundColor Cyan
-    Write-Host "  $here\run_tv.bat"
+$doctorCode = $LASTEXITCODE
+
+# -- 8. desktop shortcut + launch offer --------------------------------------
+try {
+    $ws = New-Object -ComObject WScript.Shell
+    $lnk = $ws.CreateShortcut("$([Environment]::GetFolderPath('Desktop'))\TV Tuna.lnk")
+    $lnk.TargetPath = "$here\run_tv_panel.bat"
+    $lnk.WorkingDirectory = $here
+    $lnk.Description = "Software TV Tuner - web UI"
+    $lnk.Save()
+    Write-Host "[o] Desktop shortcut created: TV Tuna"
+} catch {
+    Write-Host "[!] could not create desktop shortcut ($_)" -ForegroundColor Yellow
 }
-exit $LASTEXITCODE
+Write-Host ""
+Write-Host "=== Install complete ===" -ForegroundColor Cyan
+$launch = Read-Host "Launch the TV Tuna web UI now? [Y/n]"
+if ($launch -notmatch '^[nN]') {
+    Start-Process "$here\run_tv_panel.bat"
+    Write-Host "Launching - your browser will open http://localhost:8642 in a moment."
+} else {
+    Write-Host "Any time later: double-click the TV Tuna desktop icon (or run_tv_panel.bat)."
+}
+exit $doctorCode
