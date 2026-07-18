@@ -18,7 +18,26 @@ SoapySDR-supported SDR works.
 5. **Any antenna.** Amplified/directional TV antennas do best, but the
    software calibrates to whatever you have — that's the whole point.
 
-## Steps
+## The easy way
+
+```powershell
+git clone https://github.com/Felbs/Software-TV-Tuner.git
+cd Software-TV-Tuner
+powershell -ExecutionPolicy Bypass -File bootstrap.ps1
+```
+
+`bootstrap.ps1` finds radioconda, checks the build tools, builds the
+decoder module, installs the player extras, and finishes with the
+install doctor. For the two big installers it can't run for you
+(radioconda, VS Build Tools) it prints the exact command and stops.
+
+Something not working? The doctor checks everything and prints the fix:
+
+```powershell
+python tools\doctor.py
+```
+
+## Manual steps
 
 ```powershell
 # 1. Clone
