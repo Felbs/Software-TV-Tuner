@@ -364,6 +364,27 @@ experiment scripts, campaign logs, and engineering notes are kept in the
 project's private archives so this tree stays simple — curious how a
 particular piece was built? Open an issue and ask.
 
+## Lineage & credits
+
+The `gr-atscplus` decoder module stands on **GNU Radio's `gr-dtv`**
+ATSC implementation. Its core receive blocks — the deinterleaver,
+Viterbi trellis decoder, RS decoder, FPLL, field-sync checker, and the
+segment/`plinfo` conventions everything else is built around — began as
+`gr-dtv` code (© Free Software Foundation, Inc.), and those files retain
+their original FSF copyright and GPL headers. gr-atscplus adds new blocks
+on top (the adaptive equalizers, soft/erasure decoders, sync variants,
+noise blanker, and the universal-tuning layer) and rewires the chain, but
+none of it would exist without the GNU Radio project's work. Thank you to
+the GNU Radio and gr-dtv authors.
+
+This is not a fork of the GNU Radio repository (gr-dtv lives inside that
+large monorepo; an out-of-tree module is the right shape for this), so
+the lineage is carried the correct way for an OOT module: preserved
+per-file copyright headers, this credit, and the shared GPL license below.
+
 ## License
 
-GPL-3.0-or-later (inherited from gr-dtv).
+**GPL-3.0-or-later**, inherited from gr-dtv — full text in
+[LICENSE](LICENSE). Files derived from gr-dtv keep their
+`© Free Software Foundation` headers; original gr-atscplus files carry
+`SPDX-License-Identifier: GPL-3.0-or-later`.
