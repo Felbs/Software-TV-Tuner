@@ -43,6 +43,63 @@ def rf_to_hz(rf: int) -> int:
     raise ValueError(f"invalid RF channel: {rf}")
 
 
+def measure(seconds: float = 2.5, sample_rate: float = 8_000_000,
+            rf: int = 36, soapy_args: str | None = None,
+            antenna: str | None = None) -> dict:
+    """Importable link-health meter: stream `seconds` of full-rate IQ and
+    return {'delivered_pct', 'overflows', 'timeouts', 'errors',
+    'head_pwr'}. Used as a pre-flight gate by run_scan and doctor.py -
+    a USB link that gaps under load produces garbage scans that LOOK
+    like a bad antenna (learned 2026-07-18: a dying USB3 cable fell
+    back to USB2 and a fresh install silently found 4 channels)."""
+    import os
+    dev = soapy_args or os.environ.get("STVT_SOAPY_ARGS", "driver=sdrplay")
+    sdr = SoapySDR.Device(dev)
+    sdr.setSampleRate(SOAPY_SDR_RX, 0, sample_rate)
+    if antenna:
+        try:
+            sdr.setAntenna(SOAPY_SDR_RX, 0, antenna)
+        except Exception:
+            pass
+    sdr.setFrequency(SOAPY_SDR_RX, 0, rf_to_hz(rf))
+    actual = sdr.getSampleRate(SOAPY_SDR_RX, 0)
+    rx = sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32)
+    sdr.activateStream(rx)
+    buf = np.zeros(8192, np.complex64)
+    total = overflows = timeouts = errors = 0
+    head_pwr = None
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        sr = sdr.readStream(rx, [buf], len(buf), timeoutUs=int(0.5e6))
+        if sr.ret > 0:
+            total += sr.ret
+            if head_pwr is None:
+                head_pwr = float(np.mean(np.abs(buf[:sr.ret]) ** 2))
+            if sr.flags & SOAPY_SDR_OVERFLOW:
+                overflows += 1
+        elif sr.ret == -1:
+            timeouts += 1
+        else:
+            errors += 1
+    sdr.deactivateStream(rx)
+    sdr.closeStream(rx)
+    expected = int(actual * seconds)
+    return {"delivered_pct": 100.0 * total / max(expected, 1),
+            "overflows": overflows, "timeouts": timeouts,
+            "errors": errors, "head_pwr": head_pwr}
+
+
+LINK_FIX_HINT = (
+    "the USB link is dropping samples under load. Fixes, in order:\n"
+    "    1. plug the SDR into a USB 3 port (blue tab / SS), directly on\n"
+    "       the PC - no hub, no extension cable\n"
+    "    2. reseat the plug firmly\n"
+    "    3. swap the USB cable (a failing USB 3 cable silently falls\n"
+    "       back to USB 2 = half rate; extend on the ANTENNA side with\n"
+    "       coax, never the USB side)\n"
+    "    4. re-run:  python tools/probe_throughput.py")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--rf", type=int, default=36,

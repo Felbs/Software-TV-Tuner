@@ -1127,6 +1127,40 @@ def run_scan(region: dict | None = None,
         n = len(all_freqs)
         print(f"[scan] region: {region['name']}")
         print(f"[scan] standard: {region['standard']}")
+        # Pre-flight: a USB link that gaps under full-rate load produces a
+        # garbage scan that LOOKS like a bad antenna (few channels, huge
+        # loss on the survivors). Refuse to scan through a broken pipe.
+        link = None
+        if os.environ.get("STVT_SKIP_LINK_CHECK", "0") != "1":
+            try:
+                import probe_throughput as _ptp
+                print("[scan] pre-flight: measuring USB link at full rate "
+                      "(2s)...")
+                link = _ptp.measure(seconds=2.0)
+                if link["delivered_pct"] < 90:
+                    print("=" * 62, file=sys.stderr)
+                    print(f"[scan] ABORT: USB link delivered only "
+                          f"{link['delivered_pct']:.0f}% of samples at full "
+                          f"rate -\n[scan] " + _ptp.LINK_FIX_HINT,
+                          file=sys.stderr)
+                    print("=" * 62, file=sys.stderr)
+                    return {"scanned_at": datetime.now()
+                            .isoformat(timespec="seconds"), "channels": [],
+                            "error": "usb_link_bad", "link_health": link}
+                if link["delivered_pct"] < 99.5 or link["overflows"] > 25:
+                    print(f"[scan] WARNING: USB link imperfect "
+                          f"({link['delivered_pct']:.1f}% delivered, "
+                          f"{link['overflows']} overflows) - scan results "
+                          f"may miss channels.\n[scan] " + _ptp.LINK_FIX_HINT)
+                else:
+                    print(f"[scan] link healthy "
+                          f"({link['delivered_pct']:.1f}% delivered, "
+                          f"{link['overflows']} overflows)")
+                time.sleep(2)   # let the SDR release before the sweep
+            except ImportError:
+                pass
+            except Exception as e:
+                print(f"[scan] link pre-flight skipped ({e})")
         print(f"[scan] phase 1 — power sniff across {n} frequencies "
               f"(~{n * 0.5:.0f}s)...")
         try:
