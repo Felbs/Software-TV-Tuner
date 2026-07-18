@@ -24,6 +24,20 @@ A **Pi 5** is strongly recommended — it has the headroom to decode a
 channel in real time. A **Pi 4** works too, but is happiest in the
 record-then-decode mode below.
 
+Everything here is stock **Raspberry Pi OS** — no Windows, no WSL, no
+second computer required.
+
+## Installing over SSH (headless)
+
+The whole install and all scanning/recording work fine over a plain
+`ssh pi@raspberrypi.local` session — clone, `./bootstrap.sh`,
+`python3 tools/doctor.py`, scan, record, schedule. The only thing that
+needs a screen is *watching* live video, and you have three options:
+
+- sit at the Pi's own desktop (HDMI) for playback,
+- record now over SSH and copy the files to any machine, or
+- run the split-decode mode below and watch on the other computer.
+
 ## Two ways to run on a Pi
 
 **1. All-on-Pi DVR (works on Pi 4 and 5)** — record the raw IQ now,

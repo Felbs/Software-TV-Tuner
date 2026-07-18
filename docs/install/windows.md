@@ -23,13 +23,18 @@ SoapySDR-supported SDR works.
 ```powershell
 git clone https://github.com/Felbs/Software-TV-Tuner.git
 cd Software-TV-Tuner
-powershell -ExecutionPolicy Bypass -File bootstrap.ps1
+powershell -ExecutionPolicy Bypass -File bootstrap.ps1 -AutoInstall
 ```
 
-`bootstrap.ps1` finds radioconda, checks the build tools, builds the
-decoder module, installs the player extras, and finishes with the
-install doctor. For the two big installers it can't run for you
-(radioconda, VS Build Tools) it prints the exact command and stops.
+On a fresh PC, `-AutoInstall` does the whole thing: downloads and
+silently installs radioconda, installs VS Build Tools and ffmpeg via
+winget (the Build Tools download is big — give it time), adds the Eigen
+headers, builds the decoder module, and finishes with the install
+doctor. Only your SDR's vendor driver (e.g. the SDRplay API from
+sdrplay.com) remains a manual click-through.
+
+Without `-AutoInstall` it checks-and-instructs instead of installing;
+`-CheckOnly` just reports.
 
 Something not working? The doctor checks everything and prints the fix:
 
