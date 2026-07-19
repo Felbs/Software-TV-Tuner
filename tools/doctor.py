@@ -50,6 +50,71 @@ def _ensure_sdr_dll_path():
                 pass
 
 
+def _linux_usb_checks():
+    """Linux: the USB plumbing Windows' vendor driver handles for you.
+    An autosuspending SDR drops samples / vanishes mid-stream; a dead
+    sdrplay API service makes the radio invisible; a tiny usbfs cap
+    starves 8 MS/s streams."""
+    usb_root = Path("/sys/bus/usb/devices")
+    if not usb_root.is_dir():
+        return  # container / WSL without USB — nothing to check
+
+    # SDRplay radios present? (vendor 1df7)
+    sdrplay_devs = []
+    for d in usb_root.iterdir():
+        try:
+            if (d / "idVendor").read_text().strip() == "1df7":
+                sdrplay_devs.append(d)
+        except OSError:
+            continue
+
+    for d in sdrplay_devs:
+        try:
+            ctrl = (d / "power" / "control").read_text().strip()
+        except OSError:
+            continue
+        if ctrl == "on":
+            ok(f"SDRplay USB autosuspend disabled ({d.name})")
+        else:
+            fail(f"SDRplay USB autosuspend is ACTIVE ({d.name}) - the radio "
+                 "can be powered down mid-stream",
+                 "re-run ./bootstrap.sh (installs a udev rule), or now: "
+                 f"echo on | sudo tee /sys/bus/usb/devices/{d.name}"
+                 "/power/control")
+
+    # vendor API installed but service not running?
+    api_installed = Path("/usr/local/lib/libsdrplay_api.so").exists()
+    if api_installed or sdrplay_devs:
+        try:
+            svc = subprocess.run(["pgrep", "-x", "sdrplay_apiServ"],
+                                 capture_output=True, timeout=5)
+            running = svc.returncode == 0
+        except Exception:
+            running = False
+        if running:
+            ok("SDRplay API service running")
+        elif api_installed:
+            fail("SDRplay API service NOT running (radio will be invisible)",
+                 "sudo systemctl enable --now sdrplay   (then replug the SDR)")
+        else:
+            warn("SDRplay radio plugged in but vendor API not installed",
+                 "docs/install/linux.md 'SDRplay on Linux'")
+
+    # usbfs URB buffer cap
+    try:
+        cap = int(Path("/sys/module/usbcore/parameters/usbfs_memory_mb")
+                  .read_text().strip())
+        if 0 < cap < 200:
+            warn(f"kernel usbfs buffer cap is {cap} MB (default 16 starves "
+                 "high-rate SDRs)",
+                 "re-run ./bootstrap.sh, or: echo 1000 | sudo tee "
+                 "/sys/module/usbcore/parameters/usbfs_memory_mb")
+        else:
+            ok(f"usbfs buffer cap {cap if cap else 'unlimited'} MB")
+    except (OSError, ValueError):
+        pass
+
+
 def main():
     print("=" * 62)
     print("Software TV Tuner - install doctor")
@@ -167,6 +232,8 @@ def main():
                 fail(f"{tool} not found ({why})", fix)
 
     # 4. platform notes
+    if sys.platform.startswith("linux"):
+        _linux_usb_checks()
     if os.name == "nt":
         api = Path(r"C:\Program Files\SDRplay\API")
         if api.is_dir():
