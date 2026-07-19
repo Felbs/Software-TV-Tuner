@@ -1437,6 +1437,28 @@ def load_scan() -> dict | None:
         return None
 
 
+_NVENC_OK: bool | None = None
+
+
+def _nvenc_available() -> bool:
+    """True when h264_nvenc can actually initialize (NVIDIA GPU + driver).
+    Merely being compiled into ffmpeg is not enough - on a GPU-less box
+    the encoder dies at first frame with 'Cannot load libcuda.so.1'.
+    Probe once by really encoding a frame; cache the answer."""
+    global _NVENC_OK
+    if _NVENC_OK is None:
+        try:
+            r = subprocess.run(
+                [FFMPEG, "-hide_banner", "-loglevel", "error",
+                 "-f", "lavfi", "-i", "nullsrc=s=64x64:d=0.1",
+                 "-frames:v", "1", "-c:v", "h264_nvenc", "-f", "null", "-"],
+                capture_output=True, timeout=15)
+            _NVENC_OK = r.returncode == 0
+        except Exception:
+            _NVENC_OK = False
+    return _NVENC_OK
+
+
 def build_ffmpeg_cmd(play: bool, record_path: Path | None,
                      stream_url: str | None,
                      program: int = 1,
@@ -1532,7 +1554,10 @@ def build_ffmpeg_cmd(play: bool, record_path: Path | None,
 
     cmd = [
         FFMPEG,
-        "-hide_banner", "-loglevel", "warning",
+        # -y: a crash-recovery respawn must be able to overwrite the
+        # record file it was writing; without it the respawn dies with
+        # "File exists" and recording never recovers.
+        "-hide_banner", "-y", "-loglevel", "warning",
         # Input: maximally tolerant TS demux. discardcorrupt drops bad
         # packets, output_corrupt keeps the partially-decoded frames the
         # decoder DOES produce (rather than freezing waiting for clean
@@ -1558,15 +1583,24 @@ def build_ffmpeg_cmd(play: bool, record_path: Path | None,
         # the full 60-field-per-second temporal smoothness of 1080i. mode=0
         # would halve temporal info to 30 fps. No-op on 720p60 progressive.
         "-vf", "yadif=mode=1:parity=auto:deint=interlaced",
+    ]
+    if _nvenc_available():
         # NVENC: live-streaming tune (ll, not hq — hq wants two-pass which
         # breaks on a stdin pipe). p7 gives best quality at the cost of
         # GPU time; lookahead helps allocate bitrate in motion. No
         # maxrate cap so bursts during high-motion scenes get the headroom
         # they need.
-        "-c:v", "h264_nvenc", "-preset", "p7", "-tune", "ll",
-        "-rc", "vbr", "-cq", "19", "-b:v", "0",
-        "-rc-lookahead", "32",
-        "-bf", "3", "-spatial-aq", "1", "-temporal-aq", "1",
+        cmd += [
+            "-c:v", "h264_nvenc", "-preset", "p7", "-tune", "ll",
+            "-rc", "vbr", "-cq", "19", "-b:v", "0",
+            "-rc-lookahead", "32",
+            "-bf", "3", "-spatial-aq", "1", "-temporal-aq", "1",
+        ]
+    else:
+        # No NVIDIA GPU: CPU encode. veryfast keeps a 720p60/1080i
+        # transcode real-time on modest CPUs.
+        cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "19"]
+    cmd += [
         "-pix_fmt", "yuv420p",
         # Shorter GOP so ffplay can resync after corruption within ~1s
         # instead of waiting up to 2s for the next keyframe.

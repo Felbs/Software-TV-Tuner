@@ -37,6 +37,18 @@ sudo systemctl enable --now sdrplay
 SoapySDRUtil --probe   # should list your RSP device
 ```
 
+If the probe says `no available RSP devices found` right after
+installing the API, restart the service and give it a few seconds —
+the install re-triggers the USB device, and a service started before
+that is stuck on the old device node:
+
+```bash
+sudo systemctl restart sdrplay && sleep 4 && SoapySDRUtil --probe
+```
+
+(No systemd — WSL, containers? Start the service by hand instead:
+`sudo /opt/sdrplay_api/sdrplay_apiService &`)
+
 `bootstrap.sh --sdrplay` automatically applies our ring-buffer patch
 (`tools/patch_soapy_ringbuffer.sh`) before building — the stock
 SoapySDRPlay3 buffer under-runs the live TV chain at 8 MS/s and shows
