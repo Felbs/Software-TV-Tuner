@@ -12,6 +12,7 @@ apt-installs the optional player extras. It's idempotent — safe to
 re-run.
 
 ```bash
+sudo apt-get install -y git   # fresh Ubuntu/Mint doesn't ship git
 git clone https://github.com/Felbs/Software-TV-Tuner.git
 cd Software-TV-Tuner
 ./bootstrap.sh              # add --sdrplay if your SDR is an SDRplay (see below)
@@ -25,7 +26,9 @@ SDRplay radios need the vendor API plus `SoapySDRPlay3` built from source
 (RTL-SDR and others work out of the box via `soapysdr-module-all`):
 
 ```bash
-# 1. vendor API (interactive EULA - can't be scripted)
+# 1. vendor API (interactive EULA - can't be scripted).
+#    Run it at a REAL terminal: piping input to it (yes|, ssh without -t,
+#    CI) makes the vendor installer busy-loop forever at 100% CPU.
 wget https://www.sdrplay.com/software/SDRplay_RSP_API-Linux-3.15.2.run
 chmod +x SDRplay_RSP_API-Linux-3.15.2.run && sudo ./SDRplay_RSP_API-Linux-3.15.2.run
 sudo systemctl enable --now sdrplay
