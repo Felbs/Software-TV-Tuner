@@ -20,8 +20,12 @@ if ! command -v gnuradio-config-info >/dev/null 2>&1 \
     $APT update -qq
     # volk's dev package is libvolk-dev on 24.04/noble but libvolk2-dev
     # on 22.04/jammy — a wrong name aborts the whole (atomic) apt install.
+    # Probe with an install SIMULATION: jammy carries an empty stub record
+    # for libvolk-dev, so `apt-cache show` exits 0 there and lies; -s
+    # correctly fails on "no installation candidate" and is locale-proof.
     VOLK_DEV=libvolk-dev
-    apt-cache show libvolk-dev >/dev/null 2>&1 || VOLK_DEV=libvolk2-dev
+    sudo apt-get -qq -s install libvolk-dev >/dev/null 2>&1 || VOLK_DEV=libvolk2-dev
+    echo "[bootstrap] volk dev package: $VOLK_DEV"
     # libgsl/libsndfile: jammy's GNU Radio cmake exports reference them
     # without resolving them; the OOT provides stubs but needs the libs.
     $APT install -y -qq \
