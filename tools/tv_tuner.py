@@ -3599,8 +3599,9 @@ def _spawn_in_new_console(cmd: list[str]) -> subprocess.Popen:
     _xauth = os.environ.get("XAUTHORITY", "")
     _display_prefix = f"export DISPLAY={_display}; export XAUTHORITY={_xauth}; "
     tee_suffix = " 2>&1 | tee ~/stvt_stream.log; exec bash"
-    for emu, wrap in (
-        ("gnome-terminal", ["gnome-terminal", "--", "bash", "-c",
+    # Only try GUI terminals when there's a display to draw on.
+    emulators = () if not _display else (
+        ("gnome-terminal", ["gnome-terminal", "--wait", "--", "bash", "-c",
                             f"{_display_prefix}{quoted}{tee_suffix}"]),
         ("konsole",        ["konsole", "-e", "bash", "-c",
                             f"{_display_prefix}{quoted}{tee_suffix}"]),
@@ -3611,14 +3612,30 @@ def _spawn_in_new_console(cmd: list[str]) -> subprocess.Popen:
                             "bash", "-c", f"{_display_prefix}{quoted}{tee_suffix}"]),
         ("xterm",          ["xterm", "-e", "bash", "-c",
                             f"{_display_prefix}{quoted}{tee_suffix}"]),
-    ):
-        if shutil.which(emu):
-            return subprocess.Popen(wrap, start_new_session=True)
-    # Fallback: no terminal emulator on the system (headless / WSL).
-    # Run inline; output goes to the picker's terminal.
-    print("[tv_tuner] no terminal emulator found — output will appear "
-          "in this window (install gnome-terminal or xterm for a "
-          "separate window).")
+    )
+    for emu, wrap in emulators:
+        if not shutil.which(emu):
+            continue
+        p = subprocess.Popen(wrap, start_new_session=True)
+        # A terminal that dies within a second didn't open a window —
+        # e.g. gnome-terminal with no dbus session (ssh login, headless,
+        # containers) prints "Failed to execute child process
+        # dbus-launch" and exits. Detect that and try the next one
+        # instead of silently never starting the chain. (--wait above
+        # keeps a healthy gnome-terminal process alive so it isn't
+        # mistaken for this.)
+        try:
+            p.wait(timeout=1.2)
+        except subprocess.TimeoutExpired:
+            return p          # still running = window is up
+        if p.returncode == 0:
+            return p          # exited cleanly after handing off
+        print(f"[tv_tuner] {emu} couldn't open a window "
+              f"(rc={p.returncode}) — trying another terminal...")
+    # Fallback: no working terminal emulator (headless / WSL / broken
+    # session). Run inline; output goes to the picker's terminal.
+    print("[tv_tuner] no working terminal emulator — output will appear "
+          "in this window (install xterm for a separate window).")
     return subprocess.Popen(cmd, start_new_session=True)
 
 
