@@ -12,7 +12,7 @@ apt-installs the optional player extras. It's idempotent — safe to
 re-run.
 
 ```bash
-sudo apt-get install -y git   # fresh Ubuntu/Mint doesn't ship git
+sudo apt-get update && sudo apt-get install -y git   # fresh Ubuntu/Mint doesn't ship git
 git clone https://github.com/Felbs/Software-TV-Tuner.git
 cd Software-TV-Tuner
 ./bootstrap.sh              # add --sdrplay if your SDR is an SDRplay (see below)
