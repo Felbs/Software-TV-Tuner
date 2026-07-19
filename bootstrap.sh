@@ -18,12 +18,18 @@ if ! command -v gnuradio-config-info >/dev/null 2>&1 \
    || ! command -v mpv >/dev/null 2>&1; then
     echo "[bootstrap] installing GNU Radio + ffmpeg + build tools..."
     $APT update -qq
+    # volk's dev package is libvolk-dev on 24.04/noble but libvolk2-dev
+    # on 22.04/jammy — a wrong name aborts the whole (atomic) apt install.
+    VOLK_DEV=libvolk-dev
+    apt-cache show libvolk-dev >/dev/null 2>&1 || VOLK_DEV=libvolk2-dev
+    # libgsl/libsndfile: jammy's GNU Radio cmake exports reference them
+    # without resolving them; the OOT provides stubs but needs the libs.
     $APT install -y -qq \
         build-essential cmake git pkg-config \
         python3 python3-pip python3-numpy python3-yaml python3-scipy \
         python3-soapysdr \
-        gnuradio gnuradio-dev gr-osmosdr libvolk-dev pybind11-dev \
-        libfftw3-dev \
+        gnuradio gnuradio-dev gr-osmosdr "$VOLK_DEV" pybind11-dev \
+        libfftw3-dev libgsl-dev libsndfile1-dev \
         soapysdr-tools soapysdr-module-all \
         ffmpeg mpv \
         usbutils
@@ -45,6 +51,8 @@ cd "$HERE/gr-atscplus/build"
 # the source tree (e.g. the cmake/Modules/*.cmake config files).
 rm -rf CMakeCache.txt CMakeFiles
 cmake .. 2>&1 | tee cmake.log
+test "${PIPESTATUS[0]}" -eq 0 || \
+    { echo "[bootstrap] cmake configure failed — see gr-atscplus/build/cmake.log"; exit 1; }
 # Use PIPESTATUS to surface the build's exit code through tee.
 # Cap parallelism: -j$(nproc) on a big CPU inside a memory-capped VM
 # (WSL especially) can OOM the compiler (GCC internal compiler error).
@@ -134,8 +142,8 @@ sorted(b for b in dir(atscplus) if b.startswith('atsc_')))"
 # without them. Use apt (PEP 668 makes bare `pip install` fail on
 # Ubuntu 23.04+/Mint 21+ with "externally-managed-environment").
 echo "[bootstrap] installing tv_player.py runtime deps (optional)..."
-# Installed separately: python3-sounddevice isn't packaged on every
-# release (e.g. Ubuntu 24.04), and a combined apt line fails atomically.
+# Installed separately: python3-sounddevice isn't packaged on Ubuntu
+# 22.04 or 24.04 at all, and a combined apt line fails atomically.
 $APT install -y -qq python3-opencv 2>/dev/null \
     || echo "[bootstrap] (python3-opencv skipped — only needed for --player magic)"
 $APT install -y -qq python3-sounddevice 2>/dev/null \

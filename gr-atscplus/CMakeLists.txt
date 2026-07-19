@@ -42,6 +42,26 @@ endif()
 
 # Make sure our local CMake Modules path comes first
 list(INSERT CMAKE_MODULE_PATH 0 ${PROJECT_SOURCE_DIR}/cmake/Modules)
+# Ubuntu 22.04 / GNU Radio 3.10.1 packaging bug: the exported GR targets
+# reference GSL::gsl / GSL::gslcblas / sndfile::sndfile, but jammy's
+# GnuradioConfig.cmake never resolves them (fixed upstream in 3.10.2+).
+# Provide stand-in imported targets BEFORE find_package(Gnuradio) loads
+# the exported target files, so the OOT configures and links on jammy.
+# No-ops on releases where the real targets exist.
+find_package(GSL QUIET)
+if(NOT TARGET GSL::gsl)
+  add_library(GSL::gsl INTERFACE IMPORTED)
+  set_target_properties(GSL::gsl PROPERTIES INTERFACE_LINK_LIBRARIES "gsl;gslcblas")
+endif()
+if(NOT TARGET GSL::gslcblas)
+  add_library(GSL::gslcblas INTERFACE IMPORTED)
+  set_target_properties(GSL::gslcblas PROPERTIES INTERFACE_LINK_LIBRARIES "gslcblas")
+endif()
+if(NOT TARGET sndfile::sndfile)
+  add_library(sndfile::sndfile INTERFACE IMPORTED)
+  set_target_properties(sndfile::sndfile PROPERTIES INTERFACE_LINK_LIBRARIES "sndfile")
+endif()
+
 # Find gnuradio to get access to the cmake modules
 find_package(Gnuradio "3.10" REQUIRED COMPONENTS runtime dtv fec filter analog blocks fft)
 find_package(Volk REQUIRED)
