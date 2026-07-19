@@ -125,8 +125,8 @@ the guide, `i 7` inspects a row, `c` cycles captions
 Prefer clicking to typing? There's a browser dashboard that wraps the
 whole tuner. Start it and open the page:
 
-```powershell
-python adaptive-tv\tv_tuna_panel.py
+```sh
+python3 adaptive-tv/tv_tuna_panel.py     # Windows: python adaptive-tv\tv_tuna_panel.py
 # then open http://localhost:8642 in any browser
 ```
 
