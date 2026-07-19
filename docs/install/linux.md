@@ -1,13 +1,15 @@
 # Install on Linux
 
-Roughly 5 minutes on Ubuntu 22.04 / 24.04 (bare metal). The included
-`bootstrap.sh` does the whole setup for you.
+5–20 minutes depending on the machine, on Ubuntu 22.04 / 24.04 or
+Linux Mint 21 / 22 (bare metal). The included `bootstrap.sh` does the
+whole setup for you.
 
 ## The easy way
 
-`bootstrap.sh` apt-installs GNU Radio + ffmpeg + SoapySDR, builds and
-installs the `gr-atscplus` module, and pip-installs the player extras.
-It's idempotent — safe to re-run.
+`bootstrap.sh` apt-installs GNU Radio + ffmpeg + mpv + SoapySDR, builds
+and installs the `gr-atscplus` module, sets up the USB power rules, and
+apt-installs the optional player extras. It's idempotent — safe to
+re-run.
 
 ```bash
 git clone https://github.com/Felbs/Software-TV-Tuner.git
@@ -32,10 +34,22 @@ sudo systemctl enable --now sdrplay
 SoapySDRUtil --probe   # should list your RSP device
 ```
 
-Tip for sustained 8 MS/s on slower machines: if long runs show rising
-`OsO` (overflow) counts, enlarge SoapySDRPlay3's ring buffer before
-building (`SoapySDRPlay.hpp`: bump the buffer to `262144` × `32`
-elements) — the stock size under-buffers the live TV chain.
+`bootstrap.sh --sdrplay` automatically applies our ring-buffer patch
+(`tools/patch_soapy_ringbuffer.sh`) before building — the stock
+SoapySDRPlay3 buffer under-runs the live TV chain at 8 MS/s and shows
+up as rising `OsO` (overflow) counts. If you built SoapySDRPlay3
+yourself *without* the patch, re-run `./bootstrap.sh --sdrplay-rebuild`.
+
+## USB on Linux (bootstrap does this for you)
+
+On Windows the vendor driver takes care of USB power management; on
+Linux the kernel will happily **autosuspend** the SDR mid-stream and
+caps usbfs transfer memory at 16 MB — both cause dropped samples or a
+radio that "vanishes". `bootstrap.sh` installs a udev rule
+(`/etc/udev/rules.d/66-stvt-sdr.rules`) that keeps SDRplay/RTL-SDR
+radios fully powered, and raises the usbfs cap persistently. **Unplug
+and replug the SDR once after the first bootstrap run** so the rule
+applies. `python3 tools/doctor.py` verifies all of it.
 
 ## Manual gr-atscplus build
 

@@ -101,18 +101,19 @@ dependencies and build the decoder module.
 
 ## Run
 
-```powershell
+```sh
+# Linux / Mint / Pi shown; on Windows use:  python tools\tv_tuner.py
 # Interactive: guide, channel picker, live channel-changer
-python tools\tv_tuner.py
+python3 tools/tv_tuner.py
 
 # Direct tune + play
-python tools\tv_tuner.py --rf 36
+python3 tools/tv_tuner.py --rf 36
 
 # Subchannel select / record / stream / captions
-python tools\tv_tuner.py --rf 34 --program 1
-python tools\tv_tuner.py --rf 36 --no-play --record news.mp4
-python tools\tv_tuner.py --rf 36 --stream twitch
-python tools\tv_tuner.py --rf 36 --cc
+python3 tools/tv_tuner.py --rf 34 --program 1
+python3 tools/tv_tuner.py --rf 36 --no-play --record news.mp4
+python3 tools/tv_tuner.py --rf 36 --stream twitch
+python3 tools/tv_tuner.py --rf 36 --cc
 ```
 
 At the interactive prompt: row number or `5.1` tunes, `g` refreshes
