@@ -133,8 +133,14 @@ sorted(b for b in dir(atscplus) if b.startswith('atsc_')))"
 # without them. Use apt (PEP 668 makes bare `pip install` fail on
 # Ubuntu 23.04+/Mint 21+ with "externally-managed-environment").
 echo "[bootstrap] installing tv_player.py runtime deps (optional)..."
-$APT install -y -qq python3-opencv python3-sounddevice 2>/dev/null \
-    || echo "[bootstrap] (skipped — only needed for --player magic; install python3-opencv python3-sounddevice yourself if you want it)"
+# Installed separately: python3-sounddevice isn't packaged on every
+# release (e.g. Ubuntu 24.04), and a combined apt line fails atomically.
+$APT install -y -qq python3-opencv 2>/dev/null \
+    || echo "[bootstrap] (python3-opencv skipped — only needed for --player magic)"
+$APT install -y -qq python3-sounddevice 2>/dev/null \
+    || echo "[bootstrap] (python3-sounddevice not packaged on this release — only
+[bootstrap]  needed for --player magic; if you want it:
+[bootstrap]    python3 -m venv ~/.stvt-venv && ~/.stvt-venv/bin/pip install sounddevice)"
 
 # ── 5. Friendly next step ────────────────────────────────────────
 echo
