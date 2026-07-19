@@ -14,7 +14,8 @@ echo "[bootstrap] === Software TV Tuner — Linux installer ==="
 
 # ── 1. System packages ────────────────────────────────────────────
 if ! command -v gnuradio-config-info >/dev/null 2>&1 \
-   || ! command -v ffmpeg >/dev/null 2>&1; then
+   || ! command -v ffmpeg >/dev/null 2>&1 \
+   || ! command -v mpv >/dev/null 2>&1; then
     echo "[bootstrap] installing GNU Radio + ffmpeg + build tools..."
     $APT update -qq
     $APT install -y -qq \
