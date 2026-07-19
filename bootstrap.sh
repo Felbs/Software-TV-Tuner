@@ -88,11 +88,13 @@ if [[ " $* " == *" --sdrplay "* ]] || [[ " $* " == *" --sdrplay-rebuild "* ]]; t
         SoapySDRUtil --probe 2>/dev/null | head -6 || true
     else
         echo "[bootstrap] SDRplay vendor API not installed. Do this first"
-        echo "  (the installer's EULA needs an interactive run):"
+        echo "  (the installer's EULA needs an interactive run AT A REAL"
+        echo "   TERMINAL — piping input to it makes it hang at 100% CPU):"
         echo "    wget https://www.sdrplay.com/software/SDRplay_RSP_API-Linux-3.15.2.run"
         echo "    chmod +x SDRplay_RSP_API-Linux-3.15.2.run && sudo ./SDRplay_RSP_API-Linux-3.15.2.run"
         echo "    sudo systemctl enable --now sdrplay"
         echo "  then re-run:  ./bootstrap.sh --sdrplay"
+        SDRPLAY_PENDING=1
     fi
 fi
 
@@ -136,6 +138,14 @@ $APT install -y -qq python3-opencv python3-sounddevice 2>/dev/null \
 
 # ── 5. Friendly next step ────────────────────────────────────────
 echo
-echo "[bootstrap] === Done ==="
-echo "[bootstrap] Try it:  python3 $HERE/tools/tv_tuner.py"
+if [ "${SDRPLAY_PENDING:-0}" = "1" ]; then
+    echo "[bootstrap] === Done, EXCEPT the SDRplay driver ==="
+    echo "[bootstrap] !! Your SDRplay is NOT usable yet: install the vendor"
+    echo "[bootstrap] !! API (instructions above), then re-run:"
+    echo "[bootstrap] !!     ./bootstrap.sh --sdrplay"
+else
+    echo "[bootstrap] === Done ==="
+fi
+echo "[bootstrap] Check it:  python3 $HERE/tools/doctor.py"
+echo "[bootstrap] Try it:    python3 $HERE/tools/tv_tuner.py"
 echo "[bootstrap] First run will scan your local channels (~3 min)."
