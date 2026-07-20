@@ -175,6 +175,19 @@ def main():
             real = [l for l in labels if "audio" not in str(l).lower()]
             if real:
                 ok("SDR found: " + "; ".join(str(r)[:50] for r in real[:3]))
+                # which radio will STVT actually open? (issue #2: a
+                # perfectly-probing Pluto was never even attempted)
+                try:
+                    import sdr_compat
+                    resolved = sdr_compat.resolve_soapy_args(verbose=False)
+                    if sdr_compat.is_sdrplay(resolved):
+                        ok(f"STVT will open: {resolved}")
+                    else:
+                        ok(f"STVT will open: {resolved} (non-SDRplay: "
+                           f"generic gain mapping; override with "
+                           f"STVT_SOAPY_ARGS)")
+                except Exception:
+                    pass
                 # full-rate link check: gappy USB looks like a bad antenna
                 try:
                     import probe_throughput as _ptp
@@ -212,7 +225,11 @@ def main():
     except ImportError:
         fail("SoapySDR python bindings missing",
              "Windows: radioconda has them. Linux: sudo apt install "
-             "python3-soapysdr soapysdr-module-all")
+             "python3-soapysdr soapysdr-module-all. Built SoapySDR by "
+             "hand into /usr/local (SoapySDRUtil works but python "
+             "can't import)? Then: "
+             "find /usr/local/lib -name SoapySDR.py  and  "
+             "export PYTHONPATH=<that dir>:$PYTHONPATH")
 
     # 3. external tools
     for tool, why, fix in (
