@@ -229,7 +229,13 @@ class LiveTVTopBlock(gr.top_block):
 
         src.set_sample_rate(0, ATSC_NATIVE_SAMPLE_RATE)
         src.set_frequency(0, freq)
-        src.set_antenna(0, _antenna)
+        try:
+            src.set_antenna(0, _antenna)
+        except Exception as exc:
+            # single-antenna radios (Pluto: only A_BALANCED) reject the
+            # RSPdx port names — not fatal, the radio uses what it has
+            LOG.info(f"antenna '{_antenna}' not settable on this radio "
+                     f"({exc!r}); using its default")
         # AGC: default OFF (manual gain via IFGR/RFGR), but STVT_SDR_AGC=1
         # enables the SDR's internal AGC. Useful when RF level drifts and
         # samples clip faster than manual gain can compensate. Observed
@@ -250,14 +256,33 @@ class LiveTVTopBlock(gr.top_block):
                 LOG.info(f"agc_setpoint={os.environ['STVT_AGC_SETPOINT']}")
             except Exception:
                 pass
-        try:
-            src.set_gain(0, "IFGR", float(_ifgr))
-        except Exception:
-            src.set_gain(0, float(_ifgr))
-        try:
-            src.write_setting("rfgain_sel", str(_rfgsel))
-        except Exception:
-            pass
+        if "sdrplay" in (soapy_args or "").lower():
+            try:
+                src.set_gain(0, "IFGR", float(_ifgr))
+            except Exception:
+                src.set_gain(0, float(_ifgr))
+            try:
+                src.write_setting("rfgain_sel", str(_rfgsel))
+            except Exception:
+                pass
+        else:
+            # non-SDRplay radio: IFGR is a *reduction* (20..59, lower =
+            # hotter) — map its hotness onto a plain gain figure instead
+            # of feeding the raw number to a driver that reads it as dB
+            # of gain. Starting point only; the tuners hill-climb.
+            hot = max(0.0, min(1.0, (59.0 - float(_ifgr)) / 39.0))
+            try:
+                rng = src.get_gain_range(0)
+                lo, hi = float(rng.start()), float(rng.stop())
+            except Exception:
+                lo, hi = 0.0, 70.0
+            g = lo + hot * (hi - lo)
+            try:
+                src.set_gain(0, g)
+                LOG.info(f"generic radio gain {g:.1f} dB "
+                         f"(range {lo:.0f}..{hi:.0f}, from IFGR {_ifgr})")
+            except Exception as exc:
+                LOG.info(f"gain not settable ({exc!r}); driver default")
 
         # 2026-05-22 Day 16: expose RSPdx-specific SoapySDR tunables. These
         # are no-ops on RSP1/RSP2 (write_setting just fails silently). All
@@ -774,7 +799,7 @@ def main():
     ap.add_argument("--rotate-gb", type=float,
                     default=float(os.environ.get("STVT_ROTATE_GB", "20.0")))
     ap.add_argument("--soapy-args",
-                    default=os.environ.get("STVT_SOAPY_ARGS", "driver=sdrplay"),
+                    default=os.environ.get("STVT_SOAPY_ARGS", ""),
                     help="SoapySDR device specifier. Default 'driver=sdrplay'. "
                          "For SoapyRemote (e.g. WSL2 -> Windows host) use "
                          "'driver=remote,remote=<host>:55132,"
@@ -836,6 +861,14 @@ def main():
         except OSError as e:
             LOG.info(f"tap cache disabled ({e})")
 
+    if not args.soapy_args:
+        # auto-detect the plugged-in radio (issue #2: PlutoSDR owners
+        # got "SDR not found" while their radio probed perfectly)
+        try:
+            import sdr_compat
+            args.soapy_args = sdr_compat.resolve_soapy_args()
+        except Exception:
+            args.soapy_args = "driver=sdrplay"
     tb = LiveTVTopBlock(args.rf, out, soapy_args=args.soapy_args,
                         stream_args=args.stream_args)
 

@@ -70,35 +70,27 @@ def open_sdr(driver: str, sample_rate: int, antenna: str,
                   file=sys.stderr)
             time.sleep(settle)
         try:
-            # Honor STVT_SOAPY_ARGS (e.g. SoapyRemote over TCP) like
-            # tv_live.py; fall back to a local driver= open.
-            sdr = SoapySDR.Device(
-                os.environ.get("STVT_SOAPY_ARGS", f"driver={driver}"))
+            # Honor STVT_SOAPY_ARGS (e.g. SoapyRemote over TCP); else
+            # auto-detect whatever radio is plugged in (issue #2: a
+            # PlutoSDR probed fine while we insisted on driver=sdrplay).
+            import sdr_compat
+            args = os.environ.get("STVT_SOAPY_ARGS") \
+                or sdr_compat.resolve_soapy_args(f"driver={driver}")
+            sdr = SoapySDR.Device(args)
         except Exception as e:
             last = e
             if "no available RSP" not in str(e):
                 raise
             continue
         sdr.setSampleRate(SOAPY_SDR_RX, 0, sample_rate)
+        desc_a = sdr_compat.apply_antenna(sdr, antenna)
         try:
-            sdr.setAntenna(SOAPY_SDR_RX, 0, antenna)
-        except Exception:
-            pass
-        try:
-            sdr.setGainMode(SOAPY_SDR_RX, 0, False)
-        except Exception:
-            pass
-        try:
-            sdr.setGain(SOAPY_SDR_RX, 0, "IFGR", float(ifgr))
-        except Exception:
-            try:
-                sdr.setGain(SOAPY_SDR_RX, 0, float(ifgr))
-            except Exception:
-                pass
-        try:
-            sdr.writeSetting("rfgain_sel", str(rfgain_sel))
-        except Exception:
-            pass
+            desc_g = sdr_compat.apply_rx_gain(sdr, args, float(ifgr),
+                                              rfgain_sel)
+        except Exception as e:
+            desc_g = f"(gain not set: {str(e)[:40]})"
+        print(f"[sweep] radio {args}: antenna {desc_a}, {desc_g}",
+              file=sys.stderr)
         return sdr
     raise RuntimeError(f"SDR open gave up: {last}")
 
