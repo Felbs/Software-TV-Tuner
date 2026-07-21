@@ -10,6 +10,8 @@ captions.
 📺 **Watch the full Windows install, from clone to live TV, in one take:**
 https://youtu.be/jhsTTnoqGTs
 
+📐 **[System architecture](ARCHITECTURE.md)** — the full signal chain from RF to MPEG-TS, rendered as a diagram.
+
 New in this release: **`adaptive-tv/` — a universal tuning layer that
 calibrates itself to whatever antenna you plug in.** It will *try*
 any antenna — our lab rig has pulled watchable TV from a discone
