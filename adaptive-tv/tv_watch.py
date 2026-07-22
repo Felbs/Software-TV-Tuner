@@ -170,6 +170,33 @@ def drop_ghost_streams(vids, others, label):
     return kept
 
 
+def first_av_program(exclude=None):
+    """Lowest program_id in live.ts carrying BOTH video and audio — the
+    graceful single-program target when the REQUESTED program is absent
+    or data-only. ATSC program numbers are rarely 1..N (a blind or
+    guessed number lands on no PMT), and dumping the whole multi-program
+    mux at the player gives every program's audio + one CC track each:
+    the 'wall of audio tracks / scrambled captions' glitch. Extracting
+    one real program instead keeps the player clean."""
+    try:
+        pr = subprocess.run(
+            ["ffprobe", "-v", "error", "-print_format", "json",
+             "-probesize", "20000000", "-analyzeduration", "10000000",
+             "-show_programs", str(LIVE)],
+            capture_output=True, text=True, timeout=30)
+        cands = []
+        for p in json.loads(pr.stdout or "{}").get("programs", []):
+            pidn = p.get("program_id")
+            if pidn is None or pidn == exclude:
+                continue
+            types = {s.get("codec_type") for s in p.get("streams", [])}
+            if "video" in types and "audio" in types:
+                cands.append(pidn)
+        return min(cands) if cands else None
+    except Exception:
+        return None
+
+
 class Extractor:
     """tail(live.ts) -> ffmpeg -map 0:p:PROG -c copy -> live_solo.ts
 
@@ -427,6 +454,31 @@ def main():
                 save_pid_cache(cache)
             ex.kill(); ex = None
         if ex is None:
+            # The requested program yielded nothing — most often it does
+            # not exist in this mux (a blind/guessed number lands on no
+            # PMT). Before dumping the ENTIRE multi-program mux at the
+            # player (every program's audio + a CC track each = the "9
+            # audios / scrambled captions" glitch), extract the first
+            # REAL video+audio program instead.
+            alt = first_av_program(exclude=prog)
+            if alt is not None:
+                log(f"program {prog} has no extractable A/V — extracting "
+                    f"the first real program {alt} instead of the whole mux")
+                for mode in ("full", "video"):
+                    cand = Extractor(alt, mode=mode)
+                    cand.start()
+                    t0 = time.time()
+                    while time.time() - t0 < 45:
+                        time.sleep(0.5)
+                        if SOLO.exists() and SOLO.stat().st_size > 3_000_000:
+                            ex, prog, video_only = cand, alt, (mode == "video")
+                            break
+                        if not cand.alive() and time.time() - t0 > 2:
+                            break
+                    if ex is not None:
+                        break
+                    cand.kill()
+        if ex is None:
             log("all extraction modes failed — falling back to mux mode")
             muxmode = True
     target = LIVE if muxmode else SOLO
@@ -660,6 +712,16 @@ def main():
     seek_live_solo()
 
     last_pos, stall = None, 0
+    # CAPTION KEEPER (2026-07-21): captions ON by default now; keep the
+    # eia_608 CC track selected + visible once the stream settles. The old
+    # one-shot sid=1 broke whenever the CC track appeared late, sat at an id
+    # other than 1, or got deselected on a channel change — so re-assert BY
+    # CODEC every pass (idempotent). STVT_CC=off opts out; STVT_CC_DELAY sets
+    # the settle wait that avoids mpv's brief startup-caption glitch.
+    _cc_want = os.environ.get("STVT_CC", "on").lower() not in (
+        "off", "0", "no", "false")
+    _cc_delay = float(os.environ.get("STVT_CC_DELAY", "8"))
+    t_start = time.time()
     # first CC cycle ~20 s in (flushes any startup caption garbage that
     # slipped through), then every 8 min as before
     last_cc = time.time() - 460
@@ -707,6 +769,17 @@ def main():
             log(f"RESYNC (stall={stall} eof={eof})")
             seek_live_solo()
             stall = 0
+        if _cc_want and time.time() - t_start > _cc_delay:
+            tl = ipc(["get_property", "track-list"], req=6) or []
+            cc = next((t for t in tl if t.get("type") == "sub"
+                       and str(t.get("codec", "")).startswith("eia_608")),
+                      None)
+            if cc is not None:                    # broadcaster IS captioning
+                if not cc.get("selected"):
+                    ipc(["set_property", "sid", cc["id"]])
+                if ipc(["get_property", "sub-visibility"],
+                       req=6) not in (True, "yes"):
+                    ipc(["set_property", "sub-visibility", "yes"])
         if time.time() - last_cc > 480:
             cur = ipc(["get_property", "sid"], req=5)
             vis = ipc(["get_property", "sub-visibility"], req=5)
