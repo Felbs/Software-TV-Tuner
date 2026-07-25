@@ -50,3 +50,29 @@ it if stage 2 shows iteration gain that saturates on reliability quality.
 - Deterministic replay A/B on lab/captures/*.cs16 before any live claim.
 - Adopt only if wins somewhere, regresses nowhere (gauntlet law).
 - Frames = ffmpeg null-sink only.
+
+## 2026-07-24 — MEASUREMENT (Fable): stage 2b validated, stage 3 DEFERRED
+First replay gauntlet of the shipped 2b (7 caps spanning the cliff, chain_lab
+metrics, STVT_TURBO=0 vs 1, adaptive-tv/turbo_gauntlet.py + lab/turbo_gauntlet.json):
+  MER 15.2 (AT the cliff): errors 9724 -> 6475 (-33%), score +163  <- sweet spot
+  MER 15.6 / 16.1 (above): errors halved (1051->569, 912->416), zero regression
+  MER 14.7 (under):        +28  |  deep-fail 12.8 & 51k-err breather: wash
+  fox_drizzle:             exact wash
+ADOPT-LAW SATISFIED: wins at/above the cliff (where watchability is decided),
+harmless on hopeless channels (stampede gate stands down as designed).
+Stats on the cliff cap (43 s): att=6997 retry=6884 resc=5302 (76% conversion),
+45k bytes pinned-corrected — vs era_ok=10 from the GMD ladder alone (~500x).
+SELFTEST (stage-3 gate): 508809/509891 = 99.79% no-pin agreement -> corrections
+come FROM THE PINS (honest mechanism, not re-decode noise).
+STAGE 3 (BCJR) VERDICT: NOT justified yet by this blueprint's own criterion —
+the limiter is not reliability quality. Measured: STVT_TURBO_MAXSYM 250k->1M->4M
+changes nothing (resc 5302->5316, skips ~12.7k structural = span/window geometry,
+not budget); fail_ema 4.5% = channel genuinely dying at the deep end. BCJR would
+at best polish targeting of the 24% failed attempts. DEFER until a live soak
+shows reliability-limited conversion.
+CORRECTION (same night): the LIVE panel base_env ALREADY runs erasure+SOVA+
+TURBO on every tune (tv_tuna_panel.py ~line 901-908) — chain_lab's
+STVT_RS=stock is only the LAB baseline. So this gauntlet is the first frozen-
+capture PROOF of what live has been running since 7/10: the cliff-zone error
+reductions above are already on-screen. Nothing to flip; stage 3 stays
+deferred until conversion stats show reliability-limited failures.
