@@ -58,15 +58,20 @@ gr-atscplus\_build.bat
 # 3. Verify the blocks load
 python -c "from gnuradio import atscplus; print(dir(atscplus))"
 
-# 4. Player runtime deps
-python -m pip install opencv-python sounddevice
-
-# 5. Run it
+# 4. Run it (default player is ffplay — no extra Python packages needed)
 python tools\tv_tuner.py
 ```
 
 Run everything from a **radioconda** prompt so GNU Radio, SoapySDR, and
 the SDRplay DLLs are all on the path.
+
+**Optional — the "magic" player.** The default `ffplay` needs nothing
+extra. Only if you want the resilient in-house player (`--player magic`,
+with per-frame concealment and on-image captions) install its deps:
+
+```powershell
+python -m pip install av numpy opencv-python sounddevice
+```
 
 ## Notes
 
