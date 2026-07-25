@@ -290,16 +290,24 @@ def main():
     for tool, why, fix in (
             ("ffmpeg", "recording/remux", "Windows: extract a full build to "
              "C:\\ffmpeg and add C:\\ffmpeg\\bin to PATH. Linux: apt install ffmpeg"),
-            ("mpv", "video playback", "Windows: mpv.io or the default player "
-             "path in the tools. Linux: apt install mpv")):
+            ("ffplay", "default live playback", "ships with the FULL ffmpeg "
+             "build, NOT the 'essentials' one - re-download the full/GPL build "
+             "(Windows: gyan.dev or BtbN) so ffplay.exe sits beside ffmpeg.exe. "
+             "Linux: apt install ffmpeg. Or play with mpv instead (--player mpv)."),
+            ("mpv", "alternate player (--player mpv)", "Windows: mpv.io. "
+             "Linux: apt install mpv. Optional if ffplay is present.")):
         if shutil.which(tool):
             ok(f"{tool} on PATH ({why})")
         else:
             # some setups hardcode known install paths - check the usual ones
             hard = {"ffmpeg": [r"C:\ffmpeg\bin\ffmpeg.exe"],
+                    "ffplay": [r"C:\ffmpeg\bin\ffplay.exe"],
                     "mpv": [r"C:\Program Files\MPV Player\mpv.exe"]}
             if os.name == "nt" and any(Path(p).exists() for p in hard[tool]):
                 ok(f"{tool} found at its default install path ({why})")
+            elif tool == "mpv":
+                # mpv is optional when ffplay works - advise, don't fail
+                warn(f"{tool} not found ({why})", fix)
             else:
                 fail(f"{tool} not found ({why})", fix)
 
