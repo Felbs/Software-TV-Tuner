@@ -81,6 +81,22 @@ def _clear_pid_file():
     except (FileNotFoundError, OSError):
         pass
 
+
+def _doctor_signpost():
+    """Point a stuck user at the one command that diagnoses their system and
+    prints the exact fix. Shown on ANY error exit so a dead-end is never a
+    dead-end — the single most common 'I installed it and it broke' recovery."""
+    doctor = Path(__file__).resolve().parent / "doctor.py"
+    py = "python" if sys.platform == "win32" else "python3"
+    bar = "─" * 64
+    print(f"\n{bar}\n"
+          f"  Something isn't set up right yet. For a full diagnosis of your\n"
+          f"  system — every dependency checked, with the exact fix for each —\n"
+          f"  run:\n\n"
+          f"      {py} {doctor}\n\n"
+          f"  It's safe to run anytime and changes nothing on its own.\n"
+          f"{bar}", file=sys.stderr)
+
 # tv_live needs a Python that has gr-atscplus + SoapySDR available.
 #   Windows: radioconda's bundled Python (override with $RADIOCONDA_PY).
 #   Linux/Mac: system Python that imported `gnuradio` from apt /
@@ -4188,3 +4204,20 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n[tv_tuner] interrupted")
         sys.exit(130)
+    except SystemExit as e:
+        # A SystemExit carrying a STRING is a genuine runtime failure raised by
+        # our code ("ffmpeg not found", "no channels available", ...) — signpost
+        # the doctor. Integer codes (0 = clean, 2 = argparse usage error, etc.)
+        # and Ctrl-C pass through untouched, so a mistyped flag never nags.
+        if isinstance(e.code, str):
+            print(e.code, file=sys.stderr)   # emit the message Python would have
+            _doctor_signpost()
+            sys.exit(1)
+        raise
+    except Exception:
+        # Any unhandled crash (missing decoder interpreter, SoapySDR import, a
+        # bug) — show the traceback for debugging AND the recovery path.
+        import traceback
+        traceback.print_exc()
+        _doctor_signpost()
+        sys.exit(1)
