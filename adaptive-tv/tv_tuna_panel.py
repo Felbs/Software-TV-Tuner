@@ -338,7 +338,12 @@ def run_scan():
                     id_note = " · 🪪 antenna %s" % v.lower()
             except Exception:
                 pass
-            stash_scan(id_name)
+            # The user's explicit antenna pick wins over the fingerprint's guess
+            # for WHICH grid this scan fills (2026-07-25 bugfix): a pinned
+            # "Antenna B" scan belongs in Antenna B's grid, not the enrolled name
+            # the auto-ID recognized ("Old fateful") — filing by fingerprint left
+            # the selected port's grid empty. Auto mode still uses the fp name.
+            stash_scan(STATE.get("ant_override") or id_name)
             SCAN.update({"pct": 100, "t0": None,
                          "line": f"scan complete in {dur}s — guide "
                                  f"refreshed{id_note}"})
