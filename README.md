@@ -12,6 +12,21 @@ https://youtu.be/jhsTTnoqGTs
 
 📐 **[System architecture](ARCHITECTURE.md)** — the full signal chain from RF to MPEG-TS, rendered as a diagram.
 
+## Quickstart (Windows, ~10 min)
+
+```powershell
+git clone https://github.com/Felbs/Software-TV-Tuner.git
+cd Software-TV-Tuner
+powershell -ExecutionPolicy Bypass -File bootstrap.ps1 -AutoInstall
+python tools\doctor.py        # prints "ALL CHECKS PASS" when you're ready
+python tools\tv_tuner.py      # scans, builds a guide, plays live TV
+```
+
+Linux, WSL, and Raspberry Pi run the same tuner — see the [install guides](#install)
+for the one-time setup. **Stuck at any step? `python tools/doctor.py` checks every
+dependency and prints the exact fix.** That's the whole recovery path: install →
+doctor → watch.
+
 New in this release: **`adaptive-tv/` — a universal tuning layer that
 calibrates itself to whatever antenna you plug in.** It will *try*
 any antenna — our lab rig has pulled watchable TV from a discone
