@@ -212,3 +212,56 @@ flowchart TB
     class SCANJSON,PIDCACHE,QHIST,RECIPES,FINGER,TAPS,ORACLE file;
     class RETUNE,DOCTOR ctrl;
 ```
+
+## Telemetry — the dials and the contract behind them
+
+The chain's C++ blocks and tools emit tagged stderr lines; the panel and lab
+tools parse those EXACT strings into every user-facing dial. The tag strings
+are an API: rename one and the dials silently go dark (the failure mode this
+section exists to prevent). Guard: `python tools/stvt_docs_guard.py`.
+
+```mermaid
+flowchart LR
+  subgraph EMIT["chain telemetry emitters (stderr tags)"]
+    EQ["eq-long: fs_err_rms + taps/mu/frz"]
+    RS["rs_erasure: pkts ec era_ok bad weak_pos gmd"]
+    TB["rs_turbo: att retry resc fail_ema"]
+    FP["fpll + fs_check + sync_soft counters"]
+    VT["viterbi_metric / viterbi_metric_max stream tags"]
+  end
+
+  subgraph PARSE["parsers (regex on the EXACT tag strings)"]
+    PMER["panel + chain_lab: fs_err_rms regex"]
+    PLOSS["scanner: loss_pct during dwell"]
+    PQJ["quality_judge: ffmpeg null-sink fps"]
+  end
+
+  subgraph DIALS["user-facing truth"]
+    MER["MER dial = 20*log10(5/err), cliff ~15.2-16"]
+    BADGE["guide watchability % (survival curve,<br/>demoted by loss/burstiness)"]
+    CONV["turbo conversion % = disease fingerprint"]
+    KNOB["Knob-of-Time quality_history.csv"]
+  end
+
+  EQ --> PMER --> MER --> BADGE
+  RS --> CONV
+  TB --> CONV
+  PLOSS --> BADGE
+  PQJ --> KNOB
+  VT --> RS
+```
+
+**Telemetry laws (hard-won — keep them true):**
+- `fs_err_rms` IS the MER dial (`mer = 20*log10(5/err)`); the watchability cliff
+  sits at ~15.2–16 dB. The scanner's `mer_med`/`mer_p10` feed the guide badge.
+- **Measured loss ≥ 0.3% overrides any MER label** — fast faders alias the 41 Hz
+  MER sampling and read "flawless" while packets die (RF9 law).
+- **Turbo conversion % is a disease fingerprint**: ~69% impulse noise, ~23% fast
+  fader, ~0% steady drizzle. Low conversion + steady loss → hunt plumbing, not
+  decoder knobs. `fail_ema` > 4% = stampede gate stands down (by design).
+- **Quality = delivery × (1 − errors), never raw fps or header counts**; the only
+  honest frame metric is ffmpeg null-sink (`quality_judge`).
+- **Don't hammer a live chain with diagnostics** — heavy polling steals
+  matched-filter cycles and lies to you while doing it.
+- Every worker parses telemetry OFF the hot path; a parser must never block the
+  chain (the panel reads logs, it doesn't intercept the stream).
