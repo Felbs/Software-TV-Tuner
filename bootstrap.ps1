@@ -122,9 +122,21 @@ if ($buildCode -ne 0) {
     exit 1
 }
 
-# -- 6. player extras + verify ----------------------------------------------
-& $py -m pip install --quiet opencv-python sounddevice
-Write-Host "[o] player extras installed"
+# -- 6. player extras (OPTIONAL) --------------------------------------------
+# Only `--player magic` (tv_player.py) needs opencv + sounddevice; the DEFAULT
+# ffplay path works without them. Batteries-included here, but a pip hiccup must
+# not fail the whole install, and we must not claim success if it didn't. Matches
+# bootstrap.sh, which treats these as optional too.
+try {
+    & $py -m pip install --quiet opencv-python sounddevice
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "[o] magic-player extras installed (opencv, sounddevice)"
+    } else {
+        Write-Host "[!] magic-player extras skipped - only needed for --player magic" -ForegroundColor Yellow
+    }
+} catch {
+    Write-Host "[!] magic-player extras skipped - only needed for --player magic" -ForegroundColor Yellow
+}
 
 # -- 7. leave double-clickable launchers behind -------------------------------
 $env_prolog = @"
