@@ -50,6 +50,58 @@ def _ensure_sdr_dll_path():
                 pass
 
 
+def _windows_autoheal():
+    """Windows AUTO-HEAL for the two classic SDRplay landmines (they cost this
+    project's own rig hours; strangers hit them with no memory bank):
+    1. SDRplay API dir falls OFF the User PATH after any SDRplay/SDRuno
+       reinstall -> everything silently sees zero radios. We PERSIST the fix.
+    2. Wedged USB controller: Windows Device Manager still shows the radio but
+       the driver can't open it -> tell the user the real cure in plain words.
+    Returns True if the wedge was diagnosed (so callers can skip generic advice)."""
+    if os.name != "nt":
+        return False
+    api = Path(r"C:\Program Files\SDRplay\API\x64")
+    if api.is_dir():
+        try:
+            q = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "[Environment]::GetEnvironmentVariable('PATH','User')"],
+                capture_output=True, text=True, timeout=15)
+            user_path = q.stdout.strip()
+            if str(api).lower() not in user_path.lower():
+                newp = (user_path.rstrip(";") + ";" if user_path else "") + str(api)
+                subprocess.run(
+                    ["powershell", "-NoProfile", "-Command",
+                     f"[Environment]::SetEnvironmentVariable('PATH','{newp}','User')"],
+                    capture_output=True, timeout=15)
+                ok("HEALED: SDRplay API dir was missing from your User PATH - "
+                   "added it permanently (this recurs after every SDRplay/SDRuno "
+                   "reinstall; new terminals will now just work)")
+        except Exception:
+            pass
+    # wedged-USB: PnP sees an RSP but SoapySDR can't - a controller state only
+    # a replug/reboot clears (documented RSPdx behaviour, not our bug)
+    try:
+        q = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "(Get-PnpDevice | Where-Object { $_.FriendlyName -match 'RSP|SDRplay' "
+             "-and $_.Status -eq 'OK' } | Measure-Object).Count"],
+            capture_output=True, text=True, timeout=20)
+        if int(q.stdout.strip() or 0) > 0:
+            fail("USB controller is WEDGED: Windows still lists your SDRplay "
+                 "radio, but its driver can no longer open it",
+                 "(0) FIRST close any program that might be using the radio - "
+                 "busy radios also vanish from the list; then if still gone: "
+                 "(1) unplug the radio's USB cable, wait 5 s, replug; "
+                 "(2) if it's still invisible, REBOOT the PC - that always "
+                 "clears it (known RSP/USB3 state, not a software bug). "
+                 "Use a short, direct USB 3.0 cable (no hubs)")
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _linux_usb_checks():
     """Linux: the USB plumbing Windows' vendor driver handles for you.
     An autosuspending SDR drops samples / vanishes mid-stream; a dead
@@ -204,7 +256,10 @@ def main():
                     warn(f"link check skipped ({str(e)[:50]})",
                          "SDR may be in use by another program")
             elif labels:
-                fail("SoapySDR only sees audio devices (no SDR)",
+                if _windows_autoheal():
+                    pass                       # wedge diagnosed - skip generic advice
+                else:
+                    fail("SoapySDR only sees audio devices (no SDR)",
                      "three usual causes: (1) another program is USING the "
                      "SDR right now - busy radios vanish from the list, close "
                      "other SDR apps; (2) vendor driver missing - Windows: "
