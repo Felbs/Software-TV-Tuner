@@ -33,6 +33,13 @@ public:
 
     float best_state_metric() const;
 
+    /*! SOVA-lite (2026-07-07): confidence of the dibit RETURNED by the
+     * most recent decode() call — the best-vs-runner-up path-metric
+     * margin, delayed through the traceback ring so it describes the
+     * decision actually emitted (which is TB_LEN symbols old). Small
+     * margin = trellis nearly tied = doubt. */
+    float last_confidence() const { return d_conf_out; }
+
 protected:
     static const int d_transition_table[4][4];
     static const int d_was_sent[4][4];
@@ -42,6 +49,9 @@ protected:
     unsigned char d_phase;
     int d_post_coder_state;
     float d_best_state_metric;
+    float d_conf_ring[TB_LEN] = { 0 };
+    unsigned int d_conf_idx = 0;
+    float d_conf_out = 0.0f;
 };
 
 } /* namespace atscplus */

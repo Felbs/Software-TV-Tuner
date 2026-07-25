@@ -50,36 +50,6 @@ def make_rx_filter(input_rate, sps):
     LOG.info(f"rx_filter: rrc_syms={rrc_syms} nfilts={nfilts} ntaps={ntaps}")
     return _gfilter.pfb_arb_resampler_ccf(interp, rrc_taps, nfilts)
 
-
-def make_fused_rx_filter(native_rate, sps):
-    """FUSED resampler + matched filter (STVT_RXF_FUSED=1) — replica of
-    tv_live.py's make_fused_rx_filter so replay matches the LIVE chain. Replaces
-    BOTH the rational_resampler (native->6.25M) AND the pfb_arb_resampler matched
-    filter with ONE fixed-ratio rational_resampler_ccc carrying the RRC taps,
-    going native_rate -> output_rate directly. The arbitrary resampler was the
-    chain's hottest front-end thread; a fixed P/Q polyphase has no per-sample
-    phase computation. Returns (block, actual_output_rate)."""
-    from fractions import Fraction
-    rrc_syms    = int(os.environ.get("STVT_RRC_SYMS", "8"))
-    target_out  = ATSC_SYMBOL_RATE * sps
-    frac        = Fraction(target_out / native_rate).limit_denominator(64)
-    interp, decim = frac.numerator, frac.denominator
-    out_rate    = native_rate * interp / decim
-    proto_rate  = native_rate * interp
-    symbol_rate = ATSC_SYMBOL_RATE / 2.0
-    excess_bw   = 0.1152
-    ntaps       = int((2 * rrc_syms + 1) * (proto_rate / symbol_rate))
-    gmul        = float(os.environ.get("STVT_RXF_FUSED_GAIN", "1.9"))
-    gain        = gmul * interp * symbol_rate / proto_rate
-    rrc_taps    = firdes.root_raised_cosine(gain, proto_rate, symbol_rate,
-                                            excess_bw, ntaps)
-    LOG.info(f"fused_rx_filter: {interp}/{decim} native={native_rate:.0f} "
-             f"out={out_rate:.0f} sps_eff={out_rate/ATSC_SYMBOL_RATE:.4f} "
-             f"rrc_syms={rrc_syms} ntaps={ntaps} gain_mul={gmul}")
-    return (gr_filter.rational_resampler_ccc(interpolation=interp,
-                                             decimation=decim, taps=rrc_taps),
-            out_rate)
-
 ATSC_NATIVE_SAMPLE_RATE = 8_000_000
 ATSC_RX_SAMPLE_RATE     = 6_250_000
 RESAMP_INTERP = 25
@@ -130,6 +100,10 @@ class ReplayTopBlock(gr.top_block):
         _ext = str(iq_path).lower()
         _fmt = os.environ.get("STVT_IQ_FORMAT",
                               "cs16" if _ext.endswith((".cs16", ".sc16")) else "cf32")
+        # STVT_IQ_SKIP: drop the first N complex samples — decode-diversity
+        # knob for E7 voting (a different start gives the EQ/FPLL a different
+        # adaptation trajectory over the identical material).
+        _skip = int(os.environ.get("STVT_IQ_SKIP", "0"))
         if _fmt == "cs16":
             _fsrc = blocks.file_source(gr.sizeof_short, str(iq_path), repeat)
             _s2c  = blocks.interleaved_short_to_complex(False, False, 32767.0)
@@ -139,6 +113,11 @@ class ReplayTopBlock(gr.top_block):
         else:
             src = blocks.file_source(gr.sizeof_gr_complex, str(iq_path), repeat)
             LOG.info(f"input: CF32 {iq_path}")
+        if _skip:
+            _sk = blocks.skiphead(gr.sizeof_gr_complex, _skip)
+            self.connect(src, _sk)
+            src = _sk
+            LOG.info(f"skiphead: {_skip} samples")
 
         # SPS = internal oversampling (samples/symbol). 1.5 = stock 16.14 MS/s.
         # Lowering it cuts the matched-filter/resampler + all front-end blocks
@@ -149,6 +128,18 @@ class ReplayTopBlock(gr.top_block):
 
         scaler = blocks.multiply_const_cc(32768.0)
 
+        # STVT_ADD_NOISE=<amp>: inject complex AWGN after scaling to push the
+        # decode toward the cliff, for marginal-signal config testing. 0 = off
+        # (byte-faithful). Signal RMS post-scale ~1500-2000, so amp ~500-1600
+        # spans clean -> cliff -> dead.
+        _noise_amp = float(os.environ.get("STVT_ADD_NOISE", "0"))
+        noise_src = noise_add = None
+        if _noise_amp > 0:
+            noise_src = analog.noise_source_c(
+                analog.GR_GAUSSIAN, _noise_amp,
+                int(os.environ.get("STVT_NOISE_SEED", "42")))
+            noise_add = blocks.add_cc()
+
         nb = None
         if int(os.environ.get("STVT_NB", "0")):
             nb = atscplus.atsc_noise_blanker(
@@ -156,10 +147,7 @@ class ReplayTopBlock(gr.top_block):
                 int(os.environ.get("STVT_NB_BLANK_SAMPLES", "8")),
                 float(os.environ.get("STVT_NB_ALPHA", "1e-4")))
 
-        # The FUSED filter goes native(8M)->output in one rational stage, so it
-        # subsumes the separate 8M->6.25M rational_resampler.
-        _fused = int(os.environ.get("STVT_RXF_FUSED", "0"))
-        if int(os.environ.get("STVT_SKIP_RESAMP", "0")) or _fused:
+        if int(os.environ.get("STVT_SKIP_RESAMP", "0")):
             resamp = None
         else:
             resamp = gr_filter.rational_resampler_ccc(
@@ -183,13 +171,8 @@ class ReplayTopBlock(gr.top_block):
                 float(os.environ.get("STVT_NOTCH_PILOT_HZ", "-2.69e6")),
                 float(os.environ.get("STVT_NOTCH_GUARD_HZ", "200e3")))
 
-        # FUSED resampler+matched filter (matches tv_live), the tunable matched
-        # filter (STVT_RRC_SYMS), or the stock one. The fused path also redefines
-        # output_rate (used by fpll/sync below) to the filter's actual out rate.
-        if _fused:
-            rxf, output_rate = make_fused_rx_filter(ATSC_NATIVE_SAMPLE_RATE, SPS)
-            LOG.info(f"FUSED rx filter active — output_rate={output_rate:.0f}")
-        elif os.environ.get("STVT_RRC_SYMS"):
+        # Stock matched filter, or the tunable one when STVT_RRC_SYMS is set.
+        if os.environ.get("STVT_RRC_SYMS"):
             rxf = make_rx_filter(ATSC_RX_SAMPLE_RATE, SPS)
         else:
             rxf = atsc_rx_filter(ATSC_RX_SAMPLE_RATE, SPS)
@@ -239,6 +222,7 @@ class ReplayTopBlock(gr.top_block):
         ts_file.set_unbuffered(True)
 
         chain_blocks = [src, scaler]
+        if noise_add is not None: chain_blocks.append(noise_add)
         if nb is not None:       chain_blocks.append(nb)
         if resamp is not None:   chain_blocks.append(resamp)
         if notch is not None:    chain_blocks.append(notch)
@@ -252,12 +236,11 @@ class ReplayTopBlock(gr.top_block):
             chain_blocks += [rxf, fpll, dcr, agc, sync, fs_check]
 
         # STVT_MIN_BUF (items) / STVT_MIN_BUF_BYTES (bytes-per-edge): enlarge
-        # the output buffers of the front-end blocks. GR's default (~32KB)
-        # buffers make the 4-core Pi run the chain in lockstep (every thread
-        # <100%, pipeline still <1x real-time). Bigger buffers decouple the
-        # stages: same-IQ A/B 0.91x -> 1.10x, output bit-identical. The BYTES
-        # form scales per item size so vector-output blocks (832B items) don't
-        # eat GB of RAM. 0 = stock.
+        # the front-end output buffers. The Pi 5 needed this (GR's ~32KB
+        # default ran its 4 cores in lockstep at 0.91x); x86 runs several x
+        # real-time with no lockstep, so it is OFF by default (0 = stock).
+        # Output is bit-identical either way; the BYTES form scales per item
+        # size so vector-output blocks (832B items) don't eat GB of RAM.
         _min_buf = int(os.environ.get("STVT_MIN_BUF", "0"))
         _min_buf_bytes = int(os.environ.get("STVT_MIN_BUF_BYTES", "0"))
         if _min_buf or _min_buf_bytes:
@@ -273,11 +256,40 @@ class ReplayTopBlock(gr.top_block):
             LOG.info(f"min_output_buffer: items={_min_buf} bytes={_min_buf_bytes}")
 
         self.connect(*chain_blocks)
+        if noise_add is not None:
+            self.connect(noise_src, (noise_add, 1))
 
         for a, b in [(fs_check, equalizer), (equalizer, viterbi),
                      (viterbi, deinterleaver), (deinterleaver, rs), (rs, derand)]:
             self.connect((a, 0), (b, 0))
             self.connect((a, 1), (b, 1))
+        # ── SOVA reliability plane (2026-07-07) — mirror of tv_live.py ──
+        if (int(os.environ.get("STVT_SOVA", "0"))
+                and os.environ.get("STVT_VITERBI") == "soft"
+                and os.environ.get("STVT_RS") == "erasure"):
+            dei_rel = atscplus.atsc_deinterleaver()
+            self.connect((viterbi, 2), (dei_rel, 0))
+            self.connect((viterbi, 1), (dei_rel, 1))
+            self.connect((dei_rel, 0), (rs, 2))
+            _rel_pl_sink = blocks.null_sink(gr.sizeof_char * 4)
+            self.connect((dei_rel, 1), _rel_pl_sink)
+            self._dei_rel = dei_rel
+            self._rel_pl_sink = _rel_pl_sink
+            LOG.info("SOVA: reliability plane wired (replay)")
+            # ── TURBO STAGE 2B (2026-07-10): trellis pinning ──
+            # Feed the rs_erasure block the post-equalizer SOFT SYMBOLS
+            # (the exact viterbi input; all chain blocks are sync blocks so
+            # the item index spaces coincide). When a codeword fails RS+GMD
+            # the block re-runs a pinned Viterbi over the affected trellis
+            # spans using bytes of DECODED codewords as branch constraints,
+            # then retries RS. Opt-in: STVT_TURBO=1 (requires SOVA plane).
+            if int(os.environ.get("STVT_TURBO", "0")):
+                self.connect((equalizer, 0), (rs, 3))
+                # rs consumes the eq buffer ~lag+64 segments behind the
+                # viterbi path reader — give the shared eq output buffer
+                # comfortable headroom
+                equalizer.set_min_output_buffer(512)
+                LOG.info("TURBO 2B: soft-symbol plane wired (replay)")
         self.connect(derand, depad)
 
         if os.environ.get("STVT_TEISCRUB", "1") == "1":

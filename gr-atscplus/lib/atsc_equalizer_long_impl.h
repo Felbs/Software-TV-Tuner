@@ -14,6 +14,9 @@
 #include "atsc_syminfo_impl.h"
 #include <gnuradio/dtv/atsc_consts.h>
 #include <gnuradio/atscplus/atsc_equalizer_long.h>
+#include <gnuradio/fft/fft.h>
+#include <memory>
+#include <vector>
 
 namespace gr {
 namespace atscplus {
@@ -50,6 +53,39 @@ private:
 
     float training_sequence1[KNOWN_FIELD_SYNC_LENGTH];
     float training_sequence2[KNOWN_FIELD_SYNC_LENGTH];
+
+    // 2026-07-06 DFE v1 (docs/DFE_BLUEPRINT.md): feedback section state.
+    // d_hist is double-length so the most recent NFB decisions are always
+    // a contiguous slice (write at h and h+NFB). Data segments only in
+    // v1; field syncs refill the history with KNOWN training symbols.
+    static constexpr int NFB_MAX = 384;
+
+    // ── FFT-convolution path (STVT_EQ_FFT=1, 2026-07-10) ──
+    // Overlap-save replaces the 832 x NTAPS dot products per segment on
+    // the passive (lean) path. Tap spectrum cached and invalidated by a
+    // cheap fingerprint (energy + 3 sentinels) so no mutation site can
+    // ever be missed. 2048 >= 832 + NTAPS - 1 for all NTAPS variants
+    // up to 512 (832+511=1343).
+    static constexpr int FFT_N = 2048;
+    std::unique_ptr<gr::fft::fft_real_fwd> d_ffwd;
+    std::unique_ptr<gr::fft::fft_real_rev> d_frev;
+    std::vector<gr_complex> d_tap_spec;
+    float d_tap_fp[4] = {0, 0, 0, 0};   // energy, first, mid, last
+    bool d_tap_spec_valid = false;
+    std::vector<float> d_fb;          // feedback taps (NFB long)
+    std::vector<float> d_hist;        // decided symbols, 2*NFB ring
+    int d_hpos = 0;
+    bool d_dfe_suspend = false;       // E5 sheriff can pull the DFE offline
+    void dfe_push(float sym, int nfb);
+
+    // 2026-07-07 MOD-12 GUARD: each field emits exactly 312 data
+    // segments (26x12), so at every FS the emitted count mod 12 must
+    // be 0. A mid-stream discontinuity breaks that — and rotates the
+    // downstream viterbi's rigid 12-batch mapping (the convicted
+    // corruption/DEAF mechanism). Cure: drop <=11 segments to realign.
+    int d_mod12_count = 0;            // data segments emitted, mod 12
+    int d_mod12_drop = 0;             // segments still to drop
+    int d_mod12_pending = -1;         // v2 debounce: phase must repeat
 
     void filterN(const float* input_samples, float* output_samples, int nsamples);
     // 2026-06-11 int16 NEON data-path filter (STVT_EQ_S16=1). The legacy
@@ -123,6 +159,11 @@ private:
     static constexpr int FS_ACC_LEN = gr::dtv::ATSC_DATA_SEGMENT_LENGTH + NTAPS;
     float d_fs_acc[FS_ACC_LEN];
     int   d_fs_count = 0;
+    // monotonic supervised-trainings-THIS-SESSION counter (never reset):
+    // the DD warm-up hold keys on this, not d_lkg_valid, because the tap
+    // cache pre-sets lkg_valid at load — before the AGC has settled or a
+    // single live field sync has been seen (2026-07-10 explosion lesson)
+    uint32_t d_fs_trained = 0;
 
 public:
     atsc_equalizer_long_impl();

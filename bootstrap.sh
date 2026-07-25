@@ -6,28 +6,48 @@
 
 set -e
 
-DEBIAN_FRONTEND=noninteractive
+export DEBIAN_FRONTEND=noninteractive
+APT="sudo DEBIAN_FRONTEND=noninteractive apt-get"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "[bootstrap] === Software TV Tuner — Linux installer ==="
 
 # ── 1. System packages ────────────────────────────────────────────
 if ! command -v gnuradio-config-info >/dev/null 2>&1 \
-   || ! command -v ffmpeg >/dev/null 2>&1; then
+   || ! command -v ffmpeg >/dev/null 2>&1 \
+   || ! command -v mpv >/dev/null 2>&1; then
     echo "[bootstrap] installing GNU Radio + ffmpeg + build tools..."
-    sudo apt-get update -qq
-    sudo apt-get install -y -qq \
+    $APT update -qq
+    # volk's dev package is libvolk-dev on 24.04/noble but libvolk2-dev
+    # on 22.04/jammy — a wrong name aborts the whole (atomic) apt install.
+    # Probe with an install SIMULATION: jammy carries an empty stub record
+    # for libvolk-dev, so `apt-cache show` exits 0 there and lies; -s
+    # correctly fails on "no installation candidate" and is locale-proof.
+    VOLK_DEV=libvolk-dev
+    sudo apt-get -qq -s install libvolk-dev >/dev/null 2>&1 || VOLK_DEV=libvolk2-dev
+    echo "[bootstrap] volk dev package: $VOLK_DEV"
+    # libgsl/libsndfile: jammy's GNU Radio cmake exports reference them
+    # without resolving them; the OOT provides stubs but needs the libs.
+    $APT install -y -qq \
         build-essential cmake git pkg-config \
         python3 python3-pip python3-numpy python3-yaml python3-scipy \
         python3-soapysdr \
-        gnuradio gnuradio-dev gr-osmosdr libvolk-dev pybind11-dev \
-        libfftw3-dev \
+        gnuradio gnuradio-dev gr-osmosdr "$VOLK_DEV" pybind11-dev \
+        libfftw3-dev libgsl-dev libsndfile1-dev \
         soapysdr-tools soapysdr-module-all \
-        ffmpeg \
+        ffmpeg mpv \
         usbutils
 fi
 
 # ── 2. Build & install gr-atscplus ────────────────────────────────
+# Fast path: when invoked just to add the SDRplay stack and the decoder
+# is already installed, don't rebuild it (a full rebuild takes minutes).
+if [[ " $* " == *" --sdrplay"* ]] && [[ " $* " != *" --rebuild "* ]] \
+   && python3 -c "from gnuradio import atscplus" 2>/dev/null; then
+    echo "[bootstrap] gr-atscplus already installed — skipping rebuild"
+    echo "[bootstrap]   (pass --rebuild to force after a git pull)"
+    JOBS="${MAKE_JOBS:-$(nproc)}"; [ "$JOBS" -gt 8 ] && JOBS=8
+else
 echo "[bootstrap] building gr-atscplus OOT module..."
 mkdir -p "$HERE/gr-atscplus/build"
 cd "$HERE/gr-atscplus/build"
@@ -35,6 +55,8 @@ cd "$HERE/gr-atscplus/build"
 # the source tree (e.g. the cmake/Modules/*.cmake config files).
 rm -rf CMakeCache.txt CMakeFiles
 cmake .. 2>&1 | tee cmake.log
+test "${PIPESTATUS[0]}" -eq 0 || \
+    { echo "[bootstrap] cmake configure failed — see gr-atscplus/build/cmake.log"; exit 1; }
 # Use PIPESTATUS to surface the build's exit code through tee.
 # Cap parallelism: -j$(nproc) on a big CPU inside a memory-capped VM
 # (WSL especially) can OOM the compiler (GCC internal compiler error).
@@ -51,19 +73,26 @@ sudo make install || \
     { echo "[bootstrap] make install failed"; exit 1; }
 sudo ldconfig
 cd "$HERE"
+fi
 
 # ── 2b. Optional: SDRplay driver stack (`./bootstrap.sh --sdrplay`) ──
 # RTL-SDR etc. work out of the box via soapysdr-module-all; SDRplay
 # needs the vendor API (interactive EULA) + the SoapySDRPlay3 plugin.
-if [[ " $* " == *" --sdrplay "* ]]; then
-    if SoapySDRUtil --info 2>/dev/null | grep -qi sdrplay; then
+if [[ " $* " == *" --sdrplay "* ]] || [[ " $* " == *" --sdrplay-rebuild "* ]]; then
+    if [[ " $* " != *" --sdrplay-rebuild "* ]] \
+       && SoapySDRUtil --info 2>/dev/null | grep -qi sdrplay; then
         echo "[bootstrap] SoapySDR already has an sdrplay module — skipping"
+        echo "[bootstrap]   (if it was built without the ring-buffer patch, re-run"
+        echo "[bootstrap]    with --sdrplay-rebuild to rebuild it patched)"
     elif ldconfig -p 2>/dev/null | grep -q libsdrplay_api \
          || [ -e /usr/local/lib/libsdrplay_api.so ]; then
         echo "[bootstrap] vendor API found — building SoapySDRPlay3..."
-        sudo apt-get install -y -qq libsoapysdr-dev
+        $APT install -y -qq libsoapysdr-dev
         SPTMP=$(mktemp -d)
         git clone -q https://github.com/pothosware/SoapySDRPlay3.git "$SPTMP/sp3"
+        # The ring-buffer patch is THE big Linux quality fix: the stock
+        # 2 MiB ring overflows several times a second at 8 MS/s (OsO).
+        "$HERE/tools/patch_soapy_ringbuffer.sh" "$SPTMP/sp3"
         mkdir -p "$SPTMP/sp3/build"
         cd "$SPTMP/sp3/build"
         cmake .. && make -j"$JOBS" && sudo make install && sudo ldconfig
@@ -72,12 +101,39 @@ if [[ " $* " == *" --sdrplay "* ]]; then
         SoapySDRUtil --probe 2>/dev/null | head -6 || true
     else
         echo "[bootstrap] SDRplay vendor API not installed. Do this first"
-        echo "  (the installer's EULA needs an interactive run):"
+        echo "  (the installer's EULA needs an interactive run AT A REAL"
+        echo "   TERMINAL — piping input to it makes it hang at 100% CPU):"
         echo "    wget https://www.sdrplay.com/software/SDRplay_RSP_API-Linux-3.15.2.run"
         echo "    chmod +x SDRplay_RSP_API-Linux-3.15.2.run && sudo ./SDRplay_RSP_API-Linux-3.15.2.run"
         echo "    sudo systemctl enable --now sdrplay"
         echo "  then re-run:  ./bootstrap.sh --sdrplay"
+        SDRPLAY_PENDING=1
     fi
+fi
+
+# ── 2c. USB power & buffer setup (Linux needs this done by hand) ──
+# On Windows the SDR vendor driver disables USB selective-suspend for
+# the radio; on Linux nothing does, and an autosuspending SDR drops
+# samples or "vanishes" mid-stream. Also raise the kernel's usbfs URB
+# buffer cap — the 16 MB default under-buffers an 8 MS/s SDR stream.
+# Both persist across reboots (udev rule + tmpfiles.d).
+if [ -d /etc/udev/rules.d ]; then
+    sudo tee /etc/udev/rules.d/66-stvt-sdr.rules >/dev/null <<'RULES'
+# Software-TV-Tuner: keep SDRs fully powered (no USB autosuspend).
+# SDRplay (RSP1A / RSPdx / RSPduo / RSP2...)
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="1df7", TEST=="power/control", ATTR{power/control}="on"
+# RTL-SDR (RTL2832U)
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0bda", ATTR{idProduct}=="2838", TEST=="power/control", ATTR{power/control}="on"
+RULES
+    sudo udevadm control --reload-rules 2>/dev/null || true
+    sudo udevadm trigger --subsystem-match=usb 2>/dev/null || true
+    echo 'w! /sys/module/usbcore/parameters/usbfs_memory_mb - - - - 1000' \
+        | sudo tee /etc/tmpfiles.d/stvt-usbfs.conf >/dev/null
+    echo 1000 | sudo tee /sys/module/usbcore/parameters/usbfs_memory_mb >/dev/null 2>&1 || true
+    echo "[bootstrap] USB set up: autosuspend off for SDRs, usbfs buffer raised."
+    echo "[bootstrap]   If your SDR was already plugged in, unplug/replug it once."
+else
+    echo "[bootstrap] (no /etc/udev — container/WSL? skipping USB power setup)"
 fi
 
 # ── 3. Verify the new blocks are importable ───────────────────────
@@ -86,15 +142,29 @@ print('[bootstrap] atscplus blocks:', \
 sorted(b for b in dir(atscplus) if b.startswith('atsc_')))"
 
 # ── 4. Optional: extras for tv_player.py (decoupled A/V player) ──
-# These are only needed if you launch with `--player magic`. Skip
-# the install if pip isn't writable; the default ffplay path works
-# without them.
+# Only needed for `--player magic`; the default player path works
+# without them. Use apt (PEP 668 makes bare `pip install` fail on
+# Ubuntu 23.04+/Mint 21+ with "externally-managed-environment").
 echo "[bootstrap] installing tv_player.py runtime deps (optional)..."
-python3 -m pip install --user opencv-python sounddevice 2>/dev/null \
-    || echo "[bootstrap] (skipped — install opencv-python sounddevice yourself if you want --player magic)"
+# Installed separately: python3-sounddevice isn't packaged on Ubuntu
+# 22.04 or 24.04 at all, and a combined apt line fails atomically.
+$APT install -y -qq python3-opencv 2>/dev/null \
+    || echo "[bootstrap] (python3-opencv skipped — only needed for --player magic)"
+$APT install -y -qq python3-sounddevice 2>/dev/null \
+    || echo "[bootstrap] (python3-sounddevice not packaged on this release — only
+[bootstrap]  needed for --player magic; if you want it:
+[bootstrap]    python3 -m venv ~/.stvt-venv && ~/.stvt-venv/bin/pip install sounddevice)"
 
 # ── 5. Friendly next step ────────────────────────────────────────
 echo
-echo "[bootstrap] === Done ==="
-echo "[bootstrap] Try it:  python3 $HERE/tools/tv_tuner.py"
+if [ "${SDRPLAY_PENDING:-0}" = "1" ]; then
+    echo "[bootstrap] === Done, EXCEPT the SDRplay driver ==="
+    echo "[bootstrap] !! Your SDRplay is NOT usable yet: install the vendor"
+    echo "[bootstrap] !! API (instructions above), then re-run:"
+    echo "[bootstrap] !!     ./bootstrap.sh --sdrplay"
+else
+    echo "[bootstrap] === Done ==="
+fi
+echo "[bootstrap] Check it:  python3 $HERE/tools/doctor.py"
+echo "[bootstrap] Try it:    python3 $HERE/tools/tv_tuner.py"
 echo "[bootstrap] First run will scan your local channels (~3 min)."

@@ -63,3 +63,18 @@ tools/scan_temp/
 
 # Overnight report from the cleanup branch (review artifact, not source)
 OVERNIGHT_REPORT.md
+
+# --- dev lab & internal notes (full history preserved on the lab-archive branch) ---
+handoff/
+**/attic/
+adaptive-tv/lab/
+# runtime-generated telemetry / logs (not part of the shipped software)
+*.jsonl
+*.log
+
+run_tv.bat
+run_tv_panel.bat
+adaptive-tv/belief_map.json
+adaptive-tv/cube_map.json
+adaptive-tv/cube_state.json
+adaptive-tv/cube_log.jsonl

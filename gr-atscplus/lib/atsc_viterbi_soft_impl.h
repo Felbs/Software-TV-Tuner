@@ -39,6 +39,8 @@ class atsc_viterbi_soft_impl : public atsc_viterbi_soft
 {
 private:
     typedef interleaver_fifo<unsigned char> fifo_t;
+    typedef interleaver_fifo<float> cfifo_t;   // SOVA confidence rides
+                                               // the same alignment delay
 
     static constexpr int SEGMENT_SIZE = ATSC_MPEG_RS_ENCODED_LENGTH; // 207
     static constexpr int OUTPUT_SIZE = (SEGMENT_SIZE * 12);
@@ -46,6 +48,7 @@ private:
 
     single_viterbi_t viterbi[NCODERS];
     std::vector<fifo_t> fifo;
+    std::vector<cfifo_t> cfifo;
 
 public:
     atsc_viterbi_soft_impl();

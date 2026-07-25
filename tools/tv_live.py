@@ -12,11 +12,14 @@ disk doesn't grow unbounded.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
+import re
 import signal
 import socket
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -226,7 +229,13 @@ class LiveTVTopBlock(gr.top_block):
 
         src.set_sample_rate(0, ATSC_NATIVE_SAMPLE_RATE)
         src.set_frequency(0, freq)
-        src.set_antenna(0, _antenna)
+        try:
+            src.set_antenna(0, _antenna)
+        except Exception as exc:
+            # single-antenna radios (Pluto: only A_BALANCED) reject the
+            # RSPdx port names — not fatal, the radio uses what it has
+            LOG.info(f"antenna '{_antenna}' not settable on this radio "
+                     f"({exc!r}); using its default")
         # AGC: default OFF (manual gain via IFGR/RFGR), but STVT_SDR_AGC=1
         # enables the SDR's internal AGC. Useful when RF level drifts and
         # samples clip faster than manual gain can compensate. Observed
@@ -237,14 +246,43 @@ class LiveTVTopBlock(gr.top_block):
             src.set_gain_mode(0, bool(_sdr_agc))
         except Exception:
             pass
-        try:
-            src.set_gain(0, "IFGR", float(_ifgr))
-        except Exception:
-            src.set_gain(0, float(_ifgr))
-        try:
-            src.write_setting("rfgain_sel", str(_rfgsel))
-        except Exception:
-            pass
+        # STVT_AGC_SETPOINT (dBFS, default driver -30): the one calibrated
+        # invariant in AGC mode. -30 levels ATSC thin (in_rms ~50, error-prone);
+        # raising toward -20 restores headroom while the servo still rides drift.
+        if _sdr_agc and os.environ.get("STVT_AGC_SETPOINT"):
+            try:
+                src.write_setting("agc_setpoint",
+                                  os.environ["STVT_AGC_SETPOINT"])
+                LOG.info(f"agc_setpoint={os.environ['STVT_AGC_SETPOINT']}")
+            except Exception:
+                pass
+        if "sdrplay" in (soapy_args or "").lower():
+            try:
+                src.set_gain(0, "IFGR", float(_ifgr))
+            except Exception:
+                src.set_gain(0, float(_ifgr))
+            try:
+                src.write_setting("rfgain_sel", str(_rfgsel))
+            except Exception:
+                pass
+        else:
+            # non-SDRplay radio: IFGR is a *reduction* (20..59, lower =
+            # hotter) — map its hotness onto a plain gain figure instead
+            # of feeding the raw number to a driver that reads it as dB
+            # of gain. Starting point only; the tuners hill-climb.
+            hot = max(0.0, min(1.0, (59.0 - float(_ifgr)) / 39.0))
+            try:
+                rng = src.get_gain_range(0)
+                lo, hi = float(rng.start()), float(rng.stop())
+            except Exception:
+                lo, hi = 0.0, 70.0
+            g = lo + hot * (hi - lo)
+            try:
+                src.set_gain(0, g)
+                LOG.info(f"generic radio gain {g:.1f} dB "
+                         f"(range {lo:.0f}..{hi:.0f}, from IFGR {_ifgr})")
+            except Exception as exc:
+                LOG.info(f"gain not settable ({exc!r}); driver default")
 
         # 2026-05-22 Day 16: expose RSPdx-specific SoapySDR tunables. These
         # are no-ops on RSP1/RSP2 (write_setting just fails silently). All
@@ -276,6 +314,11 @@ class LiveTVTopBlock(gr.top_block):
                     LOG.info(f"soapy: {soapy_key}={'true' if v == '1' else 'false'} ({env_key})")
                 except Exception as exc:
                     LOG.info(f"soapy: {soapy_key} write failed ({exc!r})")
+
+        # PERSISTENT-RADIO RETUNE (2026-07-10): keep refs so retune() can
+        # re-point the running source without tearing down the flowgraph.
+        self._src = src
+        self._rf = rf_channel
 
         # ── EXACT REPLICA OF run_combo.py fpll_a002_tau20 PIPELINE ──
         # The proven offline chain that gave clean decode:
@@ -505,10 +548,12 @@ class LiveTVTopBlock(gr.top_block):
 
         # STVT_MIN_BUF (items) / STVT_MIN_BUF_BYTES (bytes-per-edge): enlarge
         # the output buffers of the front-end blocks. GR's default (~32KB)
-        # buffers run the 4-core Pi 5 in lockstep (every thread <100%, chain
-        # <1x real-time). 8MB/edge measured 0.91x -> 1.09x, segs_aligned
-        # unchanged, ~555MB RSS. The BYTES form scales per item size so the
-        # vector-output blocks (832B items) don't eat GB of RAM. 0 = stock.
+        # buffers ran the 4-core Pi 5 in lockstep (every thread <100%, chain
+        # <1x real-time); 8MB/edge measured 0.91x -> 1.09x there, output
+        # bit-identical. x86 runs several x real-time with no lockstep, so this
+        # is OFF by default (0 = stock) — set it only if you measure a benefit.
+        # The BYTES form scales per item size so vector-output blocks (832B
+        # items) don't eat GB of RAM.
         _min_buf = int(os.environ.get("STVT_MIN_BUF", "0"))
         _min_buf_bytes = int(os.environ.get("STVT_MIN_BUF_BYTES", "0"))
         if _min_buf or _min_buf_bytes:
@@ -524,6 +569,25 @@ class LiveTVTopBlock(gr.top_block):
             LOG.info(f"min_output_buffer: items={_min_buf} bytes={_min_buf_bytes}")
 
         self.connect(*chain_blocks)
+
+        # ── GLITCH SPECIMEN RECORDER (2026-07-06, E-ladder) ──
+        # STVT_IQ_RING=<secs> taps the scaler output (raw scaled SDR
+        # samples, int16 range) into a RAM ring; a TRIGGER file in
+        # STVT_IQ_RING_DIR dumps the surrounding IQ as a .cs16 specimen.
+        # Transient glitches become reproducible lab evidence. Zero cost
+        # when unset.
+        _ring_secs = float(os.environ.get("STVT_IQ_RING", "0"))
+        if _ring_secs > 0:
+            from iq_ring import iq_ring_sink
+            _ring_dir = os.environ.get(
+                "STVT_IQ_RING_DIR",
+                str(Path(__file__).parent / "data" / "specimens"))
+            self._iq_ring = iq_ring_sink(
+                ATSC_NATIVE_SAMPLE_RATE, _ring_secs, _ring_dir, scale=1.0,
+                meta={"rf": rf_channel,
+                      "antenna": os.environ.get("STVT_ANTENNA", "?")})
+            self.connect(scaler, self._iq_ring)
+            LOG.info(f"iq_ring: {_ring_secs}s specimen ring -> {_ring_dir}")
         if _rs_is_2port:
             for blk_in, blk_out in [(fs_check, equalizer),
                                      (equalizer, viterbi),
@@ -532,6 +596,42 @@ class LiveTVTopBlock(gr.top_block):
                                      (rs, derand)]:
                 self.connect((blk_in, 0), (blk_out, 0))
                 self.connect((blk_in, 1), (blk_out, 1))
+            # ── SOVA reliability plane (2026-07-07, STVT_SOVA=1) ──
+            # viterbi port 2 carries per-byte trellis confidence; a TWIN
+            # deinterleaver applies the identical permutation so each
+            # reliability byte stays glued to its data byte; rs input 2
+            # turns the weakest bytes into TRUE erasures.
+            if (int(os.environ.get("STVT_SOVA", "0"))
+                    and os.environ.get("STVT_VITERBI") == "soft"
+                    and os.environ.get("STVT_RS") == "erasure"):
+                dei_rel = atscplus.atsc_deinterleaver()
+                self.connect((viterbi, 2), (dei_rel, 0))
+                self.connect((viterbi, 1), (dei_rel, 1))
+                self.connect((dei_rel, 0), (rs, 2))
+                # every output must land somewhere: twin's plinfo -> null
+                _rel_pl_sink = blocks.null_sink(
+                    gr.sizeof_char * 4)  # sizeof(plinfo) == 4
+                self.connect((dei_rel, 1), _rel_pl_sink)
+                self._dei_rel = dei_rel
+                self._rel_pl_sink = _rel_pl_sink
+                LOG.info("SOVA: reliability plane wired "
+                         "(viterbi:2 -> twin deinterleaver -> rs:2)")
+                # ── TURBO 2B: trellis pinning (2026-07-10) ──
+                # rs port 3 takes the post-equalizer soft symbols (the
+                # exact viterbi input; sync blocks, so item indices
+                # coincide). When a codeword fails RS+GMD the block
+                # re-runs a pinned Viterbi over the affected trellis
+                # spans using bytes of DECODED codewords as branch
+                # constraints, then retries RS. Converts 54-70% of
+                # failed packets on marginal air (replay A/B 7/10).
+                # Opt-in: STVT_TURBO=1 (requires the SOVA plane above).
+                if int(os.environ.get("STVT_TURBO", "0")):
+                    self.connect((equalizer, 0), (rs, 3))
+                    # rs consumes the eq buffer ~lag+64 segments behind
+                    # the viterbi path reader — give the shared eq
+                    # output buffer comfortable headroom
+                    equalizer.set_min_output_buffer(512)
+                    LOG.info("TURBO 2B: soft-symbol plane wired (live)")
         else:
             for blk_in, blk_out in [(fs_check, equalizer),
                                      (equalizer, viterbi),
@@ -597,6 +697,68 @@ class LiveTVTopBlock(gr.top_block):
             self._diag_depad_sink.set_unbuffered(True)
             self.connect(depad, self._diag_depad_sink)
 
+    # ── PERSISTENT-RADIO RETUNE (2026-07-10, STVT_PERSIST_RETUNE=1) ──
+    # Cross-tower channel change WITHOUT killing the process: today every
+    # tune pays 3.2 s process kill + 3.6 s SDRplay driver reopen before the
+    # 1.1 s pilot lock + ~3 s EQ converge even start. The soapy source
+    # exposes runtime setters (the same methods __init__ already calls:
+    # set_frequency / set_antenna / set_gain / write_setting), so a live
+    # chain can re-point the radio in ~0.1 s and let the DSP re-acquire
+    # (FPLL hunts the new pilot, fs_checker re-syncs, EQ cold-retrains —
+    # no runtime tap-reseed hook exists in atsc_equalizer_long's public
+    # API, cold converge is the accepted cost).
+    def retune(self, cmd: dict):
+        rf = int(cmd["rf"])
+        freq = rf_to_freq_hz(rf)
+        src = self._src
+        t0 = time.time()
+        ant = cmd.get("antenna")
+        LOG.info(f"PERSIST-RETUNE: rf {self._rf} -> {rf} "
+                 f"({freq/1e6:.3f} MHz) antenna={ant} "
+                 f"rfgain_sel={cmd.get('rfgain_sel')} ifgr={cmd.get('ifgr')} "
+                 f"dabnotch={cmd.get('dabnotch')}")
+        # antenna first (RSPdx port switch), then frequency — if either
+        # hard-fails we raise so the panel's classic respawn takes over.
+        if ant:
+            src.set_antenna(0, ant)
+        src.set_frequency(0, freq)
+        if cmd.get("ifgr") is not None:
+            try:
+                src.set_gain(0, "IFGR", float(cmd["ifgr"]))
+            except Exception:
+                src.set_gain(0, float(cmd["ifgr"]))
+        if cmd.get("rfgain_sel") is not None:
+            try:
+                src.write_setting("rfgain_sel", str(cmd["rfgain_sel"]))
+            except Exception as exc:
+                LOG.info(f"PERSIST-RETUNE: rfgain_sel write failed ({exc!r})")
+        if cmd.get("dabnotch") is not None:
+            # RSPdx-specific; only matters on UHF<->VHF transitions. A
+            # failure here is logged, not fatal (UHF<->UHF unaffected).
+            try:
+                src.write_setting("dabnotch_ctrl",
+                                  "true" if int(cmd["dabnotch"]) else "false")
+            except Exception as exc:
+                LOG.info(f"PERSIST-RETUNE: dabnotch_ctrl write failed "
+                         f"({exc!r}) — VHF transitions may need respawn")
+        # Rotate live.ts so followers see a FRESH stream (rotation law:
+        # the extractor must never read old-channel bytes as new). The
+        # sink holds the Windows file handle, so unlink is impossible —
+        # file_sink.open() reopens the same path truncated at offset 0,
+        # the exact mechanism the size-rotation watchdog already uses
+        # (never a bare truncate(0): sparse-file trap, see main()).
+        self._ts_sink.open(str(self._ts_path))
+        self._ts_sink.set_unbuffered(True)
+        self._rf = rf
+        if hasattr(self, "_iq_ring"):
+            try:
+                self._iq_ring.meta.update(
+                    {"rf": rf, "antenna": ant or self._iq_ring.meta.get("antenna")})
+            except Exception:
+                pass
+        LOG.info(f"PERSIST-RETUNE: applied in {time.time()-t0:.2f}s — "
+                 "chain re-acquiring (FPLL hunt -> fs sync -> EQ retrain)")
+
 
 def main():
     # Windows: bump process priority so VLC + other apps don't preempt the
@@ -637,7 +799,7 @@ def main():
     ap.add_argument("--rotate-gb", type=float,
                     default=float(os.environ.get("STVT_ROTATE_GB", "20.0")))
     ap.add_argument("--soapy-args",
-                    default=os.environ.get("STVT_SOAPY_ARGS", "driver=sdrplay"),
+                    default=os.environ.get("STVT_SOAPY_ARGS", ""),
                     help="SoapySDR device specifier. Default 'driver=sdrplay'. "
                          "For SoapyRemote (e.g. WSL2 -> Windows host) use "
                          "'driver=remote,remote=<host>:55132,"
@@ -671,6 +833,42 @@ def main():
     LOG.info(f"Live TV starting — RF {args.rf}, TCP port {ATSC_LIVE_TCP_PORT}")
     LOG.info(f"Writing TS to {out}")
 
+    _persist = os.environ.get("STVT_PERSIST_RETUNE") == "1"
+
+    # WARM START (2026-07-05): if a tap-cache directory is configured,
+    # compose the per-channel+antenna cache file path for the equalizer
+    # (which reads STVT_EQ_TAP_CACHE_FILE at construction). Keyed by both
+    # because taps are a fingerprint of the full RF path.
+    cache_dir = os.environ.get("STVT_EQ_TAP_CACHE")
+    if cache_dir and _persist:
+        # PERSIST-RETUNE trade-off: the equalizer binds the cache FILE at
+        # construction (static getenv in atsc_equalizer_long_impl.cc) and
+        # keeps WRITING its LKG taps there — after an in-place retune it
+        # would pollute the OLD channel's cache with NEW-channel taps.
+        # No runtime rebind exists, so a persistent chain runs cache-less
+        # (cold EQ converge ~3 s is already in the retune budget).
+        LOG.info("tap cache DISABLED (STVT_PERSIST_RETUNE=1: a retuned "
+                 "chain would write new-channel taps into the old "
+                 "channel's cache file)")
+        cache_dir = None
+    if cache_dir:
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            ant = re.sub(r"\W+", "", os.environ.get("STVT_ANTENNA", "A"))
+            os.environ["STVT_EQ_TAP_CACHE_FILE"] = os.path.join(
+                cache_dir, f"taps_{ant}_rf{args.rf}.bin")
+            LOG.info(f"tap cache: {os.environ['STVT_EQ_TAP_CACHE_FILE']}")
+        except OSError as e:
+            LOG.info(f"tap cache disabled ({e})")
+
+    if not args.soapy_args:
+        # auto-detect the plugged-in radio (issue #2: PlutoSDR owners
+        # got "SDR not found" while their radio probed perfectly)
+        try:
+            import sdr_compat
+            args.soapy_args = sdr_compat.resolve_soapy_args()
+        except Exception:
+            args.soapy_args = "driver=sdrplay"
     tb = LiveTVTopBlock(args.rf, out, soapy_args=args.soapy_args,
                         stream_args=args.stream_args)
 
@@ -688,6 +886,63 @@ def main():
         pass
 
     tb.start()
+
+    # ── PERSISTENT-RADIO RETUNE watcher (2026-07-10) ──
+    # Opt-in via STVT_PERSIST_RETUNE=1 (default OFF, zero change unset).
+    # Watches data/tv_live/retune.cmd for JSON
+    #   {"rf":N,"antenna":"...","rfgain_sel":N,"ifgr":N,"dabnotch":0|1}
+    # written atomically by the panel, retunes the RUNNING chain in place
+    # and answers via retune.ack. The panel gates on the ack plus fresh
+    # field-sync telemetry and falls back to classic kill+respawn if
+    # either never arrives — fallback-first by design.
+    if _persist:
+        cmd_path = out.parent / "retune.cmd"
+        ack_path = out.parent / "retune.ack"
+        for _p in (cmd_path, ack_path):     # stale files from a dead session
+            try:
+                _p.unlink()
+            except OSError:
+                pass
+
+        def _retune_watcher():
+            bad_reads = 0
+            while True:
+                time.sleep(0.2)
+                try:
+                    raw = cmd_path.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                try:
+                    cmd = json.loads(raw)
+                except ValueError:
+                    bad_reads += 1
+                    if bad_reads >= 5:      # corrupt file — don't spin on it
+                        try:
+                            cmd_path.unlink()
+                        except OSError:
+                            pass
+                        bad_reads = 0
+                    continue
+                bad_reads = 0
+                try:
+                    cmd_path.unlink()
+                except OSError:
+                    pass
+                try:
+                    tb.retune(cmd)
+                    ack = {"ok": True, "rf": cmd.get("rf"), "t": time.time()}
+                except Exception as e:
+                    LOG.error(f"PERSIST-RETUNE failed: {e!r}")
+                    ack = {"ok": False, "error": str(e), "t": time.time()}
+                _tmp = ack_path.parent / (ack_path.name + ".tmp")
+                try:
+                    _tmp.write_text(json.dumps(ack), encoding="utf-8")
+                    os.replace(_tmp, ack_path)
+                except OSError:
+                    pass
+
+        threading.Thread(target=_retune_watcher, daemon=True).start()
+        LOG.info(f"PERSIST-RETUNE: watcher armed on {cmd_path}")
 
     # File-rotation watchdog: when live.ts > rotate-gb, restart write
     rotate_bytes = int(args.rotate_gb * 1e9)
