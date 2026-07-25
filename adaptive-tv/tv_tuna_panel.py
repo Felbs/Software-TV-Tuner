@@ -2280,8 +2280,18 @@ let h='<table><tr><th>station</th>';g.slots.forEach(s=>h+='<th>'+s+'</th>');h+='
 let lastRf=null;
 g.rows.forEach(r=>{
 if(r.rf!==lastRf){lastRf=r.rf;
-const s=r.snr||0,pct=Math.max(0,Math.min(100,Math.round((s-20)/35*100)));
-const col=pct>=70?'#67d18a':(pct>=45?'#e7c96a':'#e77');
+const s=r.snr||0,spct=Math.max(0,Math.min(100,Math.round((s-20)/35*100)));
+// the BAR is WATCHABILITY when the scan measured MER (survival logistic vs the
+// ~16 dB cliff) — the strength-only bar read a middling % on flawless channels
+// (RF35 "amazing"@80%, RF21 "great"@74%). Loss/burstiness demote it (RF9/RF31
+// laws: fast faders read flawless while packets die). No MER yet -> strength.
+const hasMer=(r.mer!=null);
+const lossyB=hasMer&&(r.loss!=null&&r.loss>=0.3);
+const burstyB=hasMer&&(r.mer_p10!=null&&r.mer>=16&&(r.mer-r.mer_p10)>=1.2&&r.mer_p10<16.2);
+const wpct=hasMer?Math.round(100/(1+Math.exp(-(r.mer-15.25)/0.55))):0;
+const pct=hasMer?(lossyB?Math.min(wpct,r.loss>=3?35:65):(burstyB?Math.min(wpct,70):wpct)):spct;
+const col=hasMer?(pct>=80?'#67d18a':(pct>=45?'#e7c96a':'#e77'))
+                :(spct>=70?'#67d18a':(spct>=45?'#e7c96a':'#e77'));
 const blocks='█'.repeat(Math.round(pct/10))+'░'.repeat(10-Math.round(pct/10));
 // decode QUALITY from measured MER — the honest "will it look good?",
 // separate from raw signal strength (the % bar). Only shown when the
@@ -2301,7 +2311,7 @@ mtag=`&nbsp;<span style="color:${mc};font-weight:700">◉ ${mw}</span>`+
 `<span style="color:#5f7591;font-size:11px"> (MER ${m.toFixed(1)}${p10!=null?' / dips '+p10.toFixed(1):''} dB)</span>`;}
 h+=`<tr><td colspan="${g.slots.length+2}" style="background:#0d1626;border-top:2px solid #26436b;padding:7px 6px">`+
 `📡 <b>tower RF${r.rf}</b> &nbsp;<span style="color:${col};font-family:monospace">${blocks}</span> `+
-`<span style="color:${col};font-weight:700">${pct}%</span>`+mtag+
+`<span style="color:${col};font-weight:700">${pct}%&nbsp;${hasMer?'watchable':'signal'}</span>`+mtag+
 `<span style="color:#5f7591;font-size:11px"> · pilot ${s?s.toFixed(0):'—'} dB over the noise floor`+
 (s?` = <b>${Math.round(Math.pow(10,s/10)).toLocaleString()}×</b> the static`:'')+
 (r.rms!=null&&g.floor!=null?` · level ${r.rms.toFixed(1)} dBFS / floor ${g.floor.toFixed(1)} dBFS`:'')+
