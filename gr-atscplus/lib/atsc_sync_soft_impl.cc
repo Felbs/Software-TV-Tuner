@@ -37,8 +37,14 @@ atsc_sync_soft::sptr atsc_sync_soft::make(float rate)
 
 atsc_sync_soft_impl::atsc_sync_soft_impl(float rate)
     : gr::block("atscplus_atsc_sync_soft",
-                io_signature::make(1, 1, sizeof(float)),
-                io_signature::make(1, 1, ATSC_DATA_SEGMENT_LENGTH * sizeof(float))),
+                // in1 = OPTIONAL fpll complex companion; out1 = OPTIONAL complex
+                // symbol segments (widely-linear equalizer feed). Existing chains
+                // connect only port 0 and are byte-for-byte unaffected.
+                io_signature::make2(1, 2, sizeof(float), sizeof(gr_complex)),
+                io_signature::make2(1,
+                                    2,
+                                    ATSC_DATA_SEGMENT_LENGTH * sizeof(float),
+                                    ATSC_DATA_SEGMENT_LENGTH * sizeof(gr_complex))),
       d_rx_clock_to_symbol_freq(rate / ATSC_SYMBOL_RATE),
       d_si(0)
 {
@@ -203,8 +209,14 @@ int atsc_sync_soft_impl::general_work(int noutput_items,
 {
     const float* in = static_cast<const float*>(input_items[0]);
     float* out = static_cast<float*>(output_items[0]);
+    // OPTIONAL complex companion (widely-linear feed) — only when connected
+    const gr_complex* in_c =
+        (input_items.size() > 1) ? static_cast<const gr_complex*>(input_items[1]) : nullptr;
+    gr_complex* out_c =
+        (output_items.size() > 1) ? static_cast<gr_complex*>(output_items[1]) : nullptr;
 
     float interp_sample;
+    gr_complex interp_sample_c(0.0f, 0.0f);
     d_si = 0;
     d_output_produced = 0;
 
@@ -212,6 +224,12 @@ int atsc_sync_soft_impl::general_work(int noutput_items,
            (d_si + (int)d_interp.ntaps()) < ninput_items[0]) {
 
         interp_sample = d_interp.interpolate(&in[d_si], d_mu);
+        // identical fractional timing on the complex companion (Re == interp_sample);
+        // bounds-guarded against unequal input counts (degrades to Im=0 safely)
+        if (in_c && d_si + (int)d_interp_c.ntaps() < ninput_items[1])
+            interp_sample_c = d_interp_c.interpolate(&in_c[d_si], d_mu);
+        else
+            interp_sample_c = gr_complex(interp_sample, 0.0f);
         // Reduce timing-adjust influence when locked: each per-segment
         // timing_adjust has noise even at lock; aggressive updates cause
         // d_counter to drift through best_idx bins.
@@ -384,10 +402,16 @@ int atsc_sync_soft_impl::general_work(int noutput_items,
         const bool will_emit = d_seg_locked || d_emit_when_unlocked;
         if (will_emit) {
             d_data_mem[d_symbol_index] = interp_sample;
+            if (out_c) d_data_mem_c[d_symbol_index] = interp_sample_c;
             if (d_symbol_index >= (ATSC_DATA_SEGMENT_LENGTH - 1)) {
                 float* out_seg = &out[d_output_produced * ATSC_DATA_SEGMENT_LENGTH];
                 memcpy(out_seg, d_data_mem,
                        ATSC_DATA_SEGMENT_LENGTH * sizeof(float));
+                if (out_c) {
+                    memcpy(&out_c[d_output_produced * ATSC_DATA_SEGMENT_LENGTH],
+                           d_data_mem_c,
+                           ATSC_DATA_SEGMENT_LENGTH * sizeof(gr_complex));
+                }
                 d_output_produced++;
                 d_segs_emitted++;
 

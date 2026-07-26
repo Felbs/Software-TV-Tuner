@@ -9,8 +9,10 @@
 
 #include <gnuradio/atscplus/atsc_sync_soft.h>
 #include <gnuradio/dtv/atsc_consts.h>
+#include <gnuradio/filter/mmse_fir_interpolator_cc.h>
 #include <gnuradio/filter/mmse_fir_interpolator_ff.h>
 #include <gnuradio/filter/single_pole_iir.h>
+#include <gnuradio/gr_complex.h>
 #include <cstdint>
 
 namespace gr {
@@ -21,6 +23,12 @@ class atsc_sync_soft_impl : public atsc_sync_soft
 private:
     gr::filter::single_pole_iir<float, float, float> d_loop;
     gr::filter::mmse_fir_interpolator_ff d_interp;
+    // OPTIONAL complex companion (widely-linear equalizer, 2026-07-26): same
+    // MMSE taps + same (d_si, d_mu) timing as the real path, so Re == the real
+    // symbol exactly and Im carries the vestigial-sideband component. Only used
+    // when input 1 (fpll complex) + output 1 are connected.
+    gr::filter::mmse_fir_interpolator_cc d_interp_c;
+    gr_complex d_data_mem_c[gr::dtv::ATSC_DATA_SEGMENT_LENGTH];
 
     double d_rx_clock_to_symbol_freq;
     int d_si;
