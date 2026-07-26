@@ -964,6 +964,11 @@ def base_env(rf):
                                                             env["STVT_EQ"]))
         except (OSError, ValueError):
             pass
+    # WIDELY-LINEAR opt-in (STVT 2.0): STVT_PANEL_EQ=wl -> widely-linear
+    # equalizer on every tune (needs fold mode). Default keeps v1 long.
+    if os.environ.get("STVT_PANEL_EQ") == "wl":
+        env["STVT_EQ"] = "wl"
+        env["STVT_FPLL_FOLD"] = "1"
     return env
 
 def kill_watch():
