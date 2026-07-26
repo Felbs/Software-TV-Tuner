@@ -79,13 +79,12 @@ atsc_equalizer_wl_impl::~atsc_equalizer_wl_impl() {}
 
 // y[k] = Re( sum_j w1[j] x[k+j] + w2[j] conj(x[k+j]) ), reference tap at NPRETAPS.
 // SIMD: two volk complex dot products per output symbol (main + conjugate branch).
-void atsc_equalizer_wl_impl::filterN(const gr_complex* in, const gr_complex* in_conj,
-                                     float* out, int nsamples)
+void atsc_equalizer_wl_impl::filterN(const gr_complex* in, float* out, int nsamples)
 {
     for (int k = 0; k < nsamples; k++) {
         gr_complex a1, a2;
-        volk_32fc_x2_dot_prod_32fc(&a1, in + k, d_w1.data(), NTAPS);
-        volk_32fc_x2_dot_prod_32fc(&a2, in_conj + k, d_w2.data(), NTAPS);
+        volk_32fc_x2_dot_prod_32fc(&a1, in + k, d_w1.data(), NTAPS);           // w1·x
+        volk_32fc_x2_conjugate_dot_prod_32fc(&a2, d_w2.data(), in + k, NTAPS); // w2·conj(x)
         out[k] = a1.real() + a2.real();
     }
 }
@@ -93,7 +92,6 @@ void atsc_equalizer_wl_impl::filterN(const gr_complex* in, const gr_complex* in_
 // Widely-linear NLMS on the known field-sync symbols. For a REAL target d the
 // augmented update is w1 += mu e conj(x), w2 += mu e x  (e real).
 void atsc_equalizer_wl_impl::adaptN(const gr_complex* in,
-                                    const gr_complex* in_conj,
                                     const float* training,
                                     float* out,
                                     int nsamples)
@@ -101,11 +99,10 @@ void atsc_equalizer_wl_impl::adaptN(const gr_complex* in,
     const float mu = 0.5f;
     for (int k = 0; k < nsamples; k++) {
         const gr_complex* x = in + k;
-        const gr_complex* xc = in_conj + k;   // conj(x)
         gr_complex a1, a2, ec;
-        volk_32fc_x2_dot_prod_32fc(&a1, x, d_w1.data(), NTAPS);
-        volk_32fc_x2_dot_prod_32fc(&a2, xc, d_w2.data(), NTAPS);
-        volk_32fc_x2_dot_prod_32fc(&ec, x, xc, NTAPS);   // sum x*conj(x)=sum|x|^2
+        volk_32fc_x2_dot_prod_32fc(&a1, x, d_w1.data(), NTAPS);            // w1·x
+        volk_32fc_x2_conjugate_dot_prod_32fc(&a2, d_w2.data(), x, NTAPS);  // w2·conj(x)
+        volk_32fc_x2_conjugate_dot_prod_32fc(&ec, x, x, NTAPS);            // sum|x|^2
         float y = a1.real() + a2.real();
         out[k] = y;
         float energy = 2.0f * ec.real() + 1e-6f;         // augmented regressor energy
@@ -113,8 +110,8 @@ void atsc_equalizer_wl_impl::adaptN(const gr_complex* in,
         float step = mu * e / energy;
         // LMS update runs only on field-sync segments (~1/313) — scalar is fine
         for (int j = 0; j < NTAPS; j++) {
-            d_w1[j] += step * xc[j];   // += mu*e*conj(x)/E
-            d_w2[j] += step * x[j];    // += mu*e*x/E
+            d_w1[j] += step * std::conj(x[j]);   // += mu*e*conj(x)/E
+            d_w2[j] += step * x[j];              // += mu*e*x/E
         }
     }
     double e1 = 0.0, e2 = 0.0;
@@ -181,16 +178,13 @@ int atsc_equalizer_wl_impl::general_work(int noutput_items,
                     in + i * ATSC_DATA_SEGMENT_LENGTH,
                     (NTAPS - NPRETAPS) * sizeof(gr_complex));
 
-        // conjugate the whole window once (SIMD) so both branches dot-product it
-        volk_32fc_conjugate_32fc(data_mem_conj, data_mem,
-                                 ATSC_DATA_SEGMENT_LENGTH + NTAPS);
         if (d_segno == -1) {
             const float* trn =
                 (d_flags & 0x0010) ? training_sequence2 : training_sequence1;
-            adaptN(data_mem, data_mem_conj, trn, data_mem2, KNOWN_FIELD_SYNC_LENGTH);
+            adaptN(data_mem, trn, data_mem2, KNOWN_FIELD_SYNC_LENGTH);
             // field-sync segment trains only — produces no output
         } else {
-            filterN(data_mem, data_mem_conj, data_mem2, ATSC_DATA_SEGMENT_LENGTH);
+            filterN(data_mem, data_mem2, ATSC_DATA_SEGMENT_LENGTH);
             std::memcpy(&out[output_produced * ATSC_DATA_SEGMENT_LENGTH],
                         data_mem2,
                         ATSC_DATA_SEGMENT_LENGTH * sizeof(float));
