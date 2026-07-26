@@ -18,6 +18,7 @@
 #include "atsc_pnXXX_impl.h"
 #include "atsc_types.h"
 #include <gnuradio/io_signature.h>
+#include <volk/volk.h>
 #include <cmath>
 #include <complex>
 #include <cstdio>
@@ -76,21 +77,23 @@ atsc_equalizer_wl_impl::atsc_equalizer_wl_impl()
 
 atsc_equalizer_wl_impl::~atsc_equalizer_wl_impl() {}
 
-// y[k] = Re( sum_j w1[j] x[k+j] + w2[j] conj(x[k+j]) ), reference tap at NPRETAPS
-void atsc_equalizer_wl_impl::filterN(const gr_complex* in, float* out, int nsamples)
+// y[k] = Re( sum_j w1[j] x[k+j] + w2[j] conj(x[k+j]) ), reference tap at NPRETAPS.
+// SIMD: two volk complex dot products per output symbol (main + conjugate branch).
+void atsc_equalizer_wl_impl::filterN(const gr_complex* in, const gr_complex* in_conj,
+                                     float* out, int nsamples)
 {
     for (int k = 0; k < nsamples; k++) {
-        const gr_complex* x = in + k;
-        gr_complex acc(0.0f, 0.0f);
-        for (int j = 0; j < NTAPS; j++)
-            acc += d_w1[j] * x[j] + d_w2[j] * std::conj(x[j]);
-        out[k] = acc.real();
+        gr_complex a1, a2;
+        volk_32fc_x2_dot_prod_32fc(&a1, in + k, d_w1.data(), NTAPS);
+        volk_32fc_x2_dot_prod_32fc(&a2, in_conj + k, d_w2.data(), NTAPS);
+        out[k] = a1.real() + a2.real();
     }
 }
 
 // Widely-linear NLMS on the known field-sync symbols. For a REAL target d the
 // augmented update is w1 += mu e conj(x), w2 += mu e x  (e real).
 void atsc_equalizer_wl_impl::adaptN(const gr_complex* in,
+                                    const gr_complex* in_conj,
                                     const float* training,
                                     float* out,
                                     int nsamples)
@@ -98,19 +101,20 @@ void atsc_equalizer_wl_impl::adaptN(const gr_complex* in,
     const float mu = 0.5f;
     for (int k = 0; k < nsamples; k++) {
         const gr_complex* x = in + k;
-        gr_complex acc(0.0f, 0.0f);
-        double energy = 1e-6;
-        for (int j = 0; j < NTAPS; j++) {
-            acc += d_w1[j] * x[j] + d_w2[j] * std::conj(x[j]);
-            energy += 2.0 * std::norm(x[j]); // augmented regressor energy
-        }
-        float y = acc.real();
+        const gr_complex* xc = in_conj + k;   // conj(x)
+        gr_complex a1, a2, ec;
+        volk_32fc_x2_dot_prod_32fc(&a1, x, d_w1.data(), NTAPS);
+        volk_32fc_x2_dot_prod_32fc(&a2, xc, d_w2.data(), NTAPS);
+        volk_32fc_x2_dot_prod_32fc(&ec, x, xc, NTAPS);   // sum x*conj(x)=sum|x|^2
+        float y = a1.real() + a2.real();
         out[k] = y;
+        float energy = 2.0f * ec.real() + 1e-6f;         // augmented regressor energy
         float e = training[k] - y;
-        float step = mu / static_cast<float>(energy);
+        float step = mu * e / energy;
+        // LMS update runs only on field-sync segments (~1/313) — scalar is fine
         for (int j = 0; j < NTAPS; j++) {
-            d_w1[j] += step * e * std::conj(x[j]);
-            d_w2[j] += step * e * x[j];
+            d_w1[j] += step * xc[j];   // += mu*e*conj(x)/E
+            d_w2[j] += step * x[j];    // += mu*e*x/E
         }
     }
     double e1 = 0.0, e2 = 0.0;
@@ -177,13 +181,16 @@ int atsc_equalizer_wl_impl::general_work(int noutput_items,
                     in + i * ATSC_DATA_SEGMENT_LENGTH,
                     (NTAPS - NPRETAPS) * sizeof(gr_complex));
 
+        // conjugate the whole window once (SIMD) so both branches dot-product it
+        volk_32fc_conjugate_32fc(data_mem_conj, data_mem,
+                                 ATSC_DATA_SEGMENT_LENGTH + NTAPS);
         if (d_segno == -1) {
             const float* trn =
                 (d_flags & 0x0010) ? training_sequence2 : training_sequence1;
-            adaptN(data_mem, trn, data_mem2, KNOWN_FIELD_SYNC_LENGTH);
+            adaptN(data_mem, data_mem_conj, trn, data_mem2, KNOWN_FIELD_SYNC_LENGTH);
             // field-sync segment trains only — produces no output
         } else {
-            filterN(data_mem, data_mem2, ATSC_DATA_SEGMENT_LENGTH);
+            filterN(data_mem, data_mem_conj, data_mem2, ATSC_DATA_SEGMENT_LENGTH);
             std::memcpy(&out[output_produced * ATSC_DATA_SEGMENT_LENGTH],
                         data_mem2,
                         ATSC_DATA_SEGMENT_LENGTH * sizeof(float));
