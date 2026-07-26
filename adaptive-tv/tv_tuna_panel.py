@@ -1631,27 +1631,33 @@ def tune(rf, prog, virtual, name, force_respawn=False):
                          and not (mers and mer_now < 15.0))
             set_stage(60, "equalizer converging — buffering the "
                           "transport stream"
-                          + (" (memory: layout cached — handing straight "
-                             "to the extractor)" if skip_gate else ""))
-            # Gate on GROWTH since this chain started, not absolute size —
-            # the previous tune's leftover live.ts is big and freshly
-            # written, which used to pass this gate instantly (false 75%).
+                          + (" (memory: layout cached — verifying fresh "
+                             "stream)" if skip_gate else ""))
+            # FRESH-DATA GATE (2026-07-26): NEVER launch the player against the
+            # PREVIOUS channel's leftover live.ts. After a cross-mux respawn the
+            # ~1 GB stale file passes tv_watch's size-only gate instantly, so the
+            # extractor pulls the OLD channel's tail and fails (the "click 3
+            # times" bug). Require real GROWTH from THIS chain; a size drop =
+            # truncate/rotate resets the baseline. A PID-cache hit just uses a
+            # lighter budget instead of SKIPPING the check (skipping = the bug).
             try:
                 base_sz = LIVE.stat().st_size
             except OSError:
                 base_sz = 0
-            while not skip_gate and time.time() - t0 < 110:
+            _grow_need = 3_000_000 if skip_gate else 6_000_000
+            _gate_secs = 45 if skip_gate else 110
+            while time.time() - t0 < _gate_secs:
                 if GEN[0] != my_gen: return
                 try:
                     stt = LIVE.stat()
                     if stt.st_size < base_sz:
                         base_sz = stt.st_size      # chain truncated/rotated
-                    if (stt.st_size - base_sz > 6_000_000
+                    if (stt.st_size - base_sz > _grow_need
                             and time.time() - stt.st_mtime < 5):
                         break
                 except OSError:
                     pass
-                time.sleep(1.5)
+                time.sleep(1.0 if skip_gate else 1.5)
             if GEN[0] != my_gen: return
             # watchability gate (2026-07-07, survival-curve law): below
             # ~15.0 sustained, headers are countable but frames are not
@@ -1673,7 +1679,13 @@ def tune(rf, prog, virtual, name, force_respawn=False):
             # its splice stream confuses mpv's prober at probe time —
             # bench-proven on finished files, live variant needs demuxer
             # work; above 15 the proven tv_watch path plays with sound)
-            if mers and mer_now < 15.0:
+            # BELOW-CLIFF ROUTING (2026-07-26): the old HARVEST MODE (clean-GOP
+            # only) is bench-proven on FINISHED files but its LIVE splice stream
+            # confuses mpv's prober AND harvest_player hardcodes a wrong MPV path
+            # -> it fails to start video on exactly the marginal channels it
+            # targets. FORCE the glitchy stream to PLAY (ugly motion beats a
+            # dead black screen); harvest stays opt-in via STVT_HARVEST=1.
+            if mers and mer_now < 15.0 and os.environ.get("STVT_HARVEST") == "1":
                 watch_args = [PY, "-u", str(HERE / "harvest_player.py"),
                               str(TOOLS / "data" / "tv_live" / "live.ts"),
                               "--prog", str(prog), "--follow"]
@@ -1681,7 +1693,7 @@ def tune(rf, prog, virtual, name, force_respawn=False):
                               f"(MER {mer_now:.1f}: only true frames pass)")
             else:
                 watch_args = [PY, "-u", str(HERE / "tv_watch.py"), str(prog)]
-                if cliff_mode and mer_now < 15.8:
+                if cliff_mode:            # force glitchy video for ANY sub-16
                     watch_args.append("marginal")
             watch_log = open(HERE / "lab" / "panel_watch.log", "w")
             subprocess.Popen(watch_args,
@@ -2293,9 +2305,11 @@ if(r.mer!=null){const m=r.mer,p10=r.mer_p10;
 const bursty=(p10!=null&&m>=16&&(m-p10)>=1.2&&p10<16.2);
 // measured loss at scan time outranks any MER label: fast faders (RF9)
 // alias the MER sampling and read "flawless" while packets die (7/10)
-const lossy=(r.loss!=null&&r.loss>=0.3);
-const mc=lossy?(r.loss>=3?'#e77':'#e7c96a'):bursty?'#e7c96a':(m>=16.5?'#67d18a':(m>=15.2?'#e7c96a':'#e77'));
-const mw=lossy?(r.loss>=3?'📉 glitchy — '+r.loss+'% packets lost at scan':'⚡ some glitches — '+r.loss+'% lost at scan')
+// LOSS CALIBRATION (2026-07-26): a FLAWLESS channel still measures ~1-1.4%
+// scan-window loss — the 0.3% trigger made green unreachable. Demote >=2%, red >=8%.
+const lossy=(r.loss!=null&&r.loss>=2.0);
+const mc=lossy?(r.loss>=8?'#e77':'#e7c96a'):bursty?'#e7c96a':(m>=16.5?'#67d18a':(m>=15.2?'#e7c96a':'#e77'));
+const mw=lossy?(r.loss>=8?'📉 glitchy — '+r.loss+'% packets lost at scan':'⚡ some glitches — '+r.loss+'% lost at scan')
  :bursty?'⚡ bursty — glitches despite strong signal':(m>=16.5?'flawless':(m>=16?'watchable':(m>=15.2?'marginal · glitchy':'below cliff')));
 mtag=`&nbsp;<span style="color:${mc};font-weight:700">◉ ${mw}</span>`+
 `<span style="color:#5f7591;font-size:11px"> (MER ${m.toFixed(1)}${p10!=null?' / dips '+p10.toFixed(1):''} dB)</span>`;}
