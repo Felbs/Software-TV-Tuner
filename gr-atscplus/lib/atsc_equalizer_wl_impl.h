@@ -35,9 +35,6 @@ private:
 
     // sliding complex window: [NPRETAPS pre | segment | post]
     gr_complex data_mem[gr::dtv::ATSC_DATA_SEGMENT_LENGTH + NTAPS];
-    // conjugate of data_mem (recomputed per segment via volk); lets both the
-    // main (w1·x) and conjugate (w2·x*) branches use SIMD complex dot products.
-    gr_complex data_mem_conj[gr::dtv::ATSC_DATA_SEGMENT_LENGTH + NTAPS];
     float data_mem2[gr::dtv::ATSC_DATA_SEGMENT_LENGTH];
 
     unsigned short d_flags = 0;
@@ -45,10 +42,10 @@ private:
     bool d_buff_not_filled = true;
     float d_conj_frac = 0.0f;
 
-    void filterN(const gr_complex* in, const gr_complex* in_conj,
-                 float* out, int nsamples);
-    void adaptN(const gr_complex* in, const gr_complex* in_conj,
-                const float* training, float* out, int nsamples);
+    // main branch = volk_32fc_x2_dot_prod (w1·x); conjugate branch =
+    // volk_32fc_x2_conjugate_dot_prod (w2·conj(x)) — no separate conj buffer.
+    void filterN(const gr_complex* in, float* out, int nsamples);
+    void adaptN(const gr_complex* in, const float* training, float* out, int nsamples);
 
 public:
     atsc_equalizer_wl_impl();
