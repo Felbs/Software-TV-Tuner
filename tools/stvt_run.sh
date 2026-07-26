@@ -41,7 +41,7 @@ DROUGHT_PIDS=150            # unique-PID count above this = noise drought
 # expected to be a free win here. STVT_FPLL_FOLD=1 to enable.
 export STVT_RS=stock STVT_VITERBI=hard STVT_EQ=long
 export STVT_SPS="${STVT_SPS:-1.1}" STVT_RRC_SYMS="${STVT_RRC_SYMS:-4}" STVT_TEISCRUB="${STVT_TEISCRUB:-0}"
-export STVT_IFGR="${STVT_IFGR:-59}" STVT_RFGAIN_SEL="${STVT_RFGAIN_SEL:-5}" STVT_ANTENNA="${STVT_ANTENNA:-Antenna A}"
+export STVT_IFGR="${STVT_IFGR:-40}" STVT_RFGAIN_SEL="${STVT_RFGAIN_SEL:-3}" STVT_ANTENNA="${STVT_ANTENNA:-Antenna B}"
 
 log(){ echo "$(printf '%(%H:%M:%S)T' -1) $*" | tee -a "$RUNLOG" ; }
 
