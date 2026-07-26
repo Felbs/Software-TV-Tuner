@@ -54,9 +54,19 @@ atsc_fs_checker_inst::sptr atsc_fs_checker_inst::make()
 
 atsc_fs_checker_inst_impl::atsc_fs_checker_inst_impl()
     : gr::block("atscplus_atsc_fs_checker_inst",
-                gr::io_signature::make(1, 1, ATSC_DATA_SEGMENT_LENGTH * sizeof(float)),
-                gr::io_signature::make2(
-                    2, 2, ATSC_DATA_SEGMENT_LENGTH * sizeof(float), sizeof(plinfo)))
+                // in1 = OPTIONAL complex companion (from sync out1). out2 =
+                // OPTIONAL complex segments carried through the SAME drop/keep
+                // decisions as the real path (widely-linear feed, 2026-07-26).
+                // Existing chains connect in0/out0/out1 only and are unaffected.
+                gr::io_signature::make2(1,
+                                        2,
+                                        ATSC_DATA_SEGMENT_LENGTH * sizeof(float),
+                                        ATSC_DATA_SEGMENT_LENGTH * sizeof(gr_complex)),
+                gr::io_signature::make3(2,
+                                        3,
+                                        ATSC_DATA_SEGMENT_LENGTH * sizeof(float),
+                                        sizeof(plinfo),
+                                        ATSC_DATA_SEGMENT_LENGTH * sizeof(gr_complex)))
 {
     reset();
 }
@@ -118,6 +128,11 @@ int atsc_fs_checker_inst_impl::general_work(int noutput_items,
     auto in = static_cast<const float*>(input_items[0]);
     auto out = static_cast<float*>(output_items[0]);
     auto out_pl = static_cast<plinfo*>(output_items[1]);
+    // OPTIONAL complex companion — carried through the identical drop/keep path
+    const gr_complex* in_c =
+        (input_items.size() > 1) ? static_cast<const gr_complex*>(input_items[1]) : nullptr;
+    gr_complex* out_c =
+        (output_items.size() > 2) ? static_cast<gr_complex*>(output_items[2]) : nullptr;
 
     // Drought-forensics telemetry (gated; zero overhead unless ATSCPLUS_FS_TELEM=1).
     // Logs field-sync GAP anomalies (gap != 313 = a segment-count slip) and
@@ -272,6 +287,12 @@ int atsc_fs_checker_inst_impl::general_work(int noutput_items,
             std::memcpy(&out[output_produced * ATSC_DATA_SEGMENT_LENGTH],
                         &in[i * ATSC_DATA_SEGMENT_LENGTH],
                         ATSC_DATA_SEGMENT_LENGTH * sizeof(float));
+            // mirror the complex companion at the SAME output index (stays
+            // aligned through normal/coast/halt — all key on output_produced)
+            if (out_c && in_c)
+                std::memcpy(&out_c[output_produced * ATSC_DATA_SEGMENT_LENGTH],
+                            &in_c[i * ATSC_DATA_SEGMENT_LENGTH],
+                            ATSC_DATA_SEGMENT_LENGTH * sizeof(gr_complex));
 
             plinfo pli_out;
             // set_regular_seg(field2, segno) — the GR stock equalizer keys on
