@@ -61,6 +61,17 @@ def resolve_soapy_args(default: str = "driver=sdrplay",
         return default
     if not devs:
         return default
+    # Sound cards & null devices always enumerate but can never be TV SDRs
+    # (audio tops out at 192 kS/s vs ATSC's 8 MS/s). During the SDRplay API's
+    # post-close release window the RSP briefly vanishes from enumeration,
+    # which used to make this fall back to the MICROPHONE and die un-retried
+    # at set_sample_rate (2026-07-26, the cross-mux flip killer). Never pick
+    # them; with nothing eligible left, return the default so the caller's
+    # open-retry loop waits out the release window instead.
+    INELIGIBLE = ("audio", "null")
+    devs = [d for d in devs if d.get("driver", "?") not in INELIGIBLE]
+    if not devs:
+        return default
     drivers = [d.get("driver", "?") for d in devs]
     if "sdrplay" in drivers:
         return "driver=sdrplay"
