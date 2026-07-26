@@ -20,6 +20,8 @@
 #include <gnuradio/io_signature.h>
 #include <cmath>
 #include <complex>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace gr {
@@ -117,6 +119,15 @@ void atsc_equalizer_wl_impl::adaptN(const gr_complex* in,
         e2 += std::norm(d_w2[j]);
     }
     d_conj_frac = static_cast<float>(e2 / (e1 + e2 + 1e-12));
+    static const bool TELEM = []() {
+        const char* p = std::getenv("STVT_EQ_TELEM"); return p && std::atoi(p) != 0;
+    }();
+    if (TELEM) {
+        static int fld = 0;
+        if ((++fld % 40) == 0)
+            std::fprintf(stderr, "[eq-wl] conj_frac=%.4f |w1|2=%.3f |w2|2=%.3f\n",
+                         d_conj_frac, e1, e2);
+    }
 }
 
 std::vector<float> atsc_equalizer_wl_impl::taps() const
