@@ -463,6 +463,7 @@ class LiveTVTopBlock(gr.top_block):
         elif _eq_name == "multifs":       equalizer = atscplus.atsc_equalizer_pilot_multifs()
         elif _eq_name == "multifs_dd":    equalizer = atscplus.atsc_equalizer_pilot_multifs_dd()
         elif _eq_name == "stock":         equalizer = dtv.atsc_equalizer()
+        elif _eq_name == "wl":            equalizer = atscplus.atsc_equalizer_wl()
         else: raise ValueError(f"Unknown STVT_EQ={_eq_name}")
         LOG.info(f"equalizer: {_eq_name} (STVT_EQ)")
 
@@ -588,9 +589,27 @@ class LiveTVTopBlock(gr.top_block):
                       "antenna": os.environ.get("STVT_ANTENNA", "?")})
             self.connect(scaler, self._iq_ring)
             LOG.info(f"iq_ring: {_ring_secs}s specimen ring -> {_ring_dir}")
+        # ── WIDELY-LINEAR path (STVT_EQ=wl, 2026-07-26) ──
+        # Route the carrier-corrected complex companion fpll(1)->sync(1)->fs_check(1)
+        # into the widely-linear equalizer (complex segments = fs_check out2, plinfo
+        # = out1). The real segment (out0) is unused by WL -> null sink; it still
+        # drives timing/framing. Requires FPLL fold mode (else the complex bypasses
+        # the separate dc_blocker+agc and its Re desyncs from the real path).
+        if _eq_name == "wl":
+            if not int(os.environ.get("STVT_FPLL_FOLD", "0")):
+                raise ValueError("STVT_EQ=wl requires STVT_FPLL_FOLD=1 "
+                                 "(complex companion must match the folded real path)")
+            self.connect((fpll, 1), (sync, 1))
+            self.connect((sync, 1), (fs_check, 1))
+            self.connect((fs_check, 2), (equalizer, 0))   # complex 8-VSB segments
+            self.connect((fs_check, 1), (equalizer, 1))   # plinfo
+            self.connect((fs_check, 0), blocks.null_sink(gr.sizeof_float * 832))
+            _eq_edges = []            # fs_check->equalizer already wired (complex)
+            LOG.info("WIDELY-LINEAR equalizer wired (complex companion path)")
+        else:
+            _eq_edges = [(fs_check, equalizer)]
         if _rs_is_2port:
-            for blk_in, blk_out in [(fs_check, equalizer),
-                                     (equalizer, viterbi),
+            for blk_in, blk_out in _eq_edges + [(equalizer, viterbi),
                                      (viterbi, deinterleaver),
                                      (deinterleaver, rs),
                                      (rs, derand)]:
@@ -633,8 +652,7 @@ class LiveTVTopBlock(gr.top_block):
                     equalizer.set_min_output_buffer(512)
                     LOG.info("TURBO 2B: soft-symbol plane wired (live)")
         else:
-            for blk_in, blk_out in [(fs_check, equalizer),
-                                     (equalizer, viterbi),
+            for blk_in, blk_out in _eq_edges + [(equalizer, viterbi),
                                      (viterbi, deinterleaver)]:
                 self.connect((blk_in, 0), (blk_out, 0))
                 self.connect((blk_in, 1), (blk_out, 1))
@@ -655,6 +673,25 @@ class LiveTVTopBlock(gr.top_block):
             self.connect(depad, self._v2s_in, self._teiscrub, self._v2s_out, ts_file)
         else:
             self.connect(depad, ts_file)
+
+        # EQUALIZER RESEARCH TAP (2026-07-26): STVT_EQ_DUMP=<dir> dumps the
+        # equalizer INPUT (fs_check out = the real 8-VSB symbols the LMS sees)
+        # and the equalizer OUTPUT (C++ baseline) as raw float32, so an offline
+        # testbench can prototype superior equalizers (CIR-sparse, widely-linear,
+        # turbo-eq) on real marginal captures without touching the live chain.
+        # Off by default; fan-out taps don't perturb the decode path.
+        _eq_dump = os.environ.get("STVT_EQ_DUMP")
+        if _eq_dump:
+            os.makedirs(_eq_dump, exist_ok=True)
+            self._eqin_sink = blocks.file_sink(gr.sizeof_float,
+                                               f"{_eq_dump}/eq_in.f32")
+            self._eqin_sink.set_unbuffered(False)
+            self._eqout_sink = blocks.file_sink(gr.sizeof_float,
+                                                f"{_eq_dump}/eq_out.f32")
+            self._eqout_sink.set_unbuffered(False)
+            self.connect((fs_check, 0), self._eqin_sink)
+            self.connect((equalizer, 0), self._eqout_sink)
+            LOG.info(f"EQ RESEARCH DUMP -> {_eq_dump}/eq_in.f32, eq_out.f32")
 
         # Diagnostic taps — capture bytes at 5 decode-chain points.
         # OFF by default (2026-05-16): a multi-hour chain run filled /tmp
