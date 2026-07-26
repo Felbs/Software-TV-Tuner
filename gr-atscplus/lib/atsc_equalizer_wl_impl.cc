@@ -56,10 +56,14 @@ static void init_field_sync_common(float* p, int mask)
 
 atsc_equalizer_wl_impl::atsc_equalizer_wl_impl()
     : gr::block("atscplus_atsc_equalizer_wl",
-                io_signature::make2(2,
-                                    2,
-                                    ATSC_DATA_SEGMENT_LENGTH * sizeof(gr_complex),
-                                    sizeof(plinfo)),
+                // in0 = REAL 8-VSB segments, in1 = plinfo, in2 = IMAGINARY segments
+                // (float). We interleave in0/in2 into complex internally (v2: half
+                // the upstream data flow vs carrying full complex).
+                io_signature::make3(3,
+                                    3,
+                                    ATSC_DATA_SEGMENT_LENGTH * sizeof(float),
+                                    sizeof(plinfo),
+                                    ATSC_DATA_SEGMENT_LENGTH * sizeof(float)),
                 io_signature::make2(2,
                                     2,
                                     ATSC_DATA_SEGMENT_LENGTH * sizeof(float),
@@ -153,9 +157,10 @@ int atsc_equalizer_wl_impl::general_work(int noutput_items,
                                          gr_vector_const_void_star& input_items,
                                          gr_vector_void_star& output_items)
 {
-    auto in = static_cast<const gr_complex*>(input_items[0]);
-    auto out = static_cast<float*>(output_items[0]);
+    auto in_real = static_cast<const float*>(input_items[0]);
     auto in_pl = static_cast<const plinfo*>(input_items[1]);
+    auto in_imag = static_cast<const float*>(input_items[2]);
+    auto out = static_cast<float*>(output_items[0]);
     auto out_pl = static_cast<plinfo*>(output_items[1]);
 
     int output_produced = 0;
@@ -163,9 +168,10 @@ int atsc_equalizer_wl_impl::general_work(int noutput_items,
 
     if (d_buff_not_filled) {
         std::memset(&data_mem[0], 0, NPRETAPS * sizeof(gr_complex));
-        std::memcpy(&data_mem[NPRETAPS],
-                    in + i * ATSC_DATA_SEGMENT_LENGTH,
-                    ATSC_DATA_SEGMENT_LENGTH * sizeof(gr_complex));
+        volk_32f_x2_interleave_32fc(&data_mem[NPRETAPS],
+                                    in_real + i * ATSC_DATA_SEGMENT_LENGTH,
+                                    in_imag + i * ATSC_DATA_SEGMENT_LENGTH,
+                                    ATSC_DATA_SEGMENT_LENGTH);
         d_flags = in_pl[i].flags();
         d_segno = in_pl[i].segno();
         d_buff_not_filled = false;
@@ -174,9 +180,10 @@ int atsc_equalizer_wl_impl::general_work(int noutput_items,
 
     for (; i < noutput_items; i++) {
         // post-cursor taps come from the NEXT segment's leading samples
-        std::memcpy(&data_mem[ATSC_DATA_SEGMENT_LENGTH + NPRETAPS],
-                    in + i * ATSC_DATA_SEGMENT_LENGTH,
-                    (NTAPS - NPRETAPS) * sizeof(gr_complex));
+        volk_32f_x2_interleave_32fc(&data_mem[ATSC_DATA_SEGMENT_LENGTH + NPRETAPS],
+                                    in_real + i * ATSC_DATA_SEGMENT_LENGTH,
+                                    in_imag + i * ATSC_DATA_SEGMENT_LENGTH,
+                                    NTAPS - NPRETAPS);
 
         if (d_segno == -1) {
             const float* trn =
@@ -195,9 +202,10 @@ int atsc_equalizer_wl_impl::general_work(int noutput_items,
         std::memcpy(data_mem,
                     &data_mem[ATSC_DATA_SEGMENT_LENGTH],
                     NPRETAPS * sizeof(gr_complex));
-        std::memcpy(&data_mem[NPRETAPS],
-                    in + i * ATSC_DATA_SEGMENT_LENGTH,
-                    ATSC_DATA_SEGMENT_LENGTH * sizeof(gr_complex));
+        volk_32f_x2_interleave_32fc(&data_mem[NPRETAPS],
+                                    in_real + i * ATSC_DATA_SEGMENT_LENGTH,
+                                    in_imag + i * ATSC_DATA_SEGMENT_LENGTH,
+                                    ATSC_DATA_SEGMENT_LENGTH);
         d_flags = in_pl[i].flags();
         d_segno = in_pl[i].segno();
     }

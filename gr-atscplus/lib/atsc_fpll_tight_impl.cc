@@ -28,12 +28,13 @@ atsc_fpll_tight::sptr atsc_fpll_tight::make(float rate, float alpha, float afc_t
 atsc_fpll_tight_impl::atsc_fpll_tight_impl(float rate, float alpha, float afc_tau_us)
     : sync_block("atscplus_atsc_fpll_tight",
                  io_signature::make(1, 1, sizeof(gr_complex)),
-                 // out0 = real VSB (required, unchanged). out1 = OPTIONAL
-                 // carrier-corrected COMPLEX companion for the widely-linear
-                 // equalizer (2026-07-26): Re == out0, Im == the vestigial-
-                 // sideband component the real path discards. Existing chains
-                 // connect only out0 and are byte-for-byte unaffected.
-                 io_signature::make2(1, 2, sizeof(float), sizeof(gr_complex)))
+                 // out0 = real VSB (required, unchanged). out1 = OPTIONAL float
+                 // IMAGINARY companion for the widely-linear equalizer (2026-07-26,
+                 // v2): the vestigial-sideband component the real path discards.
+                 // Carrying imag-only (not full complex) halves the WL data flow —
+                 // out0 already IS the real part. Existing chains connect only out0
+                 // and are byte-for-byte unaffected.
+                 io_signature::make2(1, 2, sizeof(float), sizeof(float)))
 {
     d_alpha = alpha;
     d_beta = alpha * alpha / 4.0f;
@@ -123,13 +124,12 @@ int atsc_fpll_tight_impl::work(int noutput_items,
             out[k] = o;
         }
 
-        // OPTIONAL complex companion (widely-linear equalizer feed). Re is the
-        // final real output exactly; Im is the carrier-corrected imaginary part
+        // OPTIONAL imaginary companion (widely-linear equalizer feed). The real
+        // part is out0; here we emit just the carrier-corrected imaginary part,
         // scaled to match (agc gain in fold mode). Only written if connected.
         if (output_items.size() > 1) {
-            auto outc = static_cast<gr_complex*>(output_items[1]);
-            float im = d_fold ? (result.imag() * d_agc_gain) : result.imag();
-            outc[k] = gr_complex(out[k], im);
+            auto outi = static_cast<float*>(output_items[1]);
+            outi[k] = d_fold ? (result.imag() * d_agc_gain) : result.imag();
         }
 
         filtered = d_afc.filter(result);
