@@ -197,6 +197,7 @@ class ReplayTopBlock(gr.top_block):
             "multifs": atscplus.atsc_equalizer_pilot_multifs,
             "multifs_dd": atscplus.atsc_equalizer_pilot_multifs_dd,
             "stock": dtv.atsc_equalizer,
+            "wl": atscplus.atsc_equalizer_wl,   # widely-linear (complex-fed)
         }
         equalizer = eqmap[_eq]()
 
@@ -259,10 +260,26 @@ class ReplayTopBlock(gr.top_block):
         if noise_add is not None:
             self.connect(noise_src, (noise_add, 1))
 
-        for a, b in [(fs_check, equalizer), (equalizer, viterbi),
-                     (viterbi, deinterleaver), (deinterleaver, rs), (rs, derand)]:
-            self.connect((a, 0), (b, 0))
-            self.connect((a, 1), (b, 1))
+        if _eq == "wl":
+            # WIDELY-LINEAR path (2026-07-26): route the carrier-corrected complex
+            # companion fpll(1)->sync(1)->fs_check(1); the equalizer consumes the
+            # COMPLEX segments (fs_check out2) + plinfo (out1). The real segment
+            # (out0) is unused by WL -> null sink (it still drives timing/framing).
+            self.connect((fpll, 1), (sync, 1))
+            self.connect((sync, 1), (fs_check, 1))
+            self.connect((fs_check, 2), (equalizer, 0))   # complex 8-VSB segments
+            self.connect((fs_check, 1), (equalizer, 1))   # plinfo
+            self.connect((fs_check, 0),
+                         blocks.null_sink(gr.sizeof_float * 832))
+            for a, b in [(equalizer, viterbi), (viterbi, deinterleaver),
+                         (deinterleaver, rs), (rs, derand)]:
+                self.connect((a, 0), (b, 0))
+                self.connect((a, 1), (b, 1))
+        else:
+            for a, b in [(fs_check, equalizer), (equalizer, viterbi),
+                         (viterbi, deinterleaver), (deinterleaver, rs), (rs, derand)]:
+                self.connect((a, 0), (b, 0))
+                self.connect((a, 1), (b, 1))
         # ── SOVA reliability plane (2026-07-07) — mirror of tv_live.py ──
         if (int(os.environ.get("STVT_SOVA", "0"))
                 and os.environ.get("STVT_VITERBI") == "soft"
@@ -310,6 +327,23 @@ class ReplayTopBlock(gr.top_block):
             self._eq_sink = blocks.file_sink(gr.sizeof_float, f"{diag_dir}/eq_out.f32")
             self._eq_sink.set_unbuffered(True)
             self.connect((equalizer, 0), self._eq_v2s, self._eq_sink)
+            # EQ INPUT (fs_check out = the real 8-VSB symbols the equalizer
+            # receives, same 832-float segment framing). Paired to eq_out so an
+            # offline testbench can run CANDIDATE equalizers on the EXACT live
+            # input and score them against the C++ baseline (2026-07-26).
+            self._eqin_v2s  = blocks.vector_to_stream(gr.sizeof_float, 832)
+            self._eqin_sink = blocks.file_sink(gr.sizeof_float, f"{diag_dir}/eq_in.f32")
+            self._eqin_sink.set_unbuffered(True)
+            self.connect((fs_check, 0), self._eqin_v2s, self._eqin_sink)
+            # COMPLEX matched-filter output (pre-FPLL, pre-VSB->real). This is the
+            # ONLY complex point in the chain — the FPLL discards the imaginary
+            # part. Needed to test the WIDELY-LINEAR equalizer on real captures:
+            # carrier-correct + symbol-time it offline (align to eq_in), keep the
+            # imaginary part = the vestigial-sideband info WL exploits (2026-07-26).
+            self._mf_sink = blocks.file_sink(gr.sizeof_gr_complex,
+                                             f"{diag_dir}/mf_complex.cf32")
+            self._mf_sink.set_unbuffered(False)
+            self.connect((rxf, 0), self._mf_sink)
             # Post-deinterleaver (RS input, 207-byte blocks)
             self._dei_v2s  = blocks.vector_to_stream(gr.sizeof_char, 207)
             self._dei_sink = blocks.file_sink(gr.sizeof_char, f"{diag_dir}/dei_out.bin")
