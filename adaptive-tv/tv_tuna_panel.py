@@ -420,7 +420,14 @@ def chain_running():
     return bool(r.stdout.strip())
 
 def mpv_up():
-    """Is the mpv player process alive? (platform layer)"""
+    """Is the mpv player process alive? (platform layer)
+
+    In STVT_HEADLESS (tuner-only) mode there is no local player by design, so
+    the tune-completion gates that wait for mpv would otherwise stall the full
+    150 s. Report 'up' immediately — a headless tune is complete once the chain
+    locks, not when a player that will never start appears."""
+    if os.environ.get("STVT_HEADLESS", "0") not in ("0", "", "false", "no"):
+        return True
     if IS_WIN:
         r = subprocess.run(["tasklist", "/FI", "IMAGENAME eq mpv.exe"],
                            capture_output=True, text=True)
@@ -938,6 +945,20 @@ def base_env(rf):
                     "STVT_RFNOTCH": "0", "STVT_EQ_CIR": "0",
                     "STVT_RRC_SYMS": "4", "STVT_IQ_RING": "0",
                     "STVT_EQ": os.environ.get("STVT_CHAIN_EQ", "long")})
+        # PER-CHANNEL EQ (2026-07-12, the saturation lesson): the strong
+        # EQ costs ~302% CPU on a Pi 5 — with player+UI that is ~93%
+        # saturation and ambient jitter punctures it ~3 oso/min. Most
+        # channels don't need it (FOX on stock = 0.0035% overnight);
+        # only real-multipath channels (NBC RF34: 43-79% garbage on
+        # stock) earn the heavy EQ. lab/eq_map.json: {"34": "long",
+        # "default": "stock"} — measured need, not vibes.
+        try:
+            eq_map = json.loads((HERE / "lab" / "eq_map.json")
+                                .read_text(encoding="utf-8"))
+            env["STVT_EQ"] = eq_map.get(str(rf), eq_map.get("default",
+                                                            env["STVT_EQ"]))
+        except (OSError, ValueError):
+            pass
     return env
 
 def kill_watch():
@@ -3036,9 +3057,16 @@ def chain_doctor():
             alive = 0
             for pr in psutil.process_iter(["name", "cmdline"]):
                 try:
-                    if pr.info["name"] == "python.exe" and any(
-                            "tv_live" in (c or "")
-                            for c in (pr.info["cmdline"] or [])):
+                    # match by CMDLINE, not interpreter name: the chain runs
+                    # as "python.exe" on Windows but "python3" on Linux/Pi.
+                    # The old name=="python.exe" gate made chain_doctor blind
+                    # on every non-Windows box — it saw an alive chain as
+                    # dead and "healed" (re-tuned) it ~4x in the first 3 min
+                    # after each tune, dropping lock and churning the SDR
+                    # into the "intermittent" freezes (2026-07-12 Pi). The
+                    # tv_live.py token is the portable, specific signal.
+                    if any("tv_live.py" in (c or "")
+                           for c in (pr.info["cmdline"] or [])):
                         alive += 1
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass

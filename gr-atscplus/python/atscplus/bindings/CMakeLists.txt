@@ -46,6 +46,7 @@ list(APPEND atscplus_python_files
     atsc_adaptive_notch_python.cc
     atsc_spectral_smoother_python.cc
     atsc_deinterleaver_python.cc
+    atsc_mer_probe_python.cc
     python_bindings.cc)
 
 gr_pybind_make_oot(atscplus ../../.. gr::atscplus "${atscplus_python_files}")

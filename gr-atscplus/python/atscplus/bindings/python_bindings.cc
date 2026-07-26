@@ -42,6 +42,7 @@ void bind_atsc_noise_blanker(py::module& m);
 void bind_atsc_adaptive_notch(py::module& m);
 void bind_atsc_spectral_smoother(py::module& m);
 void bind_atsc_deinterleaver(py::module& m);
+void bind_atsc_mer_probe(py::module& m);
 // ) END BINDING_FUNCTION_PROTOTYPES
 
 
@@ -91,5 +92,6 @@ PYBIND11_MODULE(atscplus_python, m)
     bind_atsc_adaptive_notch(m);
     bind_atsc_spectral_smoother(m);
     bind_atsc_deinterleaver(m);
+    bind_atsc_mer_probe(m);
     // ) END BINDING_FUNCTION_CALLS
 }

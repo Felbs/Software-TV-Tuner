@@ -34,6 +34,7 @@ list(APPEND atscplus_sources
     atsc_adaptive_notch_impl.cc
     atsc_spectral_smoother_impl.cc
     atsc_deinterleaver_impl.cc
+    atsc_mer_probe_impl.cc
 )
 
 set(atscplus_sources

@@ -313,11 +313,30 @@ def solo_edge():
 
 def seek_live_solo():
     ipc(["set_property", "pause", False])
-    # duration of a growing TS is unreliable; seek by percent near the end
-    ipc(["seek", "98", "absolute-percent+keyframes"])
+    # Seek to the LIVE EDGE with a small cushion, SIZE-INDEPENDENTLY.
+    # 2026-07-13: the old "98%" seek jumped back MINUTES once live_solo grew
+    # to hours of uptime (98% of a 2.5 h file = ~3 min behind) — that was
+    # the resync LOOP the user saw. Seek to (duration - cushion) instead:
+    # always ~a few seconds from the edge no matter how long the file is.
+    # mpv DOES track a live duration for the growing TS (verified: dur/pos
+    # agree to ~1 s); fall back to 98% only if it can't report one yet.
+    cushion = float(os.environ.get("STVT_LIVE_CUSHION", "4"))
+    dur = ipc(["get_property", "duration"], req=71)
+    if isinstance(dur, (int, float)) and dur > cushion + 2:
+        ipc(["seek", str(round(dur - cushion, 1)), "absolute+keyframes"])
+    else:
+        ipc(["seek", "98", "absolute-percent+keyframes"])
 
 def main():
     args = sys.argv[1:]
+    # Headless / tuner-only mode: the Pi has no HW MPEG-2 decode, so when it is
+    # acting purely as an HDHomeRun tuner (streaming to Jellyfin/Plex/etc.) it
+    # should not launch a local player at all — 100% of its CPU goes to the
+    # tuner chain. The panel still launches this script per tune; it just no-ops.
+    if os.environ.get("STVT_HEADLESS", "0") not in ("0", "", "false", "no"):
+        log("STVT_HEADLESS=1 — tuner-only mode; no local player "
+            "(the HDHomeRun server / media client handles playback)")
+        return
     prog = int(args[0]) if args and args[0].isdigit() else 3
     marginal = "marginal" in args
     muxmode = "mux" in args
@@ -439,11 +458,17 @@ def main():
            "--vd-lavc-o=err_detect=+crccheck+bitstream+buffer+explode,"
            "error_concealment=deblock+favor_inter",
            "--sub-create-cc-track=yes",
-           # captions OFF by default (user pref 2026-07-11) — the CC track
-           # still exists, press j in the player to toggle it on/off.
-           "--sid=no",
            f"--title=TV Tuna — program {prog}" + (" (solo)" if not muxmode else ""),
            ]
+    # captions OFF by default: showing the CC track at startup renders it
+    # glitched until toggled (mpv's cc_dec needs the stream established first).
+    # The track is still created + selectable — press 'v' (or set STVT_CC=on) to
+    # show it; it renders clean once the stream is up.
+    _cc_on = os.environ.get("STVT_CC", "off").lower() not in ("off", "0", "no", "false")
+    cmd.append("--sid=1" if _cc_on else "--sid=no")
+    # STVT_MPV_EXTRA: space-separated extra mpv flags — the experiment
+    # hook (A/B player knobs without code edits). Empty by default.
+    cmd += [f for f in os.environ.get("STVT_MPV_EXTRA", "").split() if f]
     if not IS_WIN:
         # WSLg/Wayland: the gpu VO black-screens under WSLg — wlshm is the
         # June-proven reliable path (override with STVT_MPV_VO).
@@ -599,11 +624,13 @@ def main():
         log(f"mux tracks by PMT: vid={vid} aid={aud} sid={sub} "
             f"(wanted v={want_v} a={a_want} s={want_s})")
     else:
-        # CC: loaded but HIDDEN — off by default, and one click of the OSC
-        # sub button (or 'v') shows it instantly. Force-selecting it
-        # visible at startup made the toggle need a full off/on cycle.
+        # CC track SELECTED (sid=1) so one 'v' press shows it instantly, but
+        # HIDDEN by default (STVT_CC=off) — showing it at startup renders
+        # glitched until toggled. Set STVT_CC=on to show it immediately.
         ipc(["set_property", "sid", 1])
-        ipc(["set_property", "sub-visibility", "no"])
+        _cc_vis = os.environ.get("STVT_CC", "off").lower() not in (
+            "off", "0", "no", "false")
+        ipc(["set_property", "sub-visibility", "yes" if _cc_vis else "no"])
         # AUDIO RULE (2026-07-05): English is the default; other languages
         # are optional translations behind the # key. Trust language TAGS
         # first (mpv --alang already does when they exist); only when the
@@ -639,6 +666,30 @@ def main():
             ex.kill()
             ex = Extractor(prog, mode=mode, pids=pids); ex.start()
             time.sleep(3)
+        # SOLO ROTATION (2026-07-13): live_solo.ts grows ~0.6 MB/s and never
+        # truncated — 3.5 GB after 6 h uptime, which would eventually fill
+        # the disk. Recycle it past a cap. The seek-live-edge fix means
+        # playback rides the tail regardless of size, so the cap is LARGE
+        # and this fires rarely (~hourly) — a ~2 s reload blip, not the
+        # every-few-minutes churn a small cap would need.
+        try:
+            cap = int(os.environ.get("STVT_SOLO_CAP_MB", "1536")) * 1024 * 1024
+            if ex is not None and SOLO.exists() and SOLO.stat().st_size > cap:
+                log(f"live_solo rotate ({SOLO.stat().st_size//1048576} MB > cap)")
+                mode, pids = ex.mode, ex.pids
+                ex.kill()
+                ex = Extractor(prog, mode=mode, pids=pids); ex.start()
+                for _ in range(24):          # wait for the fresh file to fill
+                    time.sleep(0.5)
+                    if SOLO.exists() and SOLO.stat().st_size > 3_000_000:
+                        break
+                ipc(["loadfile", str(SOLO), "replace"])
+                time.sleep(2)
+                seek_live_solo()
+                last_pos = None
+                continue
+        except OSError:
+            pass
         pos = ipc(["get_property", "time-pos"], req=5)
         eof = ipc(["get_property", "eof-reached"], req=5)
         paused = ipc(["get_property", "pause"], req=5)

@@ -154,6 +154,7 @@ class TEIScrub(gr.sync_block):
             self._scrubbed += int(np.sum(bad))
         return len(out)
 
+
 from config import (DATA_DIR, ATSC_ANTENNA, ATSC_IF_GAIN_REDUCTION,
                      ATSC_RFGAIN_SEL, ATSC_LIVE_TCP_PORT,
                      ATSC_DEFAULT_RF_CHANNEL)
@@ -440,6 +441,15 @@ class LiveTVTopBlock(gr.top_block):
         elif _eq_name == "stock":         equalizer = dtv.atsc_equalizer()
         else: raise ValueError(f"Unknown STVT_EQ={_eq_name}")
         LOG.info(f"equalizer: {_eq_name} (STVT_EQ)")
+        # Measurement-only decision-directed MER probe (STVT_MER_PROBE=1). A
+        # passive fan-out sink on the equalized symbols — universal across EQ
+        # modes, does not touch decoding. See MERProbe.
+        mer_probe = None
+        if os.environ.get("STVT_MER_PROBE", "0") not in ("0", "", "false"):
+            _mp_period = int(os.environ.get("STVT_MER_PROBE_PERIOD", "5000000"))
+            mer_probe = atscplus.atsc_mer_probe(
+                os.environ.get("STVT_MER_TAG", _eq_name), _mp_period)
+            LOG.info("mer_probe: ON (C++ decision-directed MER on equalized syms)")
 
         # Viterbi: hard (gr-dtv default) or soft (atscplus fork, ~1-2 dB BER gain)
         _vit_name = os.environ.get("STVT_VITERBI", "hard")
@@ -617,6 +627,11 @@ class LiveTVTopBlock(gr.top_block):
             self.connect((rs, 0), (derand, 0))
             self.connect((deinterleaver, 1), (derand, 1))
         self.connect(derand, depad)
+        # Fan the equalized soft symbols out to the C++ MER probe (an extra
+        # sink consumer on port 0 — leaves the viterbi/rs wiring untouched and,
+        # being C++, never back-pressures the decode).
+        if mer_probe is not None:
+            self.connect((equalizer, 0), mer_probe)
         # TEI-scrub: pack depad's byte stream into 188-byte TS packets,
         # rewrite RS-uncorrectable packets to NULL packets (preserves CC),
         # then back to a byte stream into the file sink.
