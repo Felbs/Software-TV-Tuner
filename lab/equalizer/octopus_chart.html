@@ -92,14 +92,14 @@
     mathematically cannot. Below: measured, closed-form MMSE bounds on a complex multipath channel.</p>
 
   <div class="hero">
-    <div class="stat mag"><div class="v up mg">+6.5<span style="font-size:16px"> dB</span></div>
-      <div class="k">WL gain, max-improper @ 20 dB SNR</div><div class="s">14.98 → 21.49 dB MER</div></div>
-    <div class="stat mag"><div class="v up mg">+7.6<span style="font-size:16px"> dB</span></div>
-      <div class="k">gain with a co-channel interferer</div><div class="s">single-antenna null (SAIC)</div></div>
-    <div class="stat"><div class="v up">20×</div>
-      <div class="k">fewer symbol errors @ 20 dB</div><div class="s">SER 0.197 → 0.009</div></div>
-    <div class="stat"><div class="v">0.50</div>
-      <div class="k">conjugate-branch energy fraction</div><div class="s">the WL "second look"</div></div>
+    <div class="stat mag"><div class="v up mg">3×</div>
+      <div class="k">watchable video — real RF9 marginal capture</div><div class="s">113 → 350 frames vs v1</div></div>
+    <div class="stat mag"><div class="v up mg">+26%</div>
+      <div class="k">video at the cliff knee (RF34 + noise)</div><div class="s">304 → 382 · deep cliff ≈2×</div></div>
+    <div class="stat"><div class="v up">1.0×</div>
+      <div class="k">never worse — ties v1 on strong signals</div><div class="s">403=403 clean · 396=396 RF35</div></div>
+    <div class="stat"><div class="v">0.10</div>
+      <div class="k">conj-branch fraction, LIVE off the SDR</div><div class="s">0.06→0.13 adapting · 0.50 = synthetic bound</div></div>
   </div>
 
   <h2>The octopus — signal flow &amp; telemetry taps</h2>
@@ -120,15 +120,21 @@ flowchart LR
   SPLIT -.->|E[r²]/E&#124;r&#124;²| T3{{"impropriety"}}
   SUM -.->|EVM| T4{{"pre / post MER"}}
   SOFT -.->|slicer| T5{{"symbol-error<br/>rate"}}
+  RF -.->|"OsO count"| T6{{"REAL-TIME GATE<br/>OsO == 0"}}
+  VIT -.->|"ffmpeg null-sink"| T7{{"DELIVERED<br/>FRAMES"}}
 
   classDef core fill:#111a2c,stroke:#22314f,color:#e6eefb;
   classDef wl fill:#1a1130,stroke:#6b3f9e,color:#c77dff;
   classDef tel fill:#0c1626,stroke:#1c6c78,color:#3fd8e8,stroke-dasharray:3 3;
+  classDef gate fill:#251016,stroke:#8a2635,color:#ff8b8b,stroke-dasharray:3 3;
   class RF,MF,SOFT,VIT,SUM core; class W1 core; class W2 wl;
-  class T1,T2,T3,T4,T5 tel;
+  class T1,T2,T3,T4,T5,T7 tel; class T6 gate;
     </pre>
-    <p class="caption">▸ solid = signal path · dashed = telemetry arms feeding the dashboard. The
-      <span style="color:var(--mag)">conjugate branch</span> is the novel organ.</p>
+    <p class="caption">▸ solid = signal path · dashed = telemetry arms. The
+      <span style="color:var(--mag)">conjugate branch</span> is the novel organ. Two arms added from live testing:
+      <span style="color:#ff8b8b">OsO == 0</span> is the hard promotion gate (replay can never validate real-time —
+      the SDR drops samples when the deadline slips), and <span style="color:var(--cyan)">delivered frames</span>
+      is the honest quality metric (PIDs and median MER both flattered the truth).</p>
   </div>
 
   <h2>Live gauges</h2>
@@ -144,6 +150,21 @@ flowchart LR
       </table>
       <p class="caption">48-tap equalizers · closed-form Wiener · real 8-PAM truth.
         Gain grows with impropriety &amp; explodes against noncircular interference.</p>
+
+      <h2 style="margin-top:22px">Stress test — delivered video frames (the honest metric)</h2>
+      <table>
+        <thead><tr><th>signal</th><th>v1 (long)</th><th>WL</th><th>result</th></tr></thead>
+        <tbody>
+          <tr><td>RF34 clean</td><td class="sl">403</td><td class="wl">403</td><td>tie</td></tr>
+          <tr><td>RF34 cliff knee</td><td class="sl">304</td><td class="wl">382</td><td class="gain">+26%</td></tr>
+          <tr><td>RF34 deep cliff</td><td class="sl">40</td><td class="wl">72</td><td class="gain">≈2×</td></tr>
+          <tr><td>RF9 real marginal</td><td class="sl">113</td><td class="wl">350</td><td class="gain">≈3×</td></tr>
+          <tr><td>RF7 real marginal</td><td class="sl">251</td><td class="wl">258</td><td class="gain">+3%</td></tr>
+          <tr><td>RF35 real</td><td class="sl">396</td><td class="wl">396</td><td>tie</td></tr>
+        </tbody>
+      </table>
+      <p class="caption">real C++ chain, offline replay (no real-time confound) · full arsenal both sides ·
+        never worse, 26%–3× more video at the margins.</p>
     </div>
     <div>
       <h2 style="margin-top:0">Why it works</h2>
@@ -169,9 +190,12 @@ flowchart LR
 
   <div class="rule"></div>
   <div class="note" style="border-left-color:var(--cyan)">
-    <b>Status.</b> Widely-linear core <b>validated offline</b> (+3.5 to +7.6 dB, closed-form).
-    <b>Next:</b> add the complex chain tap → validate on the real RF7/RF9 captures · fold in proper
-    sparse (OMP/SBL) support · set-membership tracking · then implement in the C++ decoder.
+    <b>Status.</b> WL is <b>built into the live C++ decoder</b> (branch <code>stvt-2.0-wl</code>, opt-in
+    <code>STVT_EQ=wl</code>) and <b>confirmed superior</b>: never worse than v1, <b>26%–3× more watchable
+    video at the margins</b> (stress test above). The conjugate branch engages on real OTA signals
+    (conj_frac 0.06→0.13 adapting). <b>One barrier remains:</b> the parallel companion path costs ~16 OsO
+    overflows/40 s live — structural (5 optimization passes all flat) — so v1 stays the live default.
+    <b>The finish line:</b> a fused front-end block (fpll+sync+fs_check+WL in one) to zero the OsO gate.
     <span style="color:var(--faint)">A first-for-ATSC result — and a separable module the SDR community can reuse.</span>
   </div>
 
@@ -199,10 +223,10 @@ function arc(pct,color){
 }
 const g20=D.snr20.WL;
 const gauges=[
-  {lab:"POST-EQ MER",num:g20.mer.toFixed(1)+" dB",pct:Math.min(g20.mer/24,1),col:"#5fe08a"},
-  {lab:"CONJ FRACTION",num:g20.conj.toFixed(2),pct:g20.conj,col:"#c77dff"},
-  {lab:"IMPROPRIETY",num:g20.improp.toFixed(2),pct:g20.improp,col:"#3fd8e8"},
-  {lab:"WL vs SL",num:"+"+D.snr20.gain.toFixed(1)+" dB",pct:Math.min(D.snr20.gain/8,1),col:"#f0b429"},
+  {lab:"RF9 FRAMES vs v1",num:"3.1×",pct:1,col:"#5fe08a"},
+  {lab:"CONJ FRAC · LIVE",num:"0.10",pct:0.10/0.5,col:"#c77dff"},
+  {lab:"REAL-TIME GATE OsO",num:"16",pct:1,col:"#ff6b6b"},
+  {lab:"SYNTH BOUND",num:"+"+D.snr20.gain.toFixed(1)+" dB",pct:Math.min(D.snr20.gain/8,1),col:"#f0b429"},
 ];
 document.getElementById("gauges").innerHTML=gauges.map(x=>
   `<div class="gauge">${arc(x.pct,x.col)}<div class="num" style="color:${x.col}">${x.num}</div>
