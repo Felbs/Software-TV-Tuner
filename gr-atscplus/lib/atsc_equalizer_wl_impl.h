@@ -18,7 +18,11 @@ namespace atscplus {
 class atsc_equalizer_wl_impl : public atsc_equalizer_wl
 {
 private:
-    static constexpr int NTAPS = 256;
+    // 128 taps (was 256): the widely-linear filter runs TWO complex dot products
+    // per symbol (main + conjugate), so it is ~2x a normal equalizer. 128 keeps it
+    // within the real-time budget at 10.76 Msym/s (12 us echo reach — plenty for
+    // the fading-limited channels WL targets). Bump back to 256 if CPU allows.
+    static constexpr int NTAPS = 128;
     static constexpr int NPRETAPS = (int)(NTAPS * 0.2);
     static constexpr int KNOWN_FIELD_SYNC_LENGTH = 4 + 511 + 3 * 63;
 
@@ -31,6 +35,9 @@ private:
 
     // sliding complex window: [NPRETAPS pre | segment | post]
     gr_complex data_mem[gr::dtv::ATSC_DATA_SEGMENT_LENGTH + NTAPS];
+    // conjugate of data_mem (recomputed per segment via volk); lets both the
+    // main (w1·x) and conjugate (w2·x*) branches use SIMD complex dot products.
+    gr_complex data_mem_conj[gr::dtv::ATSC_DATA_SEGMENT_LENGTH + NTAPS];
     float data_mem2[gr::dtv::ATSC_DATA_SEGMENT_LENGTH];
 
     unsigned short d_flags = 0;
@@ -38,8 +45,10 @@ private:
     bool d_buff_not_filled = true;
     float d_conj_frac = 0.0f;
 
-    void filterN(const gr_complex* in, float* out, int nsamples);
-    void adaptN(const gr_complex* in, const float* training, float* out, int nsamples);
+    void filterN(const gr_complex* in, const gr_complex* in_conj,
+                 float* out, int nsamples);
+    void adaptN(const gr_complex* in, const gr_complex* in_conj,
+                const float* training, float* out, int nsamples);
 
 public:
     atsc_equalizer_wl_impl();
