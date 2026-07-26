@@ -599,12 +599,12 @@ class LiveTVTopBlock(gr.top_block):
             if not int(os.environ.get("STVT_FPLL_FOLD", "0")):
                 raise ValueError("STVT_EQ=wl requires STVT_FPLL_FOLD=1 "
                                  "(complex companion must match the folded real path)")
-            self.connect((fpll, 1), (sync, 1))
+            self.connect((fpll, 1), (sync, 1))            # imag float companion
             self.connect((sync, 1), (fs_check, 1))
-            self.connect((fs_check, 2), (equalizer, 0))   # complex 8-VSB segments
+            self.connect((fs_check, 0), (equalizer, 0))   # REAL 8-VSB segments
             self.connect((fs_check, 1), (equalizer, 1))   # plinfo
-            self.connect((fs_check, 0), blocks.null_sink(gr.sizeof_float * 832))
-            _eq_edges = []            # fs_check->equalizer already wired (complex)
+            self.connect((fs_check, 2), (equalizer, 2))   # IMAG segments
+            _eq_edges = []            # fs_check->equalizer already wired (real+imag)
             LOG.info("WIDELY-LINEAR equalizer wired (complex companion path)")
         else:
             _eq_edges = [(fs_check, equalizer)]

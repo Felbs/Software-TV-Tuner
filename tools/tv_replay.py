@@ -261,16 +261,15 @@ class ReplayTopBlock(gr.top_block):
             self.connect(noise_src, (noise_add, 1))
 
         if _eq == "wl":
-            # WIDELY-LINEAR path (2026-07-26): route the carrier-corrected complex
-            # companion fpll(1)->sync(1)->fs_check(1); the equalizer consumes the
-            # COMPLEX segments (fs_check out2) + plinfo (out1). The real segment
-            # (out0) is unused by WL -> null sink (it still drives timing/framing).
-            self.connect((fpll, 1), (sync, 1))
+            # WIDELY-LINEAR path (v2 2026-07-26): route the IMAGINARY float companion
+            # fpll(1)->sync(1)->fs_check(1). The equalizer takes the REAL segments
+            # (fs_check out0), plinfo (out1) and IMAG segments (out2), interleaving
+            # real+imag internally. Half the data flow vs carrying full complex.
+            self.connect((fpll, 1), (sync, 1))            # imag float companion
             self.connect((sync, 1), (fs_check, 1))
-            self.connect((fs_check, 2), (equalizer, 0))   # complex 8-VSB segments
+            self.connect((fs_check, 0), (equalizer, 0))   # REAL 8-VSB segments
             self.connect((fs_check, 1), (equalizer, 1))   # plinfo
-            self.connect((fs_check, 0),
-                         blocks.null_sink(gr.sizeof_float * 832))
+            self.connect((fs_check, 2), (equalizer, 2))   # IMAG segments
             for a, b in [(equalizer, viterbi), (viterbi, deinterleaver),
                          (deinterleaver, rs), (rs, derand)]:
                 self.connect((a, 0), (b, 0))

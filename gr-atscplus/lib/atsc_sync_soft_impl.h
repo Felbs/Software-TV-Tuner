@@ -23,12 +23,12 @@ class atsc_sync_soft_impl : public atsc_sync_soft
 private:
     gr::filter::single_pole_iir<float, float, float> d_loop;
     gr::filter::mmse_fir_interpolator_ff d_interp;
-    // OPTIONAL complex companion (widely-linear equalizer, 2026-07-26): same
-    // MMSE taps + same (d_si, d_mu) timing as the real path, so Re == the real
-    // symbol exactly and Im carries the vestigial-sideband component. Only used
-    // when input 1 (fpll complex) + output 1 are connected.
-    gr::filter::mmse_fir_interpolator_cc d_interp_c;
-    gr_complex d_data_mem_c[gr::dtv::ATSC_DATA_SEGMENT_LENGTH];
+    // OPTIONAL imaginary companion (widely-linear equalizer, v2 2026-07-26): a
+    // 2nd float interpolator with the SAME (d_si, d_mu) timing as the real path.
+    // Carrying imag-only (float, not full complex) halves the WL data flow — the
+    // real symbol is already the primary output. Used only when in1/out1 connected.
+    gr::filter::mmse_fir_interpolator_ff d_interp_imag;
+    float d_data_mem_imag[gr::dtv::ATSC_DATA_SEGMENT_LENGTH];
 
     double d_rx_clock_to_symbol_freq;
     int d_si;
