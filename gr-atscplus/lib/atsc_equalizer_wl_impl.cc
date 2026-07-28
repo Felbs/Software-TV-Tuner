@@ -75,21 +75,38 @@ atsc_equalizer_wl_impl::atsc_equalizer_wl_impl()
     d_w1.assign(NTAPS, gr_complex(0.0f, 0.0f));
     d_w2.assign(NTAPS, gr_complex(0.0f, 0.0f));
     d_w1[NPRETAPS] = gr_complex(1.0f, 0.0f); // delta init — start as pass-through
-    std::memset(data_mem, 0, sizeof(data_mem));
+    d_a.assign(NTAPS, 0.0f);
+    d_b.assign(NTAPS, 0.0f);
+    fold_taps();
+    std::memset(d_win_r, 0, sizeof(d_win_r));
+    std::memset(d_win_i, 0, sizeof(d_win_i));
+    std::memset(d_cwin, 0, sizeof(d_cwin));
     std::memset(data_mem2, 0, sizeof(data_mem2));
 }
 
 atsc_equalizer_wl_impl::~atsc_equalizer_wl_impl() {}
 
+// Fold the complex widely-linear taps into the two REAL vectors of the fused
+// filter form (see header). Exact algebra, refreshed after every adaptation.
+void atsc_equalizer_wl_impl::fold_taps()
+{
+    for (int j = 0; j < NTAPS; j++) {
+        d_a[j] = d_w1[j].real() + d_w2[j].real();
+        d_b[j] = d_w2[j].imag() - d_w1[j].imag();
+    }
+}
+
 // y[k] = Re( sum_j w1[j] x[k+j] + w2[j] conj(x[k+j]) ), reference tap at NPRETAPS.
-// SIMD: two volk complex dot products per output symbol (main + conjugate branch).
-void atsc_equalizer_wl_impl::filterN(const gr_complex* in, float* out, int nsamples)
+// FUSED FORM (2026-07-27): two REAL volk dot products on the plane windows —
+// 4x fewer MACs than the two complex dots, no interleave step.
+void atsc_equalizer_wl_impl::filterN(const float* inr, const float* ini,
+                                     float* out, int nsamples)
 {
     for (int k = 0; k < nsamples; k++) {
-        gr_complex a1, a2;
-        volk_32fc_x2_dot_prod_32fc(&a1, in + k, d_w1.data(), NTAPS);           // w1·x
-        volk_32fc_x2_conjugate_dot_prod_32fc(&a2, d_w2.data(), in + k, NTAPS); // w2·conj(x)
-        out[k] = a1.real() + a2.real();
+        float s1, s2;
+        volk_32f_x2_dot_prod_32f(&s1, inr + k, d_a.data(), NTAPS);
+        volk_32f_x2_dot_prod_32f(&s2, ini + k, d_b.data(), NTAPS);
+        out[k] = s1 + s2;
     }
 }
 
@@ -167,11 +184,14 @@ int atsc_equalizer_wl_impl::general_work(int noutput_items,
     int i = 0;
 
     if (d_buff_not_filled) {
-        std::memset(&data_mem[0], 0, NPRETAPS * sizeof(gr_complex));
-        volk_32f_x2_interleave_32fc(&data_mem[NPRETAPS],
-                                    in_real + i * ATSC_DATA_SEGMENT_LENGTH,
-                                    in_imag + i * ATSC_DATA_SEGMENT_LENGTH,
-                                    ATSC_DATA_SEGMENT_LENGTH);
+        std::memset(&d_win_r[0], 0, NPRETAPS * sizeof(float));
+        std::memset(&d_win_i[0], 0, NPRETAPS * sizeof(float));
+        std::memcpy(&d_win_r[NPRETAPS],
+                    in_real + i * ATSC_DATA_SEGMENT_LENGTH,
+                    ATSC_DATA_SEGMENT_LENGTH * sizeof(float));
+        std::memcpy(&d_win_i[NPRETAPS],
+                    in_imag + i * ATSC_DATA_SEGMENT_LENGTH,
+                    ATSC_DATA_SEGMENT_LENGTH * sizeof(float));
         d_flags = in_pl[i].flags();
         d_segno = in_pl[i].segno();
         d_buff_not_filled = false;
@@ -180,18 +200,24 @@ int atsc_equalizer_wl_impl::general_work(int noutput_items,
 
     for (; i < noutput_items; i++) {
         // post-cursor taps come from the NEXT segment's leading samples
-        volk_32f_x2_interleave_32fc(&data_mem[ATSC_DATA_SEGMENT_LENGTH + NPRETAPS],
-                                    in_real + i * ATSC_DATA_SEGMENT_LENGTH,
-                                    in_imag + i * ATSC_DATA_SEGMENT_LENGTH,
-                                    NTAPS - NPRETAPS);
+        std::memcpy(&d_win_r[ATSC_DATA_SEGMENT_LENGTH + NPRETAPS],
+                    in_real + i * ATSC_DATA_SEGMENT_LENGTH,
+                    (NTAPS - NPRETAPS) * sizeof(float));
+        std::memcpy(&d_win_i[ATSC_DATA_SEGMENT_LENGTH + NPRETAPS],
+                    in_imag + i * ATSC_DATA_SEGMENT_LENGTH,
+                    (NTAPS - NPRETAPS) * sizeof(float));
 
         if (d_segno == -1) {
+            // materialize the complex window only here (1 segment in 313)
+            volk_32f_x2_interleave_32fc(d_cwin, d_win_r, d_win_i,
+                                        ATSC_DATA_SEGMENT_LENGTH + NTAPS);
             const float* trn =
                 (d_flags & 0x0010) ? training_sequence2 : training_sequence1;
-            adaptN(data_mem, trn, data_mem2, KNOWN_FIELD_SYNC_LENGTH);
+            adaptN(d_cwin, trn, data_mem2, KNOWN_FIELD_SYNC_LENGTH);
+            fold_taps();
             // field-sync segment trains only — produces no output
         } else {
-            filterN(data_mem, data_mem2, ATSC_DATA_SEGMENT_LENGTH);
+            filterN(d_win_r, d_win_i, data_mem2, ATSC_DATA_SEGMENT_LENGTH);
             std::memcpy(&out[output_produced * ATSC_DATA_SEGMENT_LENGTH],
                         data_mem2,
                         ATSC_DATA_SEGMENT_LENGTH * sizeof(float));
@@ -199,13 +225,18 @@ int atsc_equalizer_wl_impl::general_work(int noutput_items,
         }
 
         // slide the window: keep NPRETAPS tail as new pre-cursor, load segment i
-        std::memcpy(data_mem,
-                    &data_mem[ATSC_DATA_SEGMENT_LENGTH],
-                    NPRETAPS * sizeof(gr_complex));
-        volk_32f_x2_interleave_32fc(&data_mem[NPRETAPS],
-                                    in_real + i * ATSC_DATA_SEGMENT_LENGTH,
-                                    in_imag + i * ATSC_DATA_SEGMENT_LENGTH,
-                                    ATSC_DATA_SEGMENT_LENGTH);
+        std::memmove(d_win_r,
+                     &d_win_r[ATSC_DATA_SEGMENT_LENGTH],
+                     NPRETAPS * sizeof(float));
+        std::memmove(d_win_i,
+                     &d_win_i[ATSC_DATA_SEGMENT_LENGTH],
+                     NPRETAPS * sizeof(float));
+        std::memcpy(&d_win_r[NPRETAPS],
+                    in_real + i * ATSC_DATA_SEGMENT_LENGTH,
+                    ATSC_DATA_SEGMENT_LENGTH * sizeof(float));
+        std::memcpy(&d_win_i[NPRETAPS],
+                    in_imag + i * ATSC_DATA_SEGMENT_LENGTH,
+                    ATSC_DATA_SEGMENT_LENGTH * sizeof(float));
         d_flags = in_pl[i].flags();
         d_segno = in_pl[i].segno();
     }

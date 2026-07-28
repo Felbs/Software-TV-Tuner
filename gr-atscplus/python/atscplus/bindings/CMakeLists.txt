@@ -27,6 +27,7 @@ include(GrPybind)
 list(APPEND atscplus_python_files
     atsc_equalizer_long_python.cc
     atsc_equalizer_wl_python.cc
+    atsc_wl_frontend_python.cc
     atsc_equalizer_pilot_python.cc
     atsc_equalizer_pilot_dd_python.cc
     atsc_equalizer_pilot_dd_soft_python.cc
