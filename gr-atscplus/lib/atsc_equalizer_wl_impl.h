@@ -33,8 +33,23 @@ private:
     std::vector<gr_complex> d_w1;   // main branch  (x)
     std::vector<gr_complex> d_w2;   // conjugate branch (x*)
 
-    // sliding complex window: [NPRETAPS pre | segment | post]
-    gr_complex data_mem[gr::dtv::ATSC_DATA_SEGMENT_LENGTH + NTAPS];
+    // FUSED-FILTER FORM (2026-07-27): for a REAL output the widely-linear
+    // filter folds algebraically into TWO REAL dot products —
+    //   y[k] = sum_j xr[k+j]*(Re w1[j] + Re w2[j])
+    //        + sum_j xi[k+j]*(Im w2[j] - Im w1[j])
+    // (exactly Re(w1·x) + Re(w2·conj x), a 4x MAC cut vs two complex dots).
+    // d_a/d_b are refreshed from d_w1/d_w2 after every field-sync adaptation.
+    std::vector<float> d_a;         // Re(w1) + Re(w2)
+    std::vector<float> d_b;         // Im(w2) - Im(w1)
+
+    // sliding PLANE windows: [NPRETAPS pre | segment | post] — real and imag
+    // kept separate (the upstream front end already delivers planes; the
+    // folded filter wants contiguous floats; complex is only materialized for
+    // the field-sync adaptation, 1 segment in 313).
+    float d_win_r[gr::dtv::ATSC_DATA_SEGMENT_LENGTH + NTAPS];
+    float d_win_i[gr::dtv::ATSC_DATA_SEGMENT_LENGTH + NTAPS];
+    // complex scratch for adaptN (field-sync segments only)
+    gr_complex d_cwin[gr::dtv::ATSC_DATA_SEGMENT_LENGTH + NTAPS];
     float data_mem2[gr::dtv::ATSC_DATA_SEGMENT_LENGTH];
 
     unsigned short d_flags = 0;
@@ -42,9 +57,8 @@ private:
     bool d_buff_not_filled = true;
     float d_conj_frac = 0.0f;
 
-    // main branch = volk_32fc_x2_dot_prod (w1·x); conjugate branch =
-    // volk_32fc_x2_conjugate_dot_prod (w2·conj(x)) — no separate conj buffer.
-    void filterN(const gr_complex* in, float* out, int nsamples);
+    void fold_taps();
+    void filterN(const float* inr, const float* ini, float* out, int nsamples);
     void adaptN(const gr_complex* in, const float* training, float* out, int nsamples);
 
 public:
