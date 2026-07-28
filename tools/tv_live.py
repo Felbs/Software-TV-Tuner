@@ -539,10 +539,26 @@ class LiveTVTopBlock(gr.top_block):
             chain_blocks.append(notch)
         if smoother is not None:
             chain_blocks.append(smoother)
+        # STVT_WL_FUSED=1 (default when STVT_EQ=wl): fused atsc_wl_frontend
+        # replaces the three-block companion chain (sync dual-interp +
+        # fs_check passthrough) — ONE inlined dual-plane interpolation per
+        # symbol. The 2026-07-27 real-time fix: sync's second per-symbol
+        # mmse interpolate() call was the entire WL overflow deficit.
+        # STVT_WL_FUSED=0 keeps the legacy 3-block companion path for A/B.
+        _wl_fused = (_eq_name == "wl" and
+                     int(os.environ.get("STVT_WL_FUSED", "1")) != 0)
+        wl_front = None
+
         # STVT_FPLL_FOLD=1: atsc_fpll_tight runs the dc_blocker+agc arithmetic
         # in its own output loop (bit-identical replica), so the separate
         # blocks are omitted — two fewer threads + buffer crossings.
-        if int(os.environ.get("STVT_FPLL_FOLD", "0")):
+        if _wl_fused:
+            if not int(os.environ.get("STVT_FPLL_FOLD", "0")):
+                raise ValueError("STVT_EQ=wl requires STVT_FPLL_FOLD=1 "
+                                 "(complex companion must match the folded real path)")
+            wl_front = atscplus.atsc_wl_frontend(output_rate)
+            chain_blocks += [rxf, fpll]
+        elif int(os.environ.get("STVT_FPLL_FOLD", "0")):
             chain_blocks += [rxf, fpll, sync, fs_check]
         else:
             chain_blocks += [rxf, fpll, dcr, agc, sync, fs_check]
@@ -595,7 +611,17 @@ class LiveTVTopBlock(gr.top_block):
         # = out1). The real segment (out0) is unused by WL -> null sink; it still
         # drives timing/framing. Requires FPLL fold mode (else the complex bypasses
         # the separate dc_blocker+agc and its Re desyncs from the real path).
-        if _eq_name == "wl":
+        if _wl_fused:
+            # FUSED WL front end (2026-07-27): fpll real+imag -> fused
+            # sync+framing block -> WL equalizer. See atsc_wl_frontend.h.
+            self.connect((fpll, 0), (wl_front, 0))        # real (folded dcr+agc)
+            self.connect((fpll, 1), (wl_front, 1))        # imag float companion
+            self.connect((wl_front, 0), (equalizer, 0))   # REAL 8-VSB segments
+            self.connect((wl_front, 1), (equalizer, 1))   # plinfo
+            self.connect((wl_front, 2), (equalizer, 2))   # IMAG segments
+            _eq_edges = []            # wl_front->equalizer already wired
+            LOG.info("WIDELY-LINEAR equalizer wired (FUSED front end)")
+        elif _eq_name == "wl":
             if not int(os.environ.get("STVT_FPLL_FOLD", "0")):
                 raise ValueError("STVT_EQ=wl requires STVT_FPLL_FOLD=1 "
                                  "(complex companion must match the folded real path)")
@@ -605,7 +631,7 @@ class LiveTVTopBlock(gr.top_block):
             self.connect((fs_check, 1), (equalizer, 1))   # plinfo
             self.connect((fs_check, 2), (equalizer, 2))   # IMAG segments
             _eq_edges = []            # fs_check->equalizer already wired (real+imag)
-            LOG.info("WIDELY-LINEAR equalizer wired (complex companion path)")
+            LOG.info("WIDELY-LINEAR equalizer wired (legacy 3-block companion path)")
         else:
             _eq_edges = [(fs_check, equalizer)]
         if _rs_is_2port:
@@ -689,7 +715,8 @@ class LiveTVTopBlock(gr.top_block):
             self._eqout_sink = blocks.file_sink(gr.sizeof_float,
                                                 f"{_eq_dump}/eq_out.f32")
             self._eqout_sink.set_unbuffered(False)
-            self.connect((fs_check, 0), self._eqin_sink)
+            _eqin_src = wl_front if _wl_fused else fs_check
+            self.connect((_eqin_src, 0), self._eqin_sink)
             self.connect((equalizer, 0), self._eqout_sink)
             LOG.info(f"EQ RESEARCH DUMP -> {_eq_dump}/eq_in.f32, eq_out.f32")
 
