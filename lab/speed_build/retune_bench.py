@@ -38,7 +38,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 PY = r"C:\Users\user\radioconda\python.exe"
-WORK = REPO / "lab" / "speed_build" / "retune"
+# RB_DIR lets two arms keep separate cache dirs / logs side by side.
+WORK = REPO / "lab" / "speed_build" / os.environ.get("RB_DIR", "retune")
 LEDGER = REPO / "lab" / "speed_build" / "retune.jsonl"
 SEQ = b"\x00\x00\x01\xb3"
 

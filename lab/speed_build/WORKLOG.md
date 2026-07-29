@@ -249,3 +249,46 @@ every live_bench log. It is that harness's kill path, not a regression.
 6. **Recycling without a cold-start window.** The published algorithm run
    unbounded regressed the fading rf7 capture by 15 % of its video frames.
    Available as `STVT_EQ_RECYCLE_FIELDS=0` for research, never as a default.
+
+## 9. Post-fix smoke, with a genuinely clean cache (`RB_DIR=retune2/3`)
+
+`--arm cacheless` after the disable fix: **zero cache files, zero
+`SHERIFF cmd` / `cache rebound` / `persisted on stop` lines** — the disabled
+path is now truly inert (before the fix it was silently writing). OsO 0.
+
+`--arm warm`, empty cache, RF36 <-> RF34, 4 transitions:
+
+```
+[1] -> RF34  COLD START (no cache for this channel) - taps reset to delta   t_video 0.264 s
+[2] -> RF36  WARM START ... (|taps|=1.422)                                  t_video 0.647 s
+[3] -> RF34  WARM START ... (|taps|=1.385)                                  t_video 0.538 s
+[4] -> RF36  WARM START ... (|taps|=1.449)                                  t_video 0.427 s
+4 x SHERIFF cmd 'save', 2 cache files written, OsO 0
+```
+
+So the full state machine is exercised on air: first-ever visit -> delta (NOT
+the previous channel's multipath), later visits -> that channel's own taps,
+and the delta case does not delay video either (0.264 s).
+
+## 10. Reverts
+
+| to undo | do this |
+|---|---|
+| lever 1 | `STVT_PERSIST_RETUNE_CACHE=0` (retuned chains run cache-less again) |
+| lever 1's cadence | `STVT_EQ_CACHE_EVERY=1024` (the old 24.8 s interval) |
+| lever 2 | `STVT_SCAN_FAST=0` (single-stage full-dwell sweep) |
+| lever 2's pilot constant | `STVT_PILOT_OFFSET_HZ=-2690000` |
+| lever 3 | already off; it needs `STVT_EQ_RECYCLE=N` to do anything |
+| everything | `git checkout main-universal` + rebuild/install gr-atscplus |
+
+The installed gr-atscplus module is now the **speed-1** build, which does NOT
+contain `atsc_equalizer_wl` / `atsc_wl_frontend` (those live on
+`stvt-2.0-wl`). The panel and tv_live default to `STVT_EQ=long`, so normal
+viewing is unaffected, but `STVT_EQ=wl` and `tv_dual.py` need the WL module
+back. Two ways:
+* restore the pre-session binaries from the backup taken before any install:
+  `<scratchpad>/atscplus_wl_installed_backup/` (module dir + the DLL), or
+* cherry-pick `7427aea` onto `stvt-2.0-wl` and rebuild — the C++ diff is
+  three self-contained hunks in `atsc_equalizer_long_impl.{cc,h}` and applies
+  cleanly (that branch's only change to those files is the TELEM_EVERY knob,
+  which this branch now also carries, identically).
