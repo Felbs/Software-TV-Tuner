@@ -26,6 +26,8 @@
 #include <cstdlib>
 #include <cstring>
 
+#define ATSC_EQ_WL_BUILD "2026-07-29"
+
 namespace gr {
 namespace atscplus {
 using gr::dtv::plinfo;
@@ -104,6 +106,11 @@ atsc_equalizer_wl_impl::atsc_equalizer_wl_impl()
                      : (float)std::pow(1.0 - (double)d_kappa,
                                        1.0 / (double)KNOWN_FIELD_SYNC_LENGTH);
     }
+    // Build stamp — so a run can prove WHICH module it loaded (the standing
+    // _rebuild-does-not-install gotcha means a stale .pyd/.dll imports silently).
+    std::fprintf(stderr, "[eq-wl] build %s v3 (adaptive conjugate shrinkage, "
+                         "ntaps=%d, shrink=%s)\n",
+                 ATSC_EQ_WL_BUILD, NTAPS, d_shrink ? "ON" : "off");
     if (d_shrink)
         std::fprintf(stderr,
                      "[eq-wl] v3 SHRINK on: gain=%.3f B0=%.4f force=%d "
