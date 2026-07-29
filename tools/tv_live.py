@@ -704,9 +704,41 @@ class LiveTVTopBlock(gr.top_block):
     # exposes runtime setters (the same methods __init__ already calls:
     # set_frequency / set_antenna / set_gain / write_setting), so a live
     # chain can re-point the radio in ~0.1 s and let the DSP re-acquire
-    # (FPLL hunts the new pilot, fs_checker re-syncs, EQ cold-retrains —
-    # no runtime tap-reseed hook exists in atsc_equalizer_long's public
-    # API, cold converge is the accepted cost).
+    # (FPLL hunts the new pilot, fs_checker re-syncs, and — since
+    # 2026-07-29, speed-1 lever 1 — the equalizer REBINDS its warm-start
+    # tap cache instead of cold-retraining, see _eq_cache_rebind below).
+    def _eq_cmd(self, verb: str) -> bool:
+        """Drop a one-word command for the equalizer's E5 command port,
+        which polls it once per field sync (~21 Hz). Returns False if no
+        command file is configured (then the caller just skips the step)."""
+        path = os.environ.get("STVT_EQ_CMD_FILE")
+        if not path:
+            return False
+        try:
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="ascii") as f:
+                f.write(verb)
+            os.replace(tmp, path)
+            return True
+        except OSError as exc:
+            LOG.info(f"PERSIST-RETUNE: eq cmd '{verb}' failed ({exc!r})")
+            return False
+
+    def _eq_cache_path(self, rf: int, antenna: str | None) -> str | None:
+        """<STVT_EQ_TAP_CACHE>/taps_<ANTENNA>_rf<RF>.bin, or None when the
+        user has not configured a cache directory. Keyed by channel AND
+        antenna because the taps are a fingerprint of the whole RF path."""
+        cache_dir = os.environ.get("STVT_EQ_TAP_CACHE")
+        if not cache_dir:
+            return None
+        ant = re.sub(r"\W+", "",
+                     antenna or os.environ.get("STVT_ANTENNA", "A"))
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+        except OSError:
+            return None
+        return os.path.join(cache_dir, f"taps_{ant}_rf{rf}.bin")
+
     def retune(self, cmd: dict):
         rf = int(cmd["rf"])
         freq = rf_to_freq_hz(rf)
@@ -717,6 +749,13 @@ class LiveTVTopBlock(gr.top_block):
                  f"({freq/1e6:.3f} MHz) antenna={ant} "
                  f"rfgain_sel={cmd.get('rfgain_sel')} ifgr={cmd.get('ifgr')} "
                  f"dabnotch={cmd.get('dabnotch')}")
+        # ── STEP 0: persist the OUTGOING channel's taps BEFORE the radio
+        # moves, while d_taps_lkg still describes this channel's multipath.
+        # One field sync (~24.2 ms) is the command port's polling period.
+        new_cache = self._eq_cache_path(rf, ant)
+        if new_cache and self._eq_cmd("save"):
+            time.sleep(float(os.environ.get("STVT_RETUNE_EQ_SAVE_MS", "40"))
+                       / 1000.0)
         # antenna first (RSPdx port switch), then frequency — if either
         # hard-fails we raise so the panel's classic respawn takes over.
         if ant:
@@ -750,6 +789,24 @@ class LiveTVTopBlock(gr.top_block):
         self._ts_sink.open(str(self._ts_path))
         self._ts_sink.set_unbuffered(True)
         self._rf = rf
+        # ── STEP 1: rebind the cache to the INCOMING channel and warm-load.
+        # Deliberately AFTER the radio has been re-pointed: the RSPdx's AGC
+        # settles in 7.5-80 ms depending on level, and the documented
+        # live-debut explosion (2026-07-10) is stale taps adapting while the
+        # front end is still moving. STVT_RETUNE_EQ_HOLD_MS (default 100,
+        # covering the slow end of the AGC settle) is that hold; the
+        # equalizer's own d_fs_trained>=3 DD guard is re-armed by `warm`.
+        # If the new channel has NO cache, `warm` resets to the delta —
+        # exactly the state a fresh process on that channel would start in,
+        # never the old channel's multipath carried across.
+        if new_cache:
+            os.environ["STVT_EQ_TAP_CACHE_FILE"] = new_cache
+            hold_ms = float(os.environ.get("STVT_RETUNE_EQ_HOLD_MS", "100"))
+            if hold_ms > 0:
+                time.sleep(hold_ms / 1000.0)
+            if self._eq_cmd("warm"):
+                LOG.info(f"PERSIST-RETUNE: eq cache rebound -> {new_cache} "
+                         f"({'warm' if os.path.exists(new_cache) else 'cold'})")
         if hasattr(self, "_iq_ring"):
             try:
                 self._iq_ring.meta.update(
@@ -840,16 +897,19 @@ def main():
     # (which reads STVT_EQ_TAP_CACHE_FILE at construction). Keyed by both
     # because taps are a fingerprint of the full RF path.
     cache_dir = os.environ.get("STVT_EQ_TAP_CACHE")
-    if cache_dir and _persist:
-        # PERSIST-RETUNE trade-off: the equalizer binds the cache FILE at
-        # construction (static getenv in atsc_equalizer_long_impl.cc) and
-        # keeps WRITING its LKG taps there — after an in-place retune it
-        # would pollute the OLD channel's cache with NEW-channel taps.
-        # No runtime rebind exists, so a persistent chain runs cache-less
-        # (cold EQ converge ~3 s is already in the retune budget).
-        LOG.info("tap cache DISABLED (STVT_PERSIST_RETUNE=1: a retuned "
-                 "chain would write new-channel taps into the old "
-                 "channel's cache file)")
+    # 2026-07-29 (speed-1 lever 1) RUNTIME TAP-CACHE REBIND.
+    # This guard used to read: persist-retune DISABLES the cache, because
+    # the equalizer latched STVT_EQ_TAP_CACHE_FILE in a `static` and would
+    # go on writing NEW-channel taps into the OLD channel's file. That made
+    # the fast channel-change path deliberately give up the fast equalizer
+    # — the single biggest avoidable cost in a channel change.
+    # The equalizer now reads that env at call time and exposes `save` /
+    # `warm` verbs on its command port, so TVLive.retune() can persist the
+    # old channel's taps, rebind, and warm-load the new channel's. Set
+    # STVT_PERSIST_RETUNE_CACHE=0 to restore the old cache-less behaviour.
+    if cache_dir and _persist and \
+            os.environ.get("STVT_PERSIST_RETUNE_CACHE", "1") == "0":
+        LOG.info("tap cache DISABLED (STVT_PERSIST_RETUNE_CACHE=0)")
         cache_dir = None
     if cache_dir:
         try:
@@ -858,6 +918,29 @@ def main():
             os.environ["STVT_EQ_TAP_CACHE_FILE"] = os.path.join(
                 cache_dir, f"taps_{ant}_rf{args.rf}.bin")
             LOG.info(f"tap cache: {os.environ['STVT_EQ_TAP_CACHE_FILE']}")
+            # DEFECT D3 (dossier §3.4): the equalizer only ever fills its
+            # LKG snapshot when STVT_EQ_LKG is on, and the C++ default is
+            # OFF — so a direct tv_live run (stvt_run.sh, lab harnesses)
+            # asked for a tap cache and then never wrote one. tv_tuner's
+            # CHAIN_DEFAULTS already sets it to "1"; do the same here so
+            # "I configured a cache" implies "the cache can be filled".
+            # Only when the user asked for a cache, and never overriding
+            # an explicit setting.
+            if not os.environ.get("STVT_EQ_LKG"):
+                os.environ["STVT_EQ_LKG"] = "1"
+                LOG.info("STVT_EQ_LKG defaulted to 1 (a tap cache is "
+                         "configured; without LKG nothing would be saved)")
+            if _persist and not os.environ.get("STVT_EQ_CMD_FILE"):
+                # The retune rebind talks to the equalizer over its E5
+                # command port; give it a path if nobody else has. Only on
+                # the persist path, so the default chain is untouched (no
+                # command file = no per-field-sync stat()).
+                os.environ["STVT_EQ_CMD_FILE"] = str(
+                    out.parent / "eq_cmd.txt")
+                try:
+                    os.unlink(os.environ["STVT_EQ_CMD_FILE"])
+                except OSError:
+                    pass
         except OSError as e:
             LOG.info(f"tap cache disabled ({e})")
 
