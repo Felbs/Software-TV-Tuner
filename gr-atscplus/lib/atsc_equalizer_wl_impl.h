@@ -57,6 +57,62 @@ private:
     bool d_buff_not_filled = true;
     float d_conj_frac = 0.0f;
 
+    // ── v3 ADAPTIVE CONJUGATE SHRINKAGE (2026-07-29) ──────────────────────
+    // Physics: at high SNR the conjugate branch adds estimation variance
+    // (excess MSE) without adding signal — that is WL's ~1-2% deficit on
+    // strong channels. At the cliff the impropriety is real and WL wins big.
+    // So make the conjugate branch EARN its weight.
+    //
+    // WHERE the conjugate branch actually lives in this folded architecture:
+    // the NLMS updates are  Re w1 += s*xr, Re w2 += s*xr,
+    //                       Im w1 -= s*xi, Im w2 += s*xi
+    // so  (Re w1 - Re w2)  and  (Im w1 + Im w2)  are NEVER updated — they are
+    // frozen at their init values (delta, 0). Therefore, always and exactly:
+    //     a = Re w1 + Re w2                (coefficient on the REAL plane)
+    //     b = Im w2 - Im w1 = 2*Im w2      (coefficient on the IMAG plane)
+    // and the block is an NLMS over the doubled real regressor [xr; xi].
+    // CONSEQUENCE: shrinking w2 alone is the WRONG operation here — it only
+    // halves b (b_new = (1 - k/2) b_old, never reaching 0) while CORRUPTING a
+    // (a_new = a - k*Re w2), i.e. it damages the linear part that the block
+    // shares with atsc_equalizer_long. The correct shrinkage target is the
+    // IMAG-plane vector b — the entire extra degree of freedom WL has over the
+    // strictly-linear production equalizer. We shrink it by scaling Im w1 and
+    // Im w2 together (exact: b scales by the same factor, a is untouched, and
+    // the Im w1 = -Im w2 invariant is preserved).
+    //
+    // Shrinkage strength is measured, not assumed: once per field sync we
+    // recompute the field-sync error WITH and WITHOUT b,
+    //     B = max(0, (e_lin - e_wl) / e_lin)     ("imag benefit")
+    // and set   kappa = kappa_max * exp(-B / B0).
+    // B ~ 0 (strong channel, conjugate branch contributes nothing) -> kappa ->
+    // kappa_max -> b decays toward 0 -> WL degenerates to the strictly-linear
+    // real equalizer. B >> B0 (cliff, impropriety real) -> kappa -> 0 ->
+    // shrinkage releases and the full WL filter runs.
+    // With kappa == 1 the leak zeroes b after EVERY training symbol, so b is
+    // identically 0 at every output segment AND at every error evaluation:
+    // the block is then EXACTLY the strictly-linear real FFE y = dot(xr, a).
+    bool d_shrink = false;      // STVT_WL_SHRINK
+    bool d_shrink_force = false; // STVT_WL_SHRINK_FORCE (kappa := gain, no measurement)
+    float d_shrink_gain = 0.5f; // STVT_WL_SHRINK_GAIN  (kappa_max)
+    float d_shrink_b0 = 0.02f;  // STVT_WL_SHRINK_B0    (benefit scale)
+    int d_shrink_warmup = 16;   // STVT_WL_SHRINK_WARMUP (field syncs held off)
+    float d_kappa = 0.0f;       // current per-field shrinkage
+    float d_leak = 1.0f;        // per-symbol imag leak = (1-kappa)^(1/nsym)
+    float d_imag_benefit = 0.0f;    // OUT-of-sample (steers kappa)
+    float d_imag_benefit_in = 0.0f; // in-sample (diagnostic only — overfits)
+    // COUNTERFACTUAL shadow equalizer — a complete, never-shrunk widely-linear
+    // filter in the folded domain, adapted only on field syncs. Its benefit
+    // answers "what would the conjugate branch be worth if we left it alone?",
+    // which is a channel property, so shrinkage cannot suppress its own
+    // evidence. (A shadow of the imag plane ALONE was tried first and still
+    // locked out: once the live b is suppressed the live a absorbs the
+    // residual, and a shadow driven by the live error stops seeing anything.)
+    std::vector<float> d_as;        // shadow real-plane coefficients
+    std::vector<float> d_bs;        // shadow imag-plane coefficients
+    float d_imag_frac = 0.0f;   // |b|^2 / (|a|^2 + |b|^2) — the HONEST conj metric
+    float d_fs_err_rms = 0.0f;  // field-sync error rms => MER = 20 log10(5/err)
+    unsigned long long d_fs_count = 0;
+
     void fold_taps();
     void filterN(const float* inr, const float* ini, float* out, int nsamples);
     void adaptN(const gr_complex* in, const float* training, float* out, int nsamples);
@@ -68,6 +124,10 @@ public:
     std::vector<float> taps() const override;
     std::vector<float> data() const override;
     float conj_energy_fraction() const override;
+    float imag_energy_fraction() const { return d_imag_frac; }
+    float imag_benefit() const { return d_imag_benefit; }
+    float shrinkage() const { return d_kappa; }
+    float fs_err_rms() const { return d_fs_err_rms; }
 
     int general_work(int noutput_items,
                      gr_vector_int& ninput_items,

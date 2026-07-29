@@ -161,14 +161,14 @@ def _build_topblock(iq_path: Path, out_long: Path, out_wl: Path,
                 for port, fname in ((0, "eq_in.f32"), (2, "eq_imag.f32")):
                     v2s = blocks.vector_to_stream(gr.sizeof_float, 832)
                     snk = blocks.file_sink(gr.sizeof_float, f"{diag_dir}/{fname}")
-                    snk.set_unbuffered(True)
+                    snk.set_unbuffered(False)   # GB-scale dumps: buffered
                     self.connect((wl_front, port), v2s, snk)
                     self._diag += [v2s, snk]
                 for eq, fname in ((eq_wl, "eq_out_wl.f32"),
                                   (eq_long, "eq_out_long.f32")):
                     v2s = blocks.vector_to_stream(gr.sizeof_float, 832)
                     snk = blocks.file_sink(gr.sizeof_float, f"{diag_dir}/{fname}")
-                    snk.set_unbuffered(True)
+                    snk.set_unbuffered(False)   # GB-scale dumps: buffered
                     self.connect((eq, 0), v2s, snk)
                     self._diag += [v2s, snk]
                 LOG.info(f"diag taps -> {diag_dir}")

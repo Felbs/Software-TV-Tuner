@@ -19,6 +19,7 @@
 #include "atsc_types.h"
 #include <gnuradio/io_signature.h>
 #include <volk/volk.h>
+#include <chrono>
 #include <cmath>
 #include <complex>
 #include <cstdio>
@@ -77,7 +78,39 @@ atsc_equalizer_wl_impl::atsc_equalizer_wl_impl()
     d_w1[NPRETAPS] = gr_complex(1.0f, 0.0f); // delta init — start as pass-through
     d_a.assign(NTAPS, 0.0f);
     d_b.assign(NTAPS, 0.0f);
+    d_as.assign(NTAPS, 0.0f);
+    d_bs.assign(NTAPS, 0.0f);
+    d_as[NPRETAPS] = 1.0f;   // same delta init as the live filter's a
     fold_taps();
+
+    // ── v3 adaptive conjugate shrinkage knobs (opt-in; v2 behaviour default) ──
+    if (const char* p = std::getenv("STVT_WL_SHRINK"))
+        d_shrink = std::atoi(p) != 0;
+    if (const char* p = std::getenv("STVT_WL_SHRINK_GAIN"))
+        d_shrink_gain = (float)std::atof(p);
+    if (const char* p = std::getenv("STVT_WL_SHRINK_B0"))
+        d_shrink_b0 = (float)std::atof(p);
+    if (const char* p = std::getenv("STVT_WL_SHRINK_FORCE"))
+        d_shrink_force = std::atoi(p) != 0;
+    if (const char* p = std::getenv("STVT_WL_SHRINK_WARMUP"))
+        d_shrink_warmup = std::atoi(p);
+    if (d_shrink_gain < 0.0f) d_shrink_gain = 0.0f;
+    if (d_shrink_gain > 1.0f) d_shrink_gain = 1.0f;
+    if (d_shrink_b0 <= 0.0f) d_shrink_b0 = 1e-6f;
+    if (d_shrink && d_shrink_force) {
+        d_kappa = d_shrink_gain;
+        d_leak = (d_kappa >= 1.0f)
+                     ? 0.0f
+                     : (float)std::pow(1.0 - (double)d_kappa,
+                                       1.0 / (double)KNOWN_FIELD_SYNC_LENGTH);
+    }
+    if (d_shrink)
+        std::fprintf(stderr,
+                     "[eq-wl] v3 SHRINK on: gain=%.3f B0=%.4f force=%d "
+                     "warmup=%d\n",
+                     d_shrink_gain, d_shrink_b0, (int)d_shrink_force,
+                     d_shrink_warmup);
+
     std::memset(d_win_r, 0, sizeof(d_win_r));
     std::memset(d_win_i, 0, sizeof(d_win_i));
     std::memset(d_cwin, 0, sizeof(d_cwin));
@@ -117,7 +150,57 @@ void atsc_equalizer_wl_impl::adaptN(const gr_complex* in,
                                     float* out,
                                     int nsamples)
 {
+    static const bool TELEM_ON = []() {
+        const char* p = std::getenv("STVT_EQ_TELEM"); return p && std::atoi(p) != 0;
+    }();
+
+    // ── v3 OUT-OF-SAMPLE PROBE — does the imag plane EARN its weight? ──────
+    // Run BEFORE any update this field, so the coefficients being judged were
+    // fitted on the PREVIOUS field: a genuine generalization test.
+    // It is scored on the COUNTERFACTUAL shadow equalizer (as, bs) — a
+    // complete, never-shrunk WL filter running alongside the live one — so the
+    // answer is a property of the CHANNEL and the controller cannot suppress
+    // its own evidence:
+    //   e_lin   = sum (d - dot(xr, as))^2            shadow's linear part only
+    //   e_probe = sum (d - dot(xr, as) - dot(xi, bs))^2
+    //   B = max(0, (e_lin - e_probe)/e_lin)
+    // Scoring the LIVE taps instead is a lock-out: shrinkage drives b to 0, the
+    // live a absorbs the residual, B reads 0 forever and the branch can never
+    // come back. Measured cost of that bug at the cliff knee: WL 228 -> 0
+    // frames. A shadow of the imag plane alone (driven by the live error) was
+    // tried second and still locked out on rf9 (350 -> 290 frames).
+    if ((d_shrink && !d_shrink_force) || TELEM_ON) {
+        double e_lin = 0.0, e_probe = 0.0;
+        for (int k = 0; k < nsamples; k++) {
+            float s1, s2;
+            volk_32f_x2_dot_prod_32f(&s1, d_win_r + k, d_as.data(), NTAPS);
+            volk_32f_x2_dot_prod_32f(&s2, d_win_i + k, d_bs.data(), NTAPS);
+            double dl = (double)training[k] - s1;
+            double dp = dl - s2;
+            e_lin += dl * dl;
+            e_probe += dp * dp;
+        }
+        double ben = (e_lin > 0.0) ? (e_lin - e_probe) / e_lin : 0.0;
+        if (ben < 0.0) ben = 0.0;
+        d_imag_benefit = static_cast<float>(ben);
+        // WARM-UP HOLD: the imag plane needs several field syncs to converge
+        // from the zero init. Shrinking before then judges an untrained branch,
+        // suppresses it, and the suppression is self-confirming — the exact
+        // lock-out this hold exists to prevent. (Same discipline as the long
+        // equalizer's d_fs_trained>=3 hold before DD/warm-start.)
+        if (d_shrink && !d_shrink_force && d_fs_count >= (unsigned long long)d_shrink_warmup) {
+            d_kappa = d_shrink_gain * (float)std::exp(-ben / (double)d_shrink_b0);
+            if (d_kappa < 0.0f) d_kappa = 0.0f;
+            if (d_kappa > 1.0f) d_kappa = 1.0f;
+            d_leak = (d_kappa >= 1.0f)
+                         ? 0.0f
+                         : (float)std::pow(1.0 - (double)d_kappa,
+                                           1.0 / (double)nsamples);
+        }
+    }
+
     const float mu = 0.5f;
+    double err2 = 0.0;
     for (int k = 0; k < nsamples; k++) {
         const gr_complex* x = in + k;
         gr_complex a1, a2, ec;
@@ -128,27 +211,105 @@ void atsc_equalizer_wl_impl::adaptN(const gr_complex* in,
         out[k] = y;
         float energy = 2.0f * ec.real() + 1e-6f;         // augmented regressor energy
         float e = training[k] - y;
+        err2 += (double)e * (double)e;
         float step = mu * e / energy;
         // LMS update runs only on field-sync segments (~1/313) — scalar is fine
         for (int j = 0; j < NTAPS; j++) {
             d_w1[j] += step * std::conj(x[j]);   // += mu*e*conj(x)/E
             d_w2[j] += step * x[j];              // += mu*e*x/E
         }
+        // ── the COUNTERFACTUAL shadow equalizer (as, bs) ──────────────────
+        // A complete, NEVER-shrunk widely-linear equalizer running in the
+        // folded domain alongside the live one, adapted on the same training
+        // symbols with the same NLMS. Its benefit is a property of the CHANNEL,
+        // not of the live filter's shrinkage state, so the controller cannot
+        // lock itself out. It only runs on field-sync symbols (704 of every
+        // 313*832), so the cost is ~0.02% of the filter load.
+        if (d_shrink || TELEM_ON) {
+            float p1, p2;
+            volk_32f_x2_dot_prod_32f(&p1, d_win_r + k, d_as.data(), NTAPS);
+            volk_32f_x2_dot_prod_32f(&p2, d_win_i + k, d_bs.data(), NTAPS);
+            const float gs = 2.0f * (mu * (training[k] - p1 - p2) / energy);
+            for (int j = 0; j < NTAPS; j++) {
+                d_as[j] += gs * d_win_r[k + j];
+                d_bs[j] += gs * d_win_i[k + j];
+            }
+        }
+        // v3: leaky shrinkage of the IMAG-plane coefficient b = Im w2 - Im w1.
+        // Scaling BOTH imaginary parts by the same factor scales b exactly and
+        // leaves a = Re w1 + Re w2 untouched (and preserves Im w1 = -Im w2).
+        // Applied per training symbol so that with kappa == 1 (leak == 0) the
+        // imag plane is identically zero at every y evaluation => the block is
+        // EXACTLY the strictly-linear real FFE (the degenerate-to-linear proof).
+        if (d_shrink && d_leak != 1.0f) {
+            for (int j = 0; j < NTAPS; j++) {
+                d_w1[j] = gr_complex(d_w1[j].real(), d_w1[j].imag() * d_leak);
+                d_w2[j] = gr_complex(d_w2[j].real(), d_w2[j].imag() * d_leak);
+            }
+        }
     }
+    d_fs_err_rms = (nsamples > 0)
+                       ? static_cast<float>(std::sqrt(err2 / nsamples))
+                       : 0.0f;
+    d_fs_count++;
+
     double e1 = 0.0, e2 = 0.0;
     for (int j = 0; j < NTAPS; j++) {
         e1 += std::norm(d_w1[j]);
         e2 += std::norm(d_w2[j]);
     }
     d_conj_frac = static_cast<float>(e2 / (e1 + e2 + 1e-12));
-    static const bool TELEM = []() {
-        const char* p = std::getenv("STVT_EQ_TELEM"); return p && std::atoi(p) != 0;
+
+    // ── v3: measure what the imaginary (conjugate) plane is actually WORTH ──
+    // Post-adaptation, re-run the field sync through the folded filter twice:
+    // with b (the full WL filter) and with b suppressed (the strictly-linear
+    // reduction). The fractional MSE reduction is the shrinkage input.
+    fold_taps();
+    double ea = 0.0, eb = 0.0;
+    for (int j = 0; j < NTAPS; j++) {
+        ea += (double)d_a[j] * d_a[j];
+        eb += (double)d_b[j] * d_b[j];
+    }
+    d_imag_frac = static_cast<float>(eb / (ea + eb + 1e-12));
+
+    // IN-SAMPLE benefit — diagnostic ONLY, never steers anything. Re-scores the
+    // field sync the taps were just fitted to. It reads ~0.9 even on a clean
+    // strong channel, which is exactly the trap this v3 exists to avoid: 256
+    // real coefficients fitted to 704 training symbols will always "explain"
+    // the training field. The out-of-sample probe above is the honest number;
+    // the gap between the two IS the estimation variance the theory predicts.
+    if (TELEM_ON) {
+        double e_wl = 0.0, e_lin = 0.0;
+        for (int k = 0; k < nsamples; k++) {
+            float s1, s2;
+            volk_32f_x2_dot_prod_32f(&s1, d_win_r + k, d_a.data(), NTAPS);
+            volk_32f_x2_dot_prod_32f(&s2, d_win_i + k, d_b.data(), NTAPS);
+            double dl = (double)training[k] - s1;
+            double dw = dl - s2;
+            e_lin += dl * dl;
+            e_wl += dw * dw;
+        }
+        double bi = (e_lin > 0.0) ? (e_lin - e_wl) / e_lin : 0.0;
+        d_imag_benefit_in = static_cast<float>(bi < 0.0 ? 0.0 : bi);
+    }
+
+    static const int TELEM_EVERY = []() {
+        const char* t = std::getenv("STVT_EQ_TELEM");
+        if (!(t && std::atoi(t) != 0)) return 0;
+        const char* p = std::getenv("STVT_EQ_TELEM_EVERY");
+        int n = p ? std::atoi(p) : 8;
+        return n > 0 ? n : 8;
     }();
-    if (TELEM) {
-        static int fld = 0;
-        if ((++fld % 40) == 0)
-            std::fprintf(stderr, "[eq-wl] conj_frac=%.4f |w1|2=%.3f |w2|2=%.3f\n",
-                         d_conj_frac, e1, e2);
+    if (TELEM_EVERY && (d_fs_count % (unsigned long long)TELEM_EVERY) == 0) {
+        static auto telem_t0 = std::chrono::steady_clock::now();
+        double t = std::chrono::duration<double>(
+                       std::chrono::steady_clock::now() - telem_t0).count();
+        std::fprintf(stderr,
+                     "[eq-wl t=%6.2fs] fs=%llu fs_err_rms=%.4f conj=%.4f "
+                     "imag=%.4f ben=%.5f kap=%.4f beni=%.5f\n",
+                     t, (unsigned long long)d_fs_count, d_fs_err_rms,
+                     d_conj_frac, d_imag_frac, d_imag_benefit, d_kappa,
+                     d_imag_benefit_in);
     }
 }
 
