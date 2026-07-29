@@ -78,3 +78,7 @@ adaptive-tv/belief_map.json
 adaptive-tv/cube_map.json
 adaptive-tv/cube_state.json
 adaptive-tv/cube_log.jsonl
+
+# speed-1 offline bench artifacts (large TS + chain logs, regenerable)
+lab/speed_build/runs/
+lab/speed_build/bench.jsonl
