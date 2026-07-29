@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 
 namespace gr {
@@ -742,11 +743,20 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
     static const bool TELEM = []() {
         const char* p = std::getenv("STVT_EQ_TELEM"); return p && std::atoi(p) != 0;
     }();
+    // Cadence knob (2026-07-29): the dual-decode A/B harness needs EVERY field
+    // sync from both equalizers so the two MER series can be paired field-by-
+    // field. STVT_EQ_TELEM_EVERY=1 for that; default 8 = the historical rate.
+    // Telemetry only — output is unaffected.
+    static const int TELEM_EVERY = []() {
+        const char* p = std::getenv("STVT_EQ_TELEM_EVERY");
+        int n = p ? std::atoi(p) : 8;
+        return n > 0 ? n : 8;
+    }();
     if (TELEM && nsamples > 0) {
         static auto telem_t0 = std::chrono::steady_clock::now();
         static uint64_t telem_fs = 0;
         telem_fs++;
-        if ((telem_fs % 8) == 0) {
+        if ((telem_fs % TELEM_EVERY) == 0) {
             double tap_e = 0.0;
             for (int k = 0; k < NTAPS; k++) tap_e += (double)d_taps[k] * (double)d_taps[k];
             double t = std::chrono::duration<double>(

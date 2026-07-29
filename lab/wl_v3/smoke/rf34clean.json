@@ -1,0 +1,50 @@
+{
+  "tag": "rf34clean",
+  "when": "2026-07-29T11:53:59",
+  "env": {
+    "STVT_EQ_TELEM": "1",
+    "STVT_FPLL_FOLD": "1",
+    "STVT_LIVE_DIR": "Z:\\src\\magic-tv-decoder\\tools\\data\\tv_live",
+    "STVT_RS": "erasure",
+    "STVT_SOVA": "1",
+    "STVT_VITERBI": "soft",
+    "STVT_EQ_TELEM_EVERY": "1"
+  },
+  "long": {
+    "ts": "Z:\\src\\magic-tv-decoder\\lab\\wl_v3\\smoke\\rf34clean_long.ts",
+    "bytes": 36332880,
+    "frames": 403,
+    "md5": "f1f867c5567b33721684f4fbf7c423bb"
+  },
+  "wl": {
+    "ts": "Z:\\src\\magic-tv-decoder\\lab\\wl_v3\\smoke\\rf34clean_wl.ts",
+    "bytes": 36335136,
+    "frames": 403,
+    "md5": "af9769a6f60c2bebf6c6a50cf7cd8440"
+  },
+  "wl_frame_advantage": 0.0,
+  "telemetry": {
+    "mer_long": {
+      "n": 77,
+      "p5": 19.05,
+      "p10": 19.269,
+      "p50": 20.101,
+      "p90": 20.96,
+      "mean": 20.126,
+      "min": 18.323,
+      "max": 21.146
+    },
+    "mer_wl": null,
+    "conj_frac": {
+      "n": 15,
+      "p5": 0.064,
+      "p10": 0.064,
+      "p50": 0.118,
+      "p90": 0.134,
+      "mean": 0.109,
+      "min": 0.048,
+      "max": 0.138
+    }
+  },
+  "wall_s": 15.8
+}
