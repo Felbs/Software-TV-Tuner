@@ -729,7 +729,13 @@ class LiveTVTopBlock(gr.top_block):
         user has not configured a cache directory. Keyed by channel AND
         antenna because the taps are a fingerprint of the whole RF path."""
         cache_dir = os.environ.get("STVT_EQ_TAP_CACHE")
-        if not cache_dir:
+        # main() only publishes STVT_EQ_TAP_CACHE_FILE when the cache is
+        # actually enabled for this session, so its absence is the exact
+        # signal that we must not touch the cache here either — including
+        # under STVT_PERSIST_RETUNE_CACHE=0, where a retune that rebound the
+        # path would otherwise quietly re-enable the equalizer's periodic
+        # WRITE while the load stayed disabled.
+        if not cache_dir or not os.environ.get("STVT_EQ_TAP_CACHE_FILE"):
             return None
         ant = re.sub(r"\W+", "",
                      antenna or os.environ.get("STVT_ANTENNA", "A"))
