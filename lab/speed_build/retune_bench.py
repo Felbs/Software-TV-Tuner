@@ -72,25 +72,50 @@ def hygiene():
     time.sleep(12)
 
 
-def first_seq_header(ts: Path, deadline: float, t0: float):
-    """Poll the freshly truncated live.ts for the first MPEG sequence
-    header. Returns seconds from t0, or None."""
-    seen = b""
+def first_seq_header(ts: Path, deadline: float, t0: float, size0: int):
+    """Poll live.ts for the first MPEG sequence header in FRESH bytes.
+
+    retune() reopens the file_sink on the same path, which truncates to
+    offset 0 at the next work() call. Scanning before that would find the
+    PREVIOUS channel's headers and report a bogus sub-100 ms channel change,
+    so first wait for the size to collapse below where it was. Returns
+    (t_truncate, t_video) in seconds from t0."""
+    # Two cases, both handled: the sink DID reopen (size collapses, fresh
+    # bytes start at 0) or it did not (fresh bytes start at size0). Either
+    # way we only ever look at bytes written after the command landed.
+    t_trunc = None
+    base = size0
+    seen = 0
+    tail = b""
     while time.time() < deadline:
         try:
-            with open(ts, "rb") as f:
-                f.seek(len(seen))
-                chunk = f.read(1 << 20)
+            sz = ts.stat().st_size
         except OSError:
-            chunk = b""
-        if chunk:
-            hay = seen[-3:] + chunk
-            if SEQ in hay:
-                return time.time() - t0
-            seen += chunk
-        else:
-            time.sleep(0.02)
-    return None
+            time.sleep(0.01)
+            continue
+        if t_trunc is None and sz < size0:
+            t_trunc = time.time() - t0
+            base = 0
+            seen = 0
+            tail = b""
+        if sz <= base + seen:
+            time.sleep(0.01)
+            continue
+        try:
+            with open(ts, "rb") as f:
+                f.seek(base + seen)
+                chunk = f.read(1 << 21)
+        except OSError:
+            time.sleep(0.01)
+            continue
+        if not chunk:
+            time.sleep(0.01)
+            continue
+        if SEQ in (tail + chunk):
+            return t_trunc, time.time() - t0
+        seen += len(chunk)
+        tail = chunk[-3:]
+    return t_trunc, None
 
 
 def main():
@@ -160,6 +185,10 @@ def main():
                 seq = [rf for _ in range(a.laps) for rf in ladder[1:] + ladder[:1]]
                 for i, rf in enumerate(seq, start=1):
                     mark = log.stat().st_size
+                    try:
+                        size0 = ts.stat().st_size
+                    except OSError:
+                        size0 = 0
                     t0 = time.time()
                     tmp = cmd_f.with_suffix(".tmp")
                     tmp.write_text(json.dumps({"rf": rf}), encoding="utf-8")
@@ -175,7 +204,8 @@ def main():
                                 pass
                             break
                         time.sleep(0.01)
-                    t_vid = first_seq_header(ts, t0 + 40, t0)
+                    t_trunc, t_vid = first_seq_header(ts, t0 + 40, t0,
+                                                      size0)
                     # equalizer's own story for this transition
                     tail = log.read_text(errors="replace")[mark:]
                     warm = "WARM START" in tail
@@ -183,12 +213,14 @@ def main():
                     errs = [float(x) for x in RE_EQ.findall(tail)][:40]
                     rec = {"arm": a.arm, "label": a.label, "i": i, "rf": rf,
                            "t_ack": round(t_ack, 3) if t_ack else None,
+                           "t_trunc": round(t_trunc, 3) if t_trunc else None,
                            "t_video": round(t_vid, 3) if t_vid else None,
                            "warm_start": warm, "cold_start": cold,
                            "eq_err_first20": [round(e, 4) for e in errs[:20]]}
                     rows.append(rec)
                     print(f"  [{i}/{len(seq)}] -> RF{rf}: ack "
-                          f"{rec['t_ack']}s  VIDEO {rec['t_video']}s  "
+                          f"{rec['t_ack']}s  trunc {rec['t_trunc']}s  "
+                          f"VIDEO {rec['t_video']}s  "
                           f"{'WARM' if warm else ('COLD' if cold else '-')}"
                           f"  err[0:3]={rec['eq_err_first20'][:3]}",
                           flush=True)

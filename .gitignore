@@ -82,3 +82,8 @@ adaptive-tv/cube_log.jsonl
 # speed-1 offline bench artifacts (large TS + chain logs, regenerable)
 lab/speed_build/runs/
 lab/speed_build/bench.jsonl
+lab/speed_build/live/
+lab/speed_build/retune/
+lab/speed_build/cachetest/
+lab/speed_build/live.jsonl
+lab/speed_build/retune.jsonl
