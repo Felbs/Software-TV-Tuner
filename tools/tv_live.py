@@ -18,6 +18,7 @@ import os
 import re
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -203,9 +204,15 @@ class LiveTVTopBlock(gr.top_block):
         # SDR source — retry on "no available RSP devices" since SDRplay's
         # API service can take a few seconds to release after a prior process
         # exits, and the daemon's release window may not always overlap.
+        # Measured 2026-07-29: after a prior tv_live exits, the SDRplay API
+        # service can hold the device for well over 20 s (back-to-back A/B
+        # runs failed reproducibly on the SECOND decode with the old
+        # 0/3/6/10 ladder = 19 s of patience). Wait a full minute, then try
+        # a service restart once as the documented cure before giving up.
         src = None
         last_err = None
-        for attempt, settle in enumerate([0, 3, 6, 10], start=1):
+        settles = [0, 3, 6, 10, 15, 15, 15]
+        for attempt, settle in enumerate(settles, start=1):
             if settle:
                 LOG.info(f"SDR busy; retry {attempt} after {settle}s")
                 time.sleep(settle)
@@ -219,6 +226,19 @@ class LiveTVTopBlock(gr.top_block):
                 last_err = e
                 if "no available RSP" not in str(e):
                     raise
+        if src is None and "sdrplay" in (soapy_args or "").lower():
+            LOG.info("SDR still busy after ~64s; restarting SDRplay API "
+                     "service (the documented cure) and retrying once")
+            try:
+                subprocess.run(["powershell", "-NoProfile", "-Command",
+                                "Restart-Service -Name SDRplayAPIService "
+                                "-Force -Confirm:$false"],
+                               capture_output=True, timeout=60)
+                time.sleep(10)
+                src = soapy.source(soapy_args, "fc32", 1, "", stream_args,
+                                   [""], [""])
+            except Exception as e:
+                last_err = e
         if src is None:
             raise RuntimeError(f"SDR open gave up: {last_err}")
         # Gain knobs: STVT_IFGR, STVT_RFGAIN_SEL, STVT_ANTENNA env vars override config defaults.
