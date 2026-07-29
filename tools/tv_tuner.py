@@ -1057,12 +1057,22 @@ def run_power_sweep(freqs_hz: list[int], log_fh=None,
     is enough for fast detection of strong carriers. Deep-scan mode
     uses 1.5s, which sdr_sweep's _analyze() automatically converts
     into a Welch-averaged PSD for ~12 dB extra pilot SNR — pulls
-    weak/distant ATSC carriers out of the noise floor."""
+    weak/distant ATSC carriers out of the noise floor.
+
+    TWO-STAGE (2026-07-29, speed-1 lever 2): sdr_sweep now spends only
+    2.05 ms per frequency up front (one 16384-pt FFT — the measured
+    detection floor, lab/speed_dossier.md §2.2) and pays `dwell_sec` only
+    where stage A saw a possible pilot. This is HDHomeRun's
+    `if (!signal_present) return 1;`. Verdict parity with the single-stage
+    sweep is proven on all 35 fixtures (lab/speed_build/scan_gate_study.py).
+    STVT_SCAN_FAST=0 restores the single-stage sweep exactly."""
     payload = json.dumps([int(f) for f in freqs_hz]).encode("utf-8")
     fh = log_fh if log_fh is not None else sys.stderr
+    fast = os.environ.get("STVT_SCAN_FAST", "1") != "0"
     proc = subprocess.Popen(
         [PYTHON_EXE, "-u", str(SDR_SWEEP_PY),
-         "--dwell-sec", f"{dwell_sec:.3f}"],
+         "--dwell-sec", f"{dwell_sec:.3f}",
+         "--fast" if fast else "--no-fast"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=fh,
@@ -1177,8 +1187,11 @@ def run_scan(region: dict | None = None,
                 pass
             except Exception as e:
                 print(f"[scan] link pre-flight skipped ({e})")
+        _fast_scan = os.environ.get("STVT_SCAN_FAST", "1") != "0"
         print(f"[scan] phase 1 — power sniff across {n} frequencies "
-              f"(~{n * 0.5:.0f}s)...")
+              f"(~{n * (0.25 if _fast_scan else 0.5):.0f}s"
+              f"{', two-stage' if _fast_scan else ''})...")
+        _t_phase1 = time.time()
         try:
             sweep_in = [f for _atsc_rf, f, _label in all_freqs]
             sweep_out = run_power_sweep(sweep_in, log_fh=log_fh,
@@ -1193,6 +1206,9 @@ def run_scan(region: dict | None = None,
                   "[scan] verify with:  SoapySDRUtil --probe", file=sys.stderr)
             return {"scanned_at": datetime.now().isoformat(timespec="seconds"),
                     "channels": [], "error": str(e)}
+        _n_conf = sum(1 for s in sweep_out if s.get("stage") == "confirm")
+        print(f"[scan] phase 1 done in {time.time() - _t_phase1:.2f}s"
+              f"{f' ({_n_conf}/{n} needed the full dwell)' if _fast_scan else ''}")
         time.sleep(3)  # let SDR fully release before phase 2
 
         # Decision logic per channel:
