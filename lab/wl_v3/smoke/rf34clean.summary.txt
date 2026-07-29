@@ -1,0 +1,8 @@
+
+=== tv_dual A/B  [rf34clean] — sample-aligned, one input stream ===
+leg      frames     TS MB   MER p5     p10     p50
+long        403      36.3    19.05  19.269  20.101
+wl          403      36.3        -       -       -
+WL frame advantage: 0.0%
+conj_frac     mean 0.109  p10 0.064  p90 0.134
+
