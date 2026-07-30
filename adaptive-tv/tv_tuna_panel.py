@@ -969,6 +969,16 @@ def base_env(rf):
     if os.environ.get("STVT_PANEL_EQ") == "wl":
         env["STVT_EQ"] = "wl"
         env["STVT_FPLL_FOLD"] = "1"
+    # SPLIT-BRAIN GUARD (2026-07-30): the chain this panel spawns ALWAYS
+    # writes TOOLS/data/tv_live (tv_live.py --out default, repo-relative) —
+    # but tv_watch honors a global STVT_LIVE_DIR when one is set. A stale
+    # user-level var from the old split deployment pointed the watcher at
+    # ANOTHER clone's dead live.ts: chain healthy + growing here, player
+    # extracting nothing from last night's file there ("frozen picture,
+    # every discovery mode produced nothing"). The panel knows exactly
+    # where its own chain writes, so pin the watcher to the same dir —
+    # inherited overrides must never split the pair.
+    env["STVT_LIVE_DIR"] = str(TOOLS / "data" / "tv_live")
     return env
 
 def kill_watch():
