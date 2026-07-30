@@ -418,12 +418,22 @@ def main():
                     time.sleep(2)
             ex = Extractor(prog, mode=mode,
                            pids=cached_pids if mode == "cached" else None)
+            # Proof must measure GROWTH, not absolute size. Found in real use
+            # 2026-07-30: a 59.6 MB live_solo.ts left over from an earlier
+            # session passed `size > need` instantly, so a cached-PID
+            # extractor that wrote NOTHING was declared proven, mpv was pointed
+            # at a file whose tail never advanced, and the watch loop resynced
+            # every 10 s forever — a frozen picture with glitchy captions.
+            # Baseline AFTER start(): start() unlinks/recreates SOLO, so a
+            # pre-start baseline still counts the stale file and dooms the
+            # rung (needs base+need from a file that restarts at 0 bytes).
             ex.start()
+            base = SOLO.stat().st_size if SOLO.exists() else 0
             t0 = time.time()
             ok = False
             while time.time() - t0 < patience:
                 time.sleep(0.5)
-                if SOLO.exists() and SOLO.stat().st_size > need:
+                if SOLO.exists() and SOLO.stat().st_size > base + need:
                     ok = True
                     break
                 if not ex.alive() and time.time() - t0 > 2:
@@ -712,6 +722,54 @@ def main():
     seek_live_solo()
 
     last_pos, stall = None, 0
+    ex_deaths, resyncs = 0, 0
+
+    def rebuild_extractor(reason):
+        """Tear the extractor down and re-run FULL discovery, then reload mpv.
+
+        The in-loop respawn used to restart the extractor in the SAME mode with
+        the SAME pids, forever. With a stale PID cache that is an unbounded
+        respawn loop with no success condition (the exact shape the mpv-loop
+        law forbids): cached-mode ffmpeg extracts PIDs the mux no longer
+        carries, writes nothing, dies, respawns identically. Seen live
+        2026-07-30 on RF36 — 'extractor died (mode=cached)' every ~63 s while
+        the picture sat frozen. De-escalate instead: invalidate the cached
+        layout, pay the full-discovery cost once, and reload the player the
+        same way the hourly solo-rotation does.
+        """
+        nonlocal ex, last_pos, ex_deaths, resyncs
+        log(f"REBUILD extractor via full discovery ({reason})")
+        try:
+            cache.pop(key, None)
+            save_pid_cache(cache)
+        except Exception:
+            pass
+        if ex is not None:
+            ex.kill()
+        ex = Extractor(prog, mode="full", pids=None)
+        ex.start()
+        base = SOLO.stat().st_size if SOLO.exists() else 0
+        grew = False
+        for _ in range(90):                  # up to 45 s for real discovery
+            time.sleep(0.5)
+            if SOLO.exists() and SOLO.stat().st_size > base + 3_000_000:
+                grew = True
+                break
+        if grew and ex.pids and RF != "?":
+            # proven re-discovery -> remember the fresh layout, same as the
+            # ladder's full-mode success (otherwise the next tune goes cold)
+            ns = getattr(ex, "n_subs", 0)
+            cut = len(ex.pids) - ns
+            cache[key] = {"vpid": ex.pids[0],
+                          "apids": ex.pids[1:cut],
+                          "spids": ex.pids[cut:],
+                          "ts": time.strftime("%Y-%m-%dT%H:%M:%S")}
+            save_pid_cache(cache)
+        ipc(["loadfile", str(SOLO), "replace"])
+        time.sleep(2)
+        seek_live_solo()
+        last_pos = None
+        ex_deaths = resyncs = 0
     # CAPTION KEEPER (2026-07-21): captions ON by default now; keep the
     # eia_608 CC track selected + visible once the stream settles. The old
     # one-shot sid=1 broke whenever the CC track appeared late, sat at an id
@@ -728,11 +786,17 @@ def main():
     while mpv_h["p"].poll() is None:
         time.sleep(5)
         if ex is not None and not ex.alive():
-            log(f"extractor died — restarting it (mode={ex.mode})")
-            mode, pids = ex.mode, ex.pids
-            ex.kill()
-            ex = Extractor(prog, mode=mode, pids=pids); ex.start()
-            time.sleep(3)
+            ex_deaths += 1
+            if ex_deaths >= 2:
+                # twice in a row = this mode/layout is wrong, stop repeating it
+                rebuild_extractor(f"{ex_deaths} consecutive deaths in "
+                                  f"mode={ex.mode}")
+            else:
+                log(f"extractor died — restarting it (mode={ex.mode})")
+                mode, pids = ex.mode, ex.pids
+                ex.kill()
+                ex = Extractor(prog, mode=mode, pids=pids); ex.start()
+                time.sleep(3)
         # SOLO ROTATION (2026-07-13): live_solo.ts grows ~0.6 MB/s and never
         # truncated — 3.5 GB after 6 h uptime, which would eventually fill
         # the disk. Recycle it past a cap. The seek-live-edge fix means
@@ -765,10 +829,25 @@ def main():
         stalled = last_pos is not None and pos <= last_pos + 0.5
         last_pos = pos
         stall = stall + 1 if (eof or paused or stalled) else 0
+        if stall == 0:
+            ex_deaths = resyncs = 0          # playback advancing = healthy
         if stall >= 2:
-            log(f"RESYNC (stall={stall} eof={eof})")
-            seek_live_solo()
-            stall = 0
+            resyncs += 1
+            # A resync is a nudge for a hiccup. Four in a row is not a hiccup:
+            # the feed itself is dead (2026-07-30: an extractor writing nothing
+            # kept mpv pinned at the same position through 17 straight resyncs
+            # while the log said everything was being handled). Escalate — but
+            # ONLY when an extractor exists. In mux fallback ex is None and mpv
+            # is playing live.ts directly; firing the breaker there (seen live
+            # 19:16:42 same night) spawns an extractor nobody asked for and
+            # loadfile-yanks mpv off the mux onto a possibly-empty SOLO. A
+            # dead mux feed has no player-side rebuild — keep nudging.
+            if resyncs >= 4 and ex is not None:
+                rebuild_extractor(f"{resyncs} consecutive resyncs — feed dead")
+            else:
+                log(f"RESYNC (stall={stall} eof={eof})")
+                seek_live_solo()
+                stall = 0
         if _cc_want and time.time() - t_start > _cc_delay:
             tl = ipc(["get_property", "track-list"], req=6) or []
             cc = next((t for t in tl if t.get("type") == "sub"
