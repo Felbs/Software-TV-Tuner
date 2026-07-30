@@ -55,6 +55,7 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import signal
@@ -120,6 +121,72 @@ def _build_topblock(iq_path: Path, out_long: Path, out_wl: Path,
                          f"{os.environ.get('STVT_NOISE_SEED', '42')} (SHARED — both "
                          f"equalizers see the identical noisy stream)")
 
+            # ── IMPROPRIETY INJECTION (2026-07-30, STVT_ADD_CONJ) ───────────
+            # A widely-linear equalizer's whole advantage comes from second-order
+            # IMPROPRIETY — a nonzero pseudo-covariance E[y*y]. AWGN is circular
+            # (proper), so the noise sweep above adds no impropriety and can only
+            # DILUTE what the channel already has; measured on rf34_ctrl the WL
+            # MER advantage duly shrank +2.54 dB clean -> +1.18 dB at 24 dB SNR.
+            # AWGN is therefore the wrong stressor for testing WL and would
+            # understate it in a promotion decision.
+            #
+            # This knob injects
+            #     y = x + alpha * conj(x)
+            # Applied UPSTREAM of the equalizer split, so both legs see the
+            # identical impaired stream and the A/B stays fair. Default 0 =
+            # block never instantiated, zero effect.
+            #
+            # MEASURED RESULT — the prediction it was built to test FAILED, and
+            # the algebra says why. For x = a + jb,
+            #     x + alpha*conj(x) = a*(1+alpha) + j*b*(1-alpha)
+            # so this is not neutral "impropriety": it is a pure I/Q GAIN
+            # IMBALANCE that ATTENUATES the imaginary companion by (1-alpha).
+            # 8-VSB data is already essentially real (already maximally
+            # improper — there is no more to add), and WL's leverage is the
+            # imaginary companion carrying INDEPENDENT CHANNEL information.
+            # Shrinking Im(x) therefore starves WL: measured on rf34_ctrl the WL
+            # MER advantage fell +2.53 -> +1.47 -> +0.40 dB for alpha 0 -> .05 ->
+            # .10, and WL's own imag_benefit telemetry collapsed 0.932 -> 0.768
+            # -> 0.39. Keep the knob (it is a faithful I/Q-imbalance simulator,
+            # useful for testing robustness to a miscalibrated radio) but do NOT
+            # read it as an impropriety dial. The stressor that actually feeds WL
+            # is MULTIPATH — a complex-scaled delayed echo — see STVT_ADD_ECHO.
+            _conj_a = float(os.environ.get("STVT_ADD_CONJ", "0"))
+            conj_blk = conj_gain = conj_add = None
+            if _conj_a > 0:
+                conj_blk = blocks.conjugate_cc()
+                conj_gain = blocks.multiply_const_cc(_conj_a)
+                conj_add = blocks.add_cc()
+                LOG.info(f"IQ-IMBALANCE: y = x + {_conj_a}*conj(x) → "
+                         f"Re×{1+_conj_a:.2f} Im×{1-_conj_a:.2f} (SHARED — both "
+                         f"equalizers see the identical impaired stream)")
+
+            # ── MULTIPATH ECHO (2026-07-30, STVT_ADD_ECHO / _ECHO_DELAY /
+            #    _ECHO_PHASE) ─────────────────────────────────────────────────
+            # The stressor that actually creates WL's advantage. A delayed,
+            # COMPLEX-scaled echo
+            #     y[n] = x[n] + g * x[n-D],   g = |g| * exp(j*phi)
+            # is what a real reflection does, and it is what makes the received
+            # signal's IMAGINARY part carry information independent of the real
+            # part — the thing WL has a second filter for and `long` structurally
+            # cannot model. (Contrast STVT_ADD_CONJ above, which merely scales
+            # the imaginary part DOWN, and STVT_ADD_NOISE, which is proper and
+            # only dilutes.) Delay is in samples at the pre-resampler rate.
+            # Default 0 = never instantiated, zero effect.
+            _echo_g = float(os.environ.get("STVT_ADD_ECHO", "0"))
+            _echo_d = int(os.environ.get("STVT_ECHO_DELAY", "8"))
+            _echo_ph = float(os.environ.get("STVT_ECHO_PHASE", "0.7"))
+            echo_dly = echo_gain = echo_add = None
+            if _echo_g > 0 and _echo_d > 0:
+                echo_dly = blocks.delay(gr.sizeof_gr_complex, _echo_d)
+                echo_gain = blocks.multiply_const_cc(
+                    complex(_echo_g * math.cos(_echo_ph),
+                            _echo_g * math.sin(_echo_ph)))
+                echo_add = blocks.add_cc()
+                LOG.info(f"MULTIPATH: y[n] = x[n] + {_echo_g}*exp(j{_echo_ph})"
+                         f"*x[n-{_echo_d}] (SHARED — both equalizers see the "
+                         f"identical echoed stream)")
+
             resamp = gr_filter.rational_resampler_ccc(
                 interpolation=RESAMP_INTERP, decimation=RESAMP_DECIM)
             rxf = atsc_rx_filter(ATSC_RX_SAMPLE_RATE, SPS)
@@ -132,10 +199,23 @@ def _build_topblock(iq_path: Path, out_long: Path, out_wl: Path,
             chain = [src, scaler]
             if noise_add is not None:
                 chain.append(noise_add)
+            if conj_add is not None:
+                chain.append(conj_add)
+            if echo_add is not None:
+                chain.append(echo_add)
             chain += [resamp, rxf, fpll]
             self.connect(*chain)
             if noise_add is not None:
                 self.connect(noise_src, (noise_add, 1))
+            if conj_add is not None:
+                # Tap whatever feeds conj_add's port 0 and route it through
+                # conj -> gain into port 1, so port1 = alpha*conj(port0).
+                _upstream = chain[chain.index(conj_add) - 1]
+                self.connect(_upstream, conj_blk, conj_gain, (conj_add, 1))
+            if echo_add is not None:
+                # port1 = g * (whatever feeds port0), delayed by D samples
+                _upstream = chain[chain.index(echo_add) - 1]
+                self.connect(_upstream, echo_dly, echo_gain, (echo_add, 1))
 
             self.connect((fpll, 0), (wl_front, 0))   # real (folded dcr+agc)
             self.connect((fpll, 1), (wl_front, 1))   # imag companion
@@ -496,6 +576,19 @@ def main():
     ap.add_argument("--tag", default=None)
     ap.add_argument("--noise", type=float, default=None,
                     help="AWGN amplitude (shared by both legs) — cliff sweeps")
+    ap.add_argument("--conj", type=float, default=None, metavar="ALPHA",
+                    help="I/Q gain imbalance y = x + ALPHA*conj(x) → Re×(1+A), "
+                         "Im×(1-A). NOT an impropriety dial (measured: it "
+                         "STARVES WL by shrinking the imaginary companion)")
+    ap.add_argument("--echo", type=float, default=None, metavar="G",
+                    help="multipath echo y[n] = x[n] + G*exp(j*phase)*x[n-D] — "
+                         "the impairment that actually creates WL's advantage")
+    ap.add_argument("--echo-delay", type=int, default=None, metavar="D",
+                    help="echo delay in samples at the pre-resampler rate "
+                         "(default 8)")
+    ap.add_argument("--echo-phase", type=float, default=None, metavar="RAD",
+                    help="echo phase in radians (default 0.7); a COMPLEX echo is "
+                         "what makes the imaginary part informative")
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--repeat", action="store_true")
     ap.add_argument("--diag-dir", default=None)
@@ -520,6 +613,14 @@ def main():
 
     if args.noise is not None:
         os.environ["STVT_ADD_NOISE"] = str(args.noise)
+    if args.conj is not None:
+        os.environ["STVT_ADD_CONJ"] = str(args.conj)
+    if args.echo is not None:
+        os.environ["STVT_ADD_ECHO"] = str(args.echo)
+    if args.echo_delay is not None:
+        os.environ["STVT_ECHO_DELAY"] = str(args.echo_delay)
+    if args.echo_phase is not None:
+        os.environ["STVT_ECHO_PHASE"] = str(args.echo_phase)
     if args.seed is not None:
         os.environ["STVT_NOISE_SEED"] = str(args.seed)
     # The complex companion only matches the real path when the FPLL folds the
