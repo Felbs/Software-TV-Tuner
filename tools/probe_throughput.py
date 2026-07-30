@@ -24,7 +24,16 @@ try:
     from SoapySDR import SOAPY_SDR_RX, SOAPY_SDR_CF32, SOAPY_SDR_OVERFLOW
     import numpy as np
 except ImportError as e:
+    # The commonest first-run mistake by far: launched with a plain system
+    # python instead of the SDR environment. Say what to do, not just what
+    # is missing.
     print(f"[probe-tp] missing dep: {e}")
+    print("[probe-tp] this needs the SDR python environment (SoapySDR +")
+    print("[probe-tp] numpy). On this rig that is radioconda, e.g.:")
+    print(r"[probe-tp]   C:\Users\<you>\radioconda\python.exe "
+          "tools\\tv_tuner.py --scan")
+    print("[probe-tp] (a bare `python` from a normal shell will not have "
+          "the radio bindings)")
     sys.exit(2)
 
 

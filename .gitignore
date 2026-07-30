@@ -95,3 +95,9 @@ lab/wl_watchdog/*.f32
 lab/wl_watchdog/runs/*.ts
 lab/wl_watchdog/runs/*.log
 lab/gate_runs/
+
+# equalizer tap caches are LEARNED PER INSTALL (they describe the local
+# antenna+multipath) - never ship them
+*.bin
+tapcache/
+**/tapcache/
