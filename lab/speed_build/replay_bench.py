@@ -151,16 +151,48 @@ def main():
     ap.add_argument("--runs", type=int, default=1)
     ap.add_argument("--env", action="append", default=[])
     ap.add_argument("--cache-file", default=None)
+    # ── the valid gate (2026-07-29). See lab/gate_lib.py THE LAW: no decode
+    # path here is bit-reproducible across processes, so a single-run md5
+    # comparison is not a gate. --gate judges the runs collectively.
+    ap.add_argument("--gate", action="store_true",
+                    help="after the runs, apply the multi-run modal-hash / "
+                         "frame-median gate from lab/gate_lib.py and exit "
+                         "non-zero if it fails")
+    ap.add_argument("--expect-frames", type=int, default=None)
+    ap.add_argument("--expect-md5", action="append", default=[],
+                    help="a hash (or 8-char prefix) this path is known to "
+                         "produce; repeatable — the MODAL hash must be in the set")
+    ap.add_argument("--frame-tol", type=int, default=2)
     a = ap.parse_args()
     extra = dict(kv.split("=", 1) for kv in a.env)
     iq = Path(a.iq) if os.path.isabs(a.iq) else REPO / a.iq
+    recs = []
     for i in range(1, a.runs + 1):
         rec = one_run(iq, a.tag, i, extra, a.cache_file)
+        recs.append(rec)
         print(f"[{a.tag} run {i}] frames={rec['frames']} md5={rec['md5'][:12]} "
               f"fields={rec['fields']} converge_field={rec['converge_field']} "
               f"plateau={rec['plateau_err']} warm={rec['warm_start']} "
               f"wall={rec['wall_s']}s", flush=True)
 
+    if a.gate:
+        sys.path.insert(0, str(REPO / "lab"))
+        from gate_lib import RunRow, gate, render, SingleRunGateError
+        rows = [RunRow(tag=r["tag"], run=r["run"], md5=r["md5"].upper(),
+                       frames=r["frames"], wall_s=r["wall_s"]) for r in recs]
+        try:
+            res = gate(rows, name=f"replay_bench {a.tag}",
+                       expect_md5=(a.expect_md5 or None),
+                       expect_frames=a.expect_frames,
+                       frame_tol=a.frame_tol)
+        except SingleRunGateError as e:
+            print(f"\nGATE REFUSED: {e}")
+            return 2
+        print()
+        print(render(res))
+        return 0 if res.passed else 1
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)

@@ -2,9 +2,9 @@
 === tv_dual A/B  [rf34clean_v2] — sample-aligned, one input stream ===
 leg      frames     TS MB   MER p5     p10     p50
 long        403      36.3   18.536  18.963  19.967
-wl          403      36.3   20.612  21.152  22.501
+wl          403      36.3   20.612  21.154  22.501
 WL frame advantage: 0.0%
-paired fields n=620  WL MER advantage +2.454 dB  (WL better 612 / long better 7 / tie 1)
+paired fields n=620  WL MER advantage +2.455 dB  (WL better 612 / long better 7 / tie 1)
 conj_frac     mean 0.106  p10 0.057  p90 0.135
 imag_frac     mean 0.206  p10 0.129  p90 0.247
 imag_benefit  mean 0.932  p10 0.881  p90 0.971
