@@ -1315,8 +1315,19 @@ def tune(rf, prog, virtual, name, force_respawn=False):
         chain_fresh = (time.time() - CHAIN_LOG.stat().st_mtime) < 6
     except OSError:
         chain_fresh = False
+    # DELIVERY GATE (2026-07-30): a fresh chain LOG is not a working chain.
+    # A chain that opened the radio on the wrong antenna spams fpll telemetry
+    # forever (log mtime always fresh) while never reaching field sync —
+    # live.ts sits at 0 bytes. The hop guard trusted the log alone and hopped
+    # onto that dead chain (seen live 19:37: "same-tower hop" onto a 0-byte
+    # mux, player never appeared). Hop only when the mux file is being FED.
+    try:
+        chain_delivering = (chain_fresh
+                            and (time.time() - LIVE.stat().st_mtime) < 6)
+    except OSError:
+        chain_delivering = False
     if (not force_respawn and rf == STATE["rf"] and not STATE["tuning"]
-            and STATE["rf"] is not None and chain_fresh):
+            and STATE["rf"] is not None and chain_delivering):
         with LOCK:
             GEN[0] += 1
             my_gen = GEN[0]
@@ -1345,13 +1356,23 @@ def tune(rf, prog, virtual, name, force_respawn=False):
             subprocess.Popen(watch_args, env=env,
                              stdout=watch_log, stderr=subprocess.STDOUT)
             t0 = time.time()
+            hop_up = False
             while time.time() - t0 < 120:
                 if GEN[0] != my_gen:
                     return
                 if mpv_up():
+                    hop_up = True
                     break
                 time.sleep(1)
-            set_stage(100, "")
+            # HONESTY (2026-07-30): this used to declare stage 100 even when
+            # the 120 s wait TIMED OUT — the panel said "playing" with no
+            # player on screen. Same rule as the classic path: only a live
+            # mpv earns the green bar.
+            if hop_up:
+                set_stage(100, "")
+            else:
+                set_stage(0, "PLAYER never appeared on the program hop — "
+                             "click the station again for a full re-tune")
             STATE.update({"tuning": False})
         threading.Thread(target=hop, daemon=True).start()
         return
