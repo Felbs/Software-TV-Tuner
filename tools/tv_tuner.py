@@ -653,37 +653,77 @@ def _build_regions():
 REGIONS = _build_regions()
 
 
+def _print_region(i, r):
+    if r["decodable"] is True:
+        mark = "✓ can decode + watch"
+    elif r["decodable"] == "atsc_only":
+        mark = "✓ decodes ATSC; others detect-only"
+    else:
+        mark = "✗ detect-only (we're ATSC 1.0; this region uses a "\
+               "different standard)"
+    print(f"  {i}) {r['name']}")
+    print(f"      {r['standard']}")
+    print(f"      {mark}")
+    print()
+
+
 def prompt_region() -> dict:
     """Ask the user to pick a region before scanning. Returns the region
-    dict; the scan then tunes only that region's allocated frequencies."""
+    dict; the scan then tunes only that region's allocated frequencies.
+
+    The menu leads with the regions this decoder can actually WATCH (ATSC
+    1.0) and tucks the detect-only regions behind one extra keypress — a
+    scan menu shouldn't open with six standards you can't decode. The
+    other regions stay reachable (spectrum survey abroad is a real use
+    case, and DVB-T/ISDB decode is a future port), just not in the way.
+    """
+    watchable = [r for r in REGIONS if r["decodable"] is not False]
+    others = [r for r in REGIONS if r["decodable"] is False]
     print()
     print("─" * 60)
     print("  What region are you in?")
     print("─" * 60)
     print()
-    for i, r in enumerate(REGIONS, 1):
-        if r["decodable"] is True:
-            mark = "✓ can decode + watch"
-        elif r["decodable"] == "atsc_only":
-            mark = "✓ decodes ATSC; others detect-only"
-        else:
-            mark = "✗ detect-only (we're ATSC 1.0; this region uses a "\
-                   "different standard)"
-        print(f"  {i}) {r['name']}")
-        print(f"      {r['standard']}")
-        print(f"      {mark}")
-        print()
+    for i, r in enumerate(watchable, 1):
+        _print_region(i, r)
+    print(f"  {len(watchable) + 1}) Somewhere else "
+          f"({len(others)} non-ATSC regions — spectrum survey only)")
+    print()
     while True:
         try:
-            ans = input(f"Pick a region [1-{len(REGIONS)}]: ").strip()
+            ans = input(f"Pick a region [1-{len(watchable) + 1}]: ").strip()
         except EOFError:
             raise SystemExit("no input")
         try:
             n = int(ans)
-            if 1 <= n <= len(REGIONS):
-                return REGIONS[n - 1]
         except ValueError:
-            pass
+            print("  invalid")
+            continue
+        if 1 <= n <= len(watchable):
+            return watchable[n - 1]
+        if n == len(watchable) + 1:
+            print()
+            print("  These regions use a different broadcast standard, so we")
+            print("  can map their carriers but not decode video (yet).")
+            print()
+            for j, r in enumerate(others, 1):
+                _print_region(j, r)
+            while True:
+                try:
+                    a2 = input(f"Pick [1-{len(others)}], or 0 to go "
+                               f"back: ").strip()
+                except EOFError:
+                    raise SystemExit("no input")
+                try:
+                    m = int(a2)
+                except ValueError:
+                    print("  invalid")
+                    continue
+                if m == 0:
+                    return prompt_region()
+                if 1 <= m <= len(others):
+                    return others[m - 1]
+                print("  invalid")
         print("  invalid")
 
 
@@ -4121,8 +4161,52 @@ def _resolve_neighbor_row(rows: list[dict], current: dict | None,
     return detected[new]
 
 
+def _radio_env_ok() -> bool:
+    try:
+        import SoapySDR                          # noqa: F401
+        import numpy                             # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _radio_env_gate(what: str) -> None:
+    """Fail FAST, before any interactive prompt, when this interpreter has
+    no radio bindings — and hand back a command that actually works.
+
+    Learned the hard way 2026-07-29: launched with a bare `python`, the
+    region menu ran happily and only the SUBPROCESS discovered the missing
+    SoapySDR, so the user answered a whole questionnaire before failing.
+    A dependency gate belongs at the top of main(), not two layers down.
+    """
+    if _radio_env_ok():
+        return
+    here = Path(__file__).resolve().parent
+    script = here / "tv_tuner.py"
+    print(f"[tv_tuner] {what} needs the SDR python environment "
+          f"(SoapySDR + numpy).", file=sys.stderr)
+    print(f"[tv_tuner] this interpreter has neither: {sys.executable}",
+          file=sys.stderr)
+    for cand in (Path(os.path.expanduser(r"~\radioconda\python.exe")),
+                 Path(r"C:\radioconda\python.exe")):
+        if cand.exists():
+            print("", file=sys.stderr)
+            print("[tv_tuner] run this instead:", file=sys.stderr)
+            print(f'  "{cand}" "{script}" '
+                  f'{" ".join(sys.argv[1:])}', file=sys.stderr)
+            print("", file=sys.stderr)
+            raise SystemExit(2)
+    print("[tv_tuner] install radioconda (or any python with SoapySDR + "
+          "numpy) and run this script with it.", file=sys.stderr)
+    raise SystemExit(2)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+
+    # Radio-dependent verbs get gated before anything interactive.
+    if getattr(args, "scan", False):
+        _radio_env_gate("--scan")
 
     # Always make sure config exists / is loaded
     cfg = load_config()
