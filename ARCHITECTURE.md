@@ -61,7 +61,9 @@ flowchart TB
         AGC["agc_ff"]
         SYNC["atsc_sync_soft<br/>symbol timing recovery"]
         FSCHK["atsc_fs_checker_inst<br/>field-sync (PN511/PN63) detect + validate"]
-        EQ["atsc_equalizer_long<br/>LMS equalizer<br/><b>emits fs_err_rms telemetry = MER</b>"]
+        EQ["atsc_equalizer_long<br/>256-tap LMS + DFE · <b>fs_err_rms telemetry = MER</b><br/><i>warm start from per-install tap cache</i><br/><i>cold-start data recycling STVT_EQ_RECYCLE</i>"]
+        WLF["atsc_wl_frontend<br/><i>STVT_EQ=wl only — fuses timing+framing and carries<br/>the imaginary companion; acquisition watchdog</i>"]
+        EQWL["atsc_equalizer_wl<br/><i>widely-linear: filters x AND x* (folded to two real dots)<br/>v3 adaptive imag-plane shrinkage · conj_frac telemetry</i>"]
         VIT["atsc_viterbi_soft / dtv.atsc_viterbi_decoder<br/>12-way trellis decode<br/><i>port2 = SOVA reliability (STVT_SOVA)</i>"]
         DEINT["atsc_deinterleaver<br/>convolutional de-interleave"]
         RS["atsc_rs_decoder_erasure / stock<br/>Reed-Solomon (207,187) FEC<br/><i>TURBO 2b trellis-pin retry STVT_TURBO</i>"]
@@ -73,6 +75,10 @@ flowchart TB
         SRC --> SCALE --> NB --> RESAMP --> NOTCH --> SMOOTH --> RXF
         RXF --> FPLL --> DCR --> AGC --> SYNC --> FSCHK --> EQ
         EQ --> VIT --> DEINT --> RS --> DERAND --> DEPAD --> TEI --> FSINK
+        %% opt-in widely-linear path: same backend, different equalizer
+        FPLL -. "STVT_EQ=wl<br/>(complex out)" .-> WLF
+        WLF -. "real seg + imag companion" .-> EQWL
+        EQWL -. "real symbols" .-> VIT
     end
 
     %% ---------------------------------------------------------------- OUTPUT
@@ -228,6 +234,7 @@ flowchart LR
     TB["rs_turbo: att retry resc fail_ema"]
     FP["fpll + fs_check + sync_soft counters"]
     VT["viterbi_metric / viterbi_metric_max stream tags"]
+    WL["eq-wl: conj_frac imag_frac ben/beni kappa<br/>wl_front: aligned/relocks/fs + WD resets"]
   end
 
   subgraph PARSE["parsers (regex on the EXACT tag strings)"]
@@ -249,7 +256,28 @@ flowchart LR
   PLOSS --> BADGE
   PQJ --> KNOB
   VT --> RS
+  WL --> PQJ
 ```
+
+**A/B measurement — `tools/tv_dual.py` + `lab/gate_lib.py`**
+
+```mermaid
+flowchart LR
+  IQ["one capture / one live stream"] --> FRONT["shared front end<br/>resamp · MF · fpll · wl_frontend"]
+  FRONT --> TEE{"tee — identical samples"}
+  TEE --> L["atsc_equalizer_long → backend → long.ts"]
+  TEE --> W["atsc_equalizer_wl → backend → wl.ts"]
+  L --> SC["ffmpeg null-sink frames<br/>+ paired per-field MER (p5/p10)"]
+  W --> SC
+  SC --> GATE["lab/gate_lib.py<br/>NN>=3 runs · modal hashgt;=3 runs · modal hash + frame median/spread<br/><i>refuses single-run gates</i>"]
+```
+
+Why it exists: sequential A/B runs compare two different slices of a changing
+sky, so equalizer differences hide inside channel variance. One stream, two
+equalizers, same samples — the only fair comparison. And no decode path here is
+bit-reproducible across processes (volk picks its dot-product kernel from runtime
+pointer alignment), so **single-run md5 or ±2-frame claims are void**; gate with
+`gate_lib` (`VOLK_GENERIC=1` gives bit-exact runs at ~1.7× cost, test-only).
 
 **Telemetry laws (hard-won — keep them true):**
 - `fs_err_rms` IS the MER dial (`mer = 20*log10(5/err)`); the watchability cliff
