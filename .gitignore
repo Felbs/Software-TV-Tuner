@@ -87,3 +87,11 @@ lab/speed_build/retune/
 lab/speed_build/cachetest/
 lab/speed_build/live.jsonl
 lab/speed_build/retune.jsonl
+
+# lab/wl_watchdog: frozen front-end input planes (185 MB each, regenerate with
+# dump_front_in.py) and the harness's per-run TS/logs. The FAILING-run logs are
+# force-added because they are the evidence.
+lab/wl_watchdog/*.f32
+lab/wl_watchdog/runs/*.ts
+lab/wl_watchdog/runs/*.log
+lab/gate_runs/
