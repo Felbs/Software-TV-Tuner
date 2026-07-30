@@ -52,6 +52,11 @@ SCAN_PATH = Path(os.path.expanduser("~")) / ".tv_tuner" / "scan.json"
 GPS_OFFSET = 315_964_800
 LEAP = 18
 
+# Grace period past a recording's end before its window counts as blown.
+# Shared by the scheduler daemon and by expire_stale() so the daemon and the
+# UI can never disagree about what "missed" means.
+MISS_GRACE_SEC = 120
+
 
 def gps_to_unix(g: int) -> int:
     return int(g + GPS_OFFSET - LEAP)
@@ -69,6 +74,35 @@ def load_queue() -> list[dict]:
 def save_queue(queue: list[dict]):
     QUEUE_PATH.parent.mkdir(parents=True, exist_ok=True)
     QUEUE_PATH.write_text(json.dumps(queue, indent=2), encoding="utf-8")
+
+
+def expire_stale(queue: list[dict]) -> int:
+    """Mark pending entries whose window has passed as 'missed'; persist if any
+    changed. Returns how many were expired.
+
+    Found in real use 2026-07-29: a recording scheduled for 07/03 was still
+    listed as 'pending' 27 days later. The daemon expires blown windows, but
+    ONLY while it is running (see cmd_daemon) — and the DVR controller is
+    perfectly usable without ever starting a daemon, so a queue touched only by
+    the UI never expired anything. Expiring on read makes the rule hold
+    regardless of who is running.
+    """
+    now = int(time.time())
+    n = 0
+    for q in queue:
+        # 'recording'/'active' are included deliberately: if the daemon dies
+        # mid-recording the entry is left in that state forever and shows up in
+        # the UI as live work that will never finish. A genuinely in-progress
+        # recording has end_unix in the FUTURE, so the grace check below can
+        # never touch it.
+        if q.get("status") not in ("pending", "recording", "active"):
+            continue
+        if q.get("end_unix", 0) + MISS_GRACE_SEC < now:
+            q["status"] = "missed"
+            n += 1
+    if n:
+        save_queue(queue)
+    return n
 
 
 def load_scan() -> dict:
@@ -177,6 +211,7 @@ def cmd_list(args) -> int:
     if not queue:
         print("[schedule] queue is empty")
         return 0
+    expire_stale(queue)
     now = int(time.time())
     print(f"[schedule] {len(queue)} entries:")
     print()
@@ -442,6 +477,19 @@ def render_tv_table(rows: list[dict]) -> str:
         out.append("")
         out.append(f"+-- {title} {'-' * max(1, 92 - len(title))}")
         out.append(f"|   {sublabel}")
+        # A mux with NO guide data at all repeats "(no guide data)" once per
+        # sub-channel and looks like a bug in the DVR. It isn't: the scan
+        # captured this mux's channel table (that's how we know the callsigns)
+        # but no EIT show listings during its dwell. Say so once, here, instead
+        # of leaving an unexplained column of blanks.
+        if not any(r["on_now"] or r["next"] for _, r in group):
+            out.append(f"|   no EPG captured for this mux -- channel names came "
+                       f"through but show listings did not.")
+            out.append(f"|   Re-scan with a longer dwell to give its EIT tables "
+                       f"time to cycle:")
+            out.append(f"|     python tools/tv_tuner.py --scan --scan-dwell 20")
+            out.append(f"|   (some stations transmit sparse or no EIT at all -- "
+                       f"recording still works via `rrf {rf}`)")
         out.append("|")
         for i, r in group:
             on = r["on_now"]
@@ -632,6 +680,7 @@ def cmd_tv(args) -> int:
             return 1
         rows = build_channel_snapshot(scan)
         queue = load_queue()
+        expire_stale(queue)
         os.system("cls" if sys.platform == "win32" else "clear")
         print("=================================================================")
         print(f"  STVT DVR    {datetime.now().strftime('%a %m/%d %I:%M %p').lstrip('0')}    "
@@ -662,6 +711,14 @@ def cmd_tv(args) -> int:
         print("  recs             browse recordings folder (play/delete)")
         print("  refresh          reload scan + queue")
         print("  q                quit")
+        print()
+        # NOTE: the panel has a guide, waterfall and antenna picker but NO
+        # recording queue — scheduling lives here in the CLI only. Don't
+        # advertise DVR features it doesn't have.
+        print("  Prefer clicking to typing? The web panel has a clickable guide,")
+        print("  waterfall and antenna picker (recording stays here in the CLI):")
+        print("      python adaptive-tv/tv_tuna_panel.py   ->  "
+              "http://localhost:8642")
         try:
             line = input("\n> ").strip()
         except (EOFError, KeyboardInterrupt):
@@ -973,8 +1030,8 @@ def cmd_run(args) -> int:
                     continue
                 if entry["id"] in active:
                     continue
-                # Skip missed shows (>2 min past end)
-                if entry["end_unix"] + 120 < now:
+                # Skip missed shows (>MISS_GRACE_SEC past end)
+                if entry["end_unix"] + MISS_GRACE_SEC < now:
                     entry["status"] = "missed"
                     save_queue(queue)
                     print(f"[scheduler] {datetime.now().strftime('%H:%M:%S')}  "
