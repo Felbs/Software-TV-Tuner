@@ -1,0 +1,11 @@
+# lock_loop tag=afterstress5 runs=8 iq=rf34_ctrl.cs16 extra={} debug=True
+[  1/8] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0/0 fs1=135 latent=0 ts=36335136 AF9769A6 (23.2s)  running_fails=0
+[  2/8] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0/0 fs1=135 latent=0 ts=36335136 AF9769A6 (22.5s)  running_fails=0
+[  3/8] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0/0 fs1=135 latent=0 ts=36335136 AF9769A6 (23.8s)  running_fails=0
+[  4/8] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0/0 fs1=135 latent=0 ts=36335136 AF9769A6 (22.2s)  running_fails=0
+[  5/8] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0/0 fs1=135 latent=0 ts=36335136 AF9769A6 (23.2s)  running_fails=0
+[  6/8] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0/0 fs1=135 latent=0 ts=36335136 AF9769A6 (24.0s)  running_fails=0
+[  7/8] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0/0 fs1=135 latent=0 ts=36335136 AF9769A6 (23.2s)  running_fails=0
+[  8/8] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0/0 fs1=135 latent=0 ts=36335136 AF9769A6 (22.7s)  running_fails=0
+
+== afterstress5: 0/8 lock failures (0.0%) ==

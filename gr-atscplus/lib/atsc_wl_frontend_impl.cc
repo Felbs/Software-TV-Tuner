@@ -25,6 +25,7 @@
 #include "atsc_pnXXX_impl.h"
 #include <gnuradio/filter/mmse_fir_interpolator_ff.h>
 #include <gnuradio/io_signature.h>
+#include <algorithm>
 #include <climits>
 #include <cmath>
 #include <cstdio>
@@ -64,6 +65,151 @@ atsc_wl_frontend::sptr atsc_wl_frontend::make(float rate)
     return gnuradio::make_block_sptr<atsc_wl_frontend_impl>(rate);
 }
 
+// ── extract the MMSE interpolator taps table from GR's own block ──────────
+// Impulse-probe gr::filter::mmse_fir_interpolator_ff at every mu step:
+// interpolate(e_j, imu/nsteps) returns exactly taps[imu][j]. This keeps the
+// interpolation VALUES identical to atsc_sync_soft without paying the per-call
+// library overhead at 10.76 Msym/s.
+//
+// ★ THE 2026-07-29 LOCK-FAILURE FIX — read this before touching the probe. ★
+//
+// GR 3.10's kernel::fir_filter_fff::filter(input) does NOT read input[0..ntaps):
+//
+//     const float* ar = (float*)((size_t)input & ~(d_align - 1));
+//     unsigned al = input - ar;
+//     volk_32f_x2_dot_prod_32f(out, ar, d_aligned_taps[al].data(), d_ntaps + al);
+//
+// It rounds the pointer DOWN to volk's alignment (32 B on AVX2) and dot-products
+// (ntaps + al) floats from there, relying on the leading `al` values being
+// multiplied by ZERO taps. That is exact arithmetic for FINITE leading values —
+// but 0*NaN and 0*Inf are NaN, so ANY NaN/Inf bit pattern in the up-to-7 floats
+// immediately BEFORE the probe buffer poisons the dot product, and therefore
+// every entry of the table (the buffer does not move between probe calls).
+//
+// GR's own callers always hand it a pointer into a GR circular buffer, whose
+// pages are freshly mapped and zero-filled, so this never bites upstream. The
+// original probe here used a bare `std::vector<float>(8)` off the recycled C++
+// heap, where those bytes are whatever the last owner left behind — and MSVC's
+// small-block heap is 16 B aligned, so al == 4 about half the time.
+//
+// MEASURED CONSEQUENCE (lab/wl_watchdog): in ~2 % of processes the whole taps
+// table came out NaN => every interpolated symbol NaN => d_sample_mem NaN =>
+// d_timing_adjust NaN => d_mu NaN => (int)std::floor(NaN) is INT_MIN, which the
+// `if (d_incr < 1) d_incr = 1` clamp turns into a PERMANENT d_incr == 1. The
+// front end then advanced one input SAMPLE per output symbol and free-ran at
+// exactly 1.5x (segs_emitted 291044 instead of 194030), with relocks=0,
+// segs_aligned=0.00 %, fs accepted=0 and a 0-byte TS. Deterministic input,
+// nondeterministic all-or-nothing outcome, load-sensitive — because the trigger
+// is heap CONTENTS, not the signal.
+//
+// FIX: probe through the middle of a zero-filled buffer with PROBE_PAD floats
+// of guaranteed-finite padding on both sides, so the aligned read can only ever
+// touch zeros. The returned table is then verified finite (an all-NaN table is
+// otherwise invisible until the decode has already failed).
+bool atsc_wl_frontend_impl::build_interp_table()
+{
+    static constexpr int PROBE_PAD = 64; // floats; >= any volk alignment (256 B)
+
+    gr::filter::mmse_fir_interpolator_ff probe;
+    d_int_ntaps = (int)probe.ntaps();
+    d_int_nsteps = (int)probe.nsteps();
+    d_itaps.assign((size_t)(d_int_nsteps + 1) * d_int_ntaps, 0.0f);
+
+    // STVT_WL_PROBE_DIAG=1: EXACT re-enactment of the pre-fix probe, run first
+    // so the allocation sequence (probe ctor -> d_itaps.assign -> unit(ntaps))
+    // is identical to the code that used to fail. Reports whether THIS process
+    // would have built a poisoned table. Diagnostic only — the padded table
+    // below is always the one that gets used.
+    static const bool PROBE_DIAG = []() {
+        const char* p = std::getenv("STVT_WL_PROBE_DIAG");
+        return p && std::atoi(p) != 0;
+    }();
+    if (PROBE_DIAG) {
+        std::vector<float> unpadded_tab((size_t)(d_int_nsteps + 1) * d_int_ntaps, 0.0f);
+        std::vector<float> unit(d_int_ntaps, 0.0f);
+        for (int imu = 0; imu <= d_int_nsteps; imu++) {
+            const float mu = (float)imu / (float)d_int_nsteps;
+            for (int j = 0; j < d_int_ntaps; j++) {
+                unit[j] = 1.0f;
+                unpadded_tab[(size_t)imu * d_int_ntaps + j] =
+                    probe.interpolate(unit.data(), mu);
+                unit[j] = 0.0f;
+            }
+        }
+        int bad = 0;
+        for (float v : unpadded_tab)
+            if (!std::isfinite(v)) bad++;
+
+        // CONTROLLED PROOF of the mechanism, independent of heap luck: put a
+        // NaN in the floats immediately BEFORE a 32-byte-misaligned probe
+        // pointer and see the interpolation come back NaN even though those
+        // floats are multiplied by ZERO taps. If poison_makes_nan=1 the
+        // align-down read is confirmed on this build of GR.
+        std::vector<float> poison((size_t)(32 + d_int_ntaps), 0.0f);
+        float* pp = poison.data() + 16;               // 64 B in, then force al!=0
+        while ((((size_t)pp) & 31u) == 0) pp += 1;    // guarantee a back-off
+        const unsigned al = (unsigned)((((size_t)pp) & 31u) / sizeof(float));
+        for (unsigned k = 1; k <= al; k++)
+            *(pp - k) = std::nanf("");
+        for (int j = 0; j < d_int_ntaps; j++) pp[j] = 0.0f;
+        pp[0] = 1.0f;
+        const float poisoned = probe.interpolate(pp, 0.5f);
+
+        std::fprintf(stderr,
+                     "[wl_front probe] unpadded_addr=%p addr_mod32=%zu "
+                     "unpadded_nonfinite=%d/%zu unpadded_would_have_failed=%d "
+                     "| poison_al=%u poison_tap=%g poison_makes_nan=%d\n",
+                     (void*)unit.data(), ((size_t)unit.data()) & 31u,
+                     bad, unpadded_tab.size(), (int)(bad != 0),
+                     al, poisoned, (int)(!std::isfinite(poisoned)));
+    }
+
+    std::vector<float> pbuf((size_t)(2 * PROBE_PAD + d_int_ntaps), 0.0f);
+    float* unit = pbuf.data() + PROBE_PAD;
+
+    for (int imu = 0; imu <= d_int_nsteps; imu++) {
+        const float mu = (float)imu / (float)d_int_nsteps;
+        for (int j = 0; j < d_int_ntaps; j++) {
+            unit[j] = 1.0f;
+            d_itaps[(size_t)imu * d_int_ntaps + j] = probe.interpolate(unit, mu);
+            unit[j] = 0.0f;
+        }
+    }
+
+    // STVT_WL_INJECT_NAN=<n>: poison the FIRST n taps tables on purpose, then
+    // report success — an exact, deterministic re-creation of the historical
+    // failure. This is how the acquisition watchdog is regression-tested
+    // without waiting for a 2 % Heisenbug: n=1 must produce one watchdog RESET
+    // followed by RECOVERED, and n>=99 must produce max_resets RESETs followed
+    // by one GIVING UP (bounded retries, never a loop). Test knob only.
+    static const int INJECT_NAN = []() -> int {
+        if (const char* p = std::getenv("STVT_WL_INJECT_NAN")) return std::atoi(p);
+        return 0;
+    }();
+    static int build_count = 0;
+    build_count++;
+    if (INJECT_NAN > 0 && build_count <= INJECT_NAN) {
+        std::fill(d_itaps.begin(), d_itaps.end(), std::nanf(""));
+        std::fprintf(stderr,
+                     "[wl_front] TEST FAULT INJECTED: taps table #%d poisoned "
+                     "with NaN (STVT_WL_INJECT_NAN=%d)\n",
+                     build_count, INJECT_NAN);
+        return true;
+    }
+
+    int nonfinite = 0;
+    for (float v : d_itaps)
+        if (!std::isfinite(v)) nonfinite++;
+    if (nonfinite) {
+        std::fprintf(stderr,
+                     "[wl_front] FATAL interp taps table has %d non-finite of "
+                     "%zu entries — the front end cannot lock. Report this.\n",
+                     nonfinite, d_itaps.size());
+        return false;
+    }
+    return true;
+}
+
 atsc_wl_frontend_impl::atsc_wl_frontend_impl(float rate)
     : gr::block("atscplus_atsc_wl_frontend",
                 io_signature::make2(2, 2, sizeof(float), sizeof(float)),
@@ -75,26 +221,15 @@ atsc_wl_frontend_impl::atsc_wl_frontend_impl(float rate)
       d_rx_clock_to_symbol_freq(rate / ATSC_SYMBOL_RATE),
       d_si(0)
 {
-    // ── extract the MMSE interpolator taps table from GR's own block ──────
-    // Impulse-probe gr::filter::mmse_fir_interpolator_ff at every mu step:
-    // interpolate(e_j, imu/nsteps) returns exactly taps[imu][j]. This keeps
-    // the interpolation VALUES identical to atsc_sync_soft without paying the
-    // per-call library overhead at 10.76 Msym/s.
-    {
-        gr::filter::mmse_fir_interpolator_ff probe;
-        d_int_ntaps = (int)probe.ntaps();
-        d_int_nsteps = (int)probe.nsteps();
-        d_itaps.assign((size_t)(d_int_nsteps + 1) * d_int_ntaps, 0.0f);
-        std::vector<float> unit(d_int_ntaps, 0.0f);
-        for (int imu = 0; imu <= d_int_nsteps; imu++) {
-            const float mu = (float)imu / (float)d_int_nsteps;
-            for (int j = 0; j < d_int_ntaps; j++) {
-                unit[j] = 1.0f;
-                d_itaps[(size_t)imu * d_int_ntaps + j] =
-                    probe.interpolate(unit.data(), mu);
-                unit[j] = 0.0f;
-            }
-        }
+    // Retry rather than ship a poisoned table: a fresh buffer gets a fresh
+    // address, so even if the fix were somehow defeated the retry escapes it.
+    bool taps_ok = false;
+    for (int attempt = 0; attempt < 4 && !taps_ok; attempt++) {
+        taps_ok = build_interp_table();
+        if (!taps_ok)
+            std::fprintf(stderr,
+                         "[wl_front] interp taps probe attempt %d failed — retrying\n",
+                         attempt + 1);
     }
 
     // ── timing knobs: verbatim atsc_sync_soft defaults + env overrides ────
@@ -206,6 +341,43 @@ atsc_wl_frontend_impl::atsc_wl_frontend_impl(float rate)
     d_coast_total = 0;
     d_clean_fs_streak = 0;
 
+    // ── acquisition watchdog knobs ────────────────────────────────────────
+    // Window default = 1252 segments = 4 data fields = 2x the MEASURED
+    // time-to-first-field-sync on a healthy stream (626 segments worst case
+    // over 40 runs of the rf34_ctrl fixture; typical is ~2 fields because the
+    // first PN511 hit needs segment lock first). Only ever consulted while
+    // d_fs_accepted == 0, so a healthy stream never reaches this code.
+    d_wd_enabled = true;
+    d_wd_window = 1252;
+    d_wd_max = 4;
+    if (const char* p = std::getenv("STVT_WL_WD")) {
+        d_wd_enabled = (std::atoi(p) != 0);
+    }
+    if (const char* p = std::getenv("STVT_WL_WD_SEGS")) {
+        long v = std::atol(p);
+        if (v >= 313) d_wd_window = (uint64_t)v;
+    }
+    if (const char* p = std::getenv("STVT_WL_WD_MAX")) {
+        int v = std::atoi(p);
+        if (v >= 0 && v <= 1000) d_wd_max = v;
+    }
+    d_wd_resets = 0;
+    d_wd_origin = 0;
+    d_wd_gave_up = false;
+    d_wd_recovered = false;
+    d_first_align_seg = 0;
+    d_first_fs_seg = 0;
+    if (!taps_ok) {
+        std::fprintf(stderr,
+                     "[wl_front] interp taps table UNUSABLE after 4 attempts — "
+                     "the watchdog will re-probe it on its first reset\n");
+    }
+
+    std::fprintf(stderr,
+                 "[wl_front] wd=%d window=%llu segs max_resets=%d "
+                 "(acquisition watchdog; no-op once a field sync is accepted)\n",
+                 (int)d_wd_enabled, (unsigned long long)d_wd_window, d_wd_max);
+
     std::fprintf(stderr,
                  "[wl_front] FUSED v1 (2026-07-27) rate=%.0f interp=%dx%d "
                  "alpha=%.4f lock=%.2f unlock=%.2f sticky=%.2f "
@@ -244,6 +416,32 @@ void atsc_wl_frontend_impl::reset()
     memset(d_integrator, 0, sizeof(d_integrator));
 }
 
+// Watchdog action: put the timing loop and the framing state back to their
+// construction values and re-probe the interpolator table. Deliberately does
+// NOT clear the lifetime counters (segs_emitted / segs_aligned / relocks /
+// fs_*) — those stay cumulative so the FINAL line keeps its existing meaning
+// for anything that parses it.
+void atsc_wl_frontend_impl::watchdog_reset()
+{
+    // If the table is poisoned (the historical failure mode) this is what
+    // actually cures it; on a healthy table the re-probe is a no-op that
+    // recomputes identical values.
+    bool ok = false;
+    for (int attempt = 0; attempt < 4 && !ok; attempt++)
+        ok = build_interp_table();
+    if (!ok)
+        std::fprintf(stderr, "[wl_front wd] interp taps re-probe FAILED\n");
+
+    reset();                    // timing loop: d_mu/d_w/d_counter/integrator/...
+
+    d_field_num = 0;            // framing
+    d_segment_num = 0;
+    d_fs_locked = false;
+    d_segs_since_accepted_fs = 0;
+    d_coast_run = 0;
+    d_clean_fs_streak = 0;
+}
+
 atsc_wl_frontend_impl::~atsc_wl_frontend_impl()
 {
     double align_pct = (d_segs_emitted > 0)
@@ -262,6 +460,18 @@ atsc_wl_frontend_impl::~atsc_wl_frontend_impl()
                  (unsigned long long)d_fs_rejected_early,
                  (unsigned long long)d_fs_rejected_late,
                  (unsigned long long)d_coast_total);
+    // ADDITIVE second line (2026-07-29): the acquisition watchdog's own
+    // summary. Kept separate so the [wl_front FINAL] format above is
+    // byte-for-byte what it has always been.
+    std::fprintf(stderr,
+                 "[wl_front WD FINAL] wd=%d window=%llu max=%d resets=%d "
+                 "gave_up=%d recovered=%d first_align_seg=%llu "
+                 "first_fs_seg=%llu segs_seen=%llu\n",
+                 (int)d_wd_enabled, (unsigned long long)d_wd_window, d_wd_max,
+                 d_wd_resets, (int)d_wd_gave_up, (int)d_wd_recovered,
+                 (unsigned long long)d_first_align_seg,
+                 (unsigned long long)d_first_fs_seg,
+                 (unsigned long long)d_seg_count);
 }
 
 void atsc_wl_frontend_impl::forecast(int noutput_items,
@@ -376,6 +586,17 @@ void atsc_wl_frontend_impl::handle_segment(float* out_r,
                 d_field_num = candidate_field;
                 d_segment_num = -1;
                 d_fs_accepted++;
+                if (d_first_fs_seg == 0) {
+                    d_first_fs_seg = d_seg_count;
+                    // ── the watchdog's EXPLICIT SUCCESS CONDITION ─────────
+                    if (d_wd_resets > 0 && !d_wd_recovered) {
+                        d_wd_recovered = true;
+                        std::fprintf(stderr,
+                            "[wl_front wd] RECOVERED: field sync accepted at "
+                            "seg=%llu after %d reset(s) — watchdog standing down\n",
+                            (unsigned long long)d_seg_count, d_wd_resets);
+                    }
+                }
                 d_fs_locked = true;
                 if (gap == ATSC_SEGMENTS_PER_DATA_FIELD)
                     d_clean_fs_streak++;
@@ -606,6 +827,38 @@ int atsc_wl_frontend_impl::general_work(int noutput_items,
                                 ? 100.0 * (double)d_segs_aligned / (double)d_segs_emitted
                                 : 0.0);
             }
+            // ── ACQUISITION WATCHDOG (2026-07-29) ─────────────────────────
+            // One integer comparison per SEGMENT (832 symbols), and every
+            // branch below is gated on d_fs_accepted == 0 — a stream that has
+            // ever framed once never enters it. Bounded retries + an explicit
+            // success condition (logged in handle_segment) + a loud give-up:
+            // never an unbounded loop.
+            if (d_wd_enabled && d_fs_accepted == 0 && !d_wd_gave_up &&
+                (d_seg_count - d_wd_origin) >= d_wd_window) {
+                if (d_wd_resets < d_wd_max) {
+                    d_wd_resets++;
+                    std::fprintf(stderr,
+                        "[wl_front wd] NO FIELD-SYNC LOCK after %llu segs "
+                        "(seg=%llu emitted=%llu aligned=%llu relocks=%llu "
+                        "fs=0 seg_locked=%d) — RESET %d/%d\n",
+                        (unsigned long long)(d_seg_count - d_wd_origin),
+                        (unsigned long long)d_seg_count,
+                        (unsigned long long)d_segs_emitted,
+                        (unsigned long long)d_segs_aligned,
+                        (unsigned long long)d_relocks,
+                        (int)d_seg_locked, d_wd_resets, d_wd_max);
+                    watchdog_reset();
+                    d_wd_origin = d_seg_count;
+                } else {
+                    d_wd_gave_up = true;
+                    std::fprintf(stderr,
+                        "[wl_front wd] GIVING UP after %d reset(s) (max=%d): "
+                        "this stream cannot be acquired — leaving the front end "
+                        "free-running. Raise STVT_WL_WD_MAX to retry longer, or "
+                        "STVT_WL_WD=0 to disable the watchdog.\n",
+                        d_wd_resets, d_wd_max);
+                }
+            }
             (void)was_locked;
         }
 
@@ -618,6 +871,7 @@ int atsc_wl_frontend_impl::general_work(int noutput_items,
                 if (d_data_mem[0] > 0 && d_data_mem[1] < 0 &&
                     d_data_mem[2] < 0 && d_data_mem[3] > 0) {
                     d_segs_aligned++;
+                    if (d_first_align_seg == 0) d_first_align_seg = d_seg_count;
                 }
                 // ── fused framing: the fs_check stage runs right here ─────
                 handle_segment(out_r, out_pl, out_i, d_output_produced);

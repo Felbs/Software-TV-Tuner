@@ -25,9 +25,18 @@ private:
     // are IDENTICAL to what atsc_sync_soft computes — but applied inline to
     // both the real and imaginary plane in one pass, with zero library-call
     // overhead (the measured overhead was ~64 ns/call at 10.76 Msym/s).
+    //
+    // 2026-07-29: the probe must be run through a PADDED, zero-filled buffer —
+    // see build_interp_table() for the NaN-poisoning bug this cost us.
     int d_int_ntaps  = 0; // 8 for GR 3.10
     int d_int_nsteps = 0; // 128 for GR 3.10
     std::vector<float> d_itaps; // (nsteps+1) x ntaps, row-major
+
+    // Rebuild d_itaps by impulse-probing GR's interpolator. Returns false if
+    // the resulting table is not entirely finite (which must never happen with
+    // the padded probe, but is checked because an all-NaN table is invisible
+    // until the decode has already failed).
+    bool build_interp_table();
 
     // ── timing-recovery state (verbatim port of atsc_sync_soft) ───────────
     double d_rx_clock_to_symbol_freq;
@@ -93,6 +102,25 @@ private:
     int d_coast_run;
     uint64_t d_coast_total;
     int d_clean_fs_streak;
+
+    // ── ACQUISITION WATCHDOG (2026-07-29) — additive, bounded ─────────────
+    // Defence in depth for "the front end never locks at all": if no field
+    // sync has been accepted within a bounded window, reset the timing and
+    // framing state (and re-probe the interpolator table) and try again — with
+    // a HARD retry cap and an explicit success condition, per the respawn-
+    // safety law. Never touches a healthy stream: every branch is gated on
+    // d_fs_accepted == 0.
+    bool d_wd_enabled;
+    uint64_t d_wd_window;     // segments per attempt
+    int d_wd_max;             // max resets
+    int d_wd_resets;
+    uint64_t d_wd_origin;     // d_seg_count at the start of this attempt
+    bool d_wd_gave_up;
+    bool d_wd_recovered;
+    uint64_t d_first_align_seg; // d_seg_count of the first aligned segment
+    uint64_t d_first_fs_seg;    // d_seg_count of the first accepted field sync
+
+    void watchdog_reset();
 
     // process one completed, emit-gated segment (d_data_mem/_imag) through
     // the field-sync framing; writes to out arrays and bumps output_produced
