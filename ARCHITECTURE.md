@@ -63,7 +63,7 @@ flowchart TB
         FSCHK["atsc_fs_checker_inst<br/>field-sync (PN511/PN63) detect + validate"]
         EQ["atsc_equalizer_long<br/>256-tap LMS + DFE · <b>fs_err_rms telemetry = MER</b><br/><i>warm start from per-install tap cache</i><br/><i>cold-start data recycling STVT_EQ_RECYCLE</i>"]
         WLF["atsc_wl_frontend<br/><i>STVT_EQ=wl only — fuses timing+framing and carries<br/>the imaginary companion; acquisition watchdog</i>"]
-        EQWL["atsc_equalizer_wl<br/><i>widely-linear: filters x AND x* (folded to two real dots)<br/>v3 adaptive imag-plane shrinkage · conj_frac telemetry</i>"]
+        EQWL["atsc_equalizer_wl<br/><i>widely-linear: filters x AND x* (folded to two real dots)<br/>v3 adaptive imag-plane shrinkage · conj_frac telemetry<br/>warm start from its OWN cache ('TAPW', path + .wl)</i>"]
         VIT["atsc_viterbi_soft / dtv.atsc_viterbi_decoder<br/>12-way trellis decode<br/><i>port2 = SOVA reliability (STVT_SOVA)</i>"]
         DEINT["atsc_deinterleaver<br/>convolutional de-interleave"]
         RS["atsc_rs_decoder_erasure / stock<br/>Reed-Solomon (207,187) FEC<br/><i>TURBO 2b trellis-pin retry STVT_TURBO</i>"]
@@ -143,7 +143,7 @@ flowchart TB
         QHIST[("quality_history.csv<br/>Knob-of-Time rows")]
         RECIPES[("channel_recipes.json<br/>winning gain/antenna per chan")]
         FINGER[("antenna_profiles.json<br/>fingerprints · epochs · belief_map")]
-        TAPS[("tapcache/<br/>warm-start EQ taps")]
+        TAPS[("tapcache/<br/>warm-start EQ taps<br/><i>taps_&lt;ant&gt;_rf&lt;N&gt;.bin = long ('TAPC')<br/>+ .wl sibling = widely-linear ('TAPW')</i>")]
         ORACLE[("oracle_score.csv<br/>forecast-accuracy audit")]
     end
 
@@ -263,14 +263,21 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  IQ["one capture / one live stream"] --> FRONT["shared front end<br/>resamp · MF · fpll · wl_frontend"]
+  IQ["one capture / one live stream"] --> IMP["impairment injectors<br/><i>opt --noise (AWGN, proper)</i><br/><i>opt --conj α (improper: x+α·conj x)</i>"]
+  IMP --> FRONT["shared front end<br/>resamp · MF · fpll · wl_frontend"]
   FRONT --> TEE{"tee — identical samples"}
   TEE --> L["atsc_equalizer_long → backend → long.ts"]
   TEE --> W["atsc_equalizer_wl → backend → wl.ts"]
-  L --> SC["ffmpeg null-sink frames<br/>+ paired per-field MER (p5/p10)"]
+  L --> SC["ffmpeg null-sink frames<br/>+ paired per-field MER (p5/p10/p50)"]
   W --> SC
-  SC --> GATE["lab/gate_lib.py<br/>NN>=3 runs · modal hashgt;=3 runs · modal hash + frame median/spread<br/><i>refuses single-run gates</i>"]
+  SC --> GATE["lab/gate_lib.py<br/>N ≥ 3 runs · modal hash + frame median/spread<br/><i>refuses single-run gates</i>"]
+  SC --> CURVE["lab/e5_wl_margin_curve.py<br/>SNR ladder → the margin curve"]
+  SC --> SEEDS["lab/e5b_cliff_seeds.py<br/>cliff × N noise seeds"]
 ```
+
+Impairments are injected ONCE, upstream of the tee, so both equalizers see the
+identical impaired stream — that is what keeps the A/B fair while still letting
+us choose the operating point instead of waiting for propagation.
 
 Why it exists: sequential A/B runs compare two different slices of a changing
 sky, so equalizer differences hide inside channel variance. One stream, two
