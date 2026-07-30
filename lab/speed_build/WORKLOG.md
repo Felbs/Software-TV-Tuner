@@ -292,3 +292,242 @@ back. Two ways:
   three self-contained hunks in `atsc_equalizer_long_impl.{cc,h}` and applies
   cleanly (that branch's only change to those files is the TELEM_EVERY knob,
   which this branch now also carries, identically).
+
+---
+
+# 11. THE UNIFIED BUILD (2026-07-29 evening) — branch `stvt-2.0-wl-speed`
+
+The problem §10 left behind is now closed: there is ONE installed
+gr-atscplus that carries **both** research tracks, so the panel can drive
+`STVT_EQ=wl` / `tv_dual.py` AND the speed levers without reinstalling
+between experiments. CPU/build only — **no SDR was touched** (a balloon-hunt
+window holder owned the radio 18:38-20:25; every number below is offline
+replay).
+
+## 11.1 Merge strategy
+
+`git checkout -b stvt-2.0-wl-speed stvt-2.0-wl` then `git merge speed-1`.
+A merge, not a cherry-pick: the two branches share `main-universal`
+(5cfe274) as their merge base, so a merge brings the whole speed-1 set —
+including `.gitignore`, `lab/speed*`, `tools/sdr_sweep.py` and
+`tools/tv_tuner.py` — with correct history and no replayed hunks.
+
+Two commits on the branch:
+
+| commit | what |
+|---|---|
+| `b01bdce` | the merge (WL 2.0 x speed-1 levers 1/2/3) |
+| `39939ad` | `tools/tv_live.py` SDRplay open-retry hardening, recovered from `stash@{0}` |
+
+## 11.2 Conflicts, and how they were resolved
+
+**1. `gr-atscplus/lib/atsc_equalizer_long_impl.cc` — the ONLY textual
+conflict, and it was comment-only.** Both branches had independently added
+the *identical* `STVT_EQ_TELEM_EVERY` cadence knob (WL needed it for
+tv_dual's paired MER series; speed-1 needed it for field-resolution
+convergence curves) with different explanatory comments, and speed-1 also
+adds `#include <cstdio>`. Kept `<cstdio>`, kept speed-1's code verbatim,
+wrote one comment naming both callers. **Verified:** the merged file is
+byte-identical to `speed-1:atsc_equalizer_long_impl.cc` except that comment
+block (diff with `--strip-trailing-cr` shows exactly one hunk, all `//`
+lines).
+
+**2. `tools/tv_live.py` — NO conflict, git auto-merged, and that is
+legitimate rather than lucky:** the three contributors edit disjoint regions
+of the file.
+
+| region | owner | what lands there |
+|---|---|---|
+| ~205-240 | `stash@{0}` | SDR open retry ladder + service restart |
+| ~460-720 | stvt-2.0-wl | `STVT_EQ=wl`, fused `atsc_wl_frontend`, WL edge wiring, `STVT_EQ_DUMP` |
+| ~770-1010 | speed-1 | `_eq_cmd` / `_eq_cache_path`, retune save-rebind-warm, `STVT_PERSIST_RETUNE_CACHE` default flip, `STVT_EQ_LKG` + `STVT_EQ_CMD_FILE` defaults |
+
+All three verified present in the merged file by grep. **Nothing was
+dropped from either side, so no safety-vs-feature tie-break was needed.**
+`stash@{0}` was applied with `git stash apply` (not `pop`) — it is still
+there as a safety net.
+
+**Caveat carried forward from the stash, stated not silenced:** the
+64 s-then-`Restart-Service SDRplayAPIService` fallback is a *global* side
+effect. If another process legitimately owns the RSP (a window holder, the
+observatory, the storm watch), it yanks it after 64 s of waiting rather than
+backing off. It only fires on the sdrplay driver and only after the full
+ladder, but a `radio_lock`-aware backoff is the better long-term answer.
+
+## 11.3 Install verification — BOTH feature sets in the loaded module
+
+`_rebuild.bat` then `_install.bat` (install is mandatory, §0).
+Installed artefacts: `gnuradio-atscplus.dll` md5 `54359c27a67014c2...`,
+`atscplus_python.cp312-win_amd64.pyd` md5 `2e80d2da48a754ac...`.
+
+WL side — constructed from the installed module, banners are the proof:
+
+```
+[eq-wl] build 2026-07-29 v3 (adaptive conjugate shrinkage, ntaps=128, shrink=off)
+[wl_front] FUSED v1 (2026-07-27) rate=... interp=129x8 ... fs_validate=ON
+atsc_equalizer_wl PRESENT   atsc_wl_frontend PRESENT
+```
+
+Speed side — the levers are env / command-port driven, so the DLL's own
+strings and the live banners are the proof: `STVT_EQ_RECYCLE`,
+`STVT_EQ_RECYCLE_FIELDS`, `DATA RECYCLING`, `WARM START`, `COLD START`,
+`SHERIFF cmd`, `cache persisted on stop`, `STVT_EQ_CACHE_EVERY`,
+`STVT_EQ_CMD_FILE`, `STVT_EQ_TELEM_EVERY` — all present; plus the WL-only
+`STVT_WL_SHRINK*` set. Observed live in the gate logs below:
+`[eq-long] DATA RECYCLING x8 for the first 40 field syncs`,
+`[eq-long] WARM START`, `cache persisted on stop`.
+
+## 11.4 GATES — all passed
+
+**G1 default path (STVT_EQ unset/long) unchanged.** Multi-run per the volk
+law (§1): frames are the gate, md5 must be drawn from the known set.
+
+| capture | frames | md5s seen | fields | converge_field |
+|---|---|---|---|---|
+| rf34_ctrl x3 | **403 / 403 / 403** | `f1f867c5...` x2, `3d8c11ee...` | 620 | 210 / 210 / 210 |
+| rf7_marg x2 | **251 / 250** | `ac5ff168...`, `2b3d7075...` | 620 | 49 / 49 |
+
+Both rf34 hashes are in the documented pre-change set (`F1F867C5...`,
+`AA0DB81B...`, `3D8C11EE...`). rf7 frames sit in the documented 250-251
+band, and its md5 was never reproducible. Convergence 210 (rf34) and 49
+(rf7) are the §1 baselines *exactly*.
+
+**G2 `STVT_EQ=wl` still decodes, at the WL v3 numbers.** `lab/wl_v3/sweep.py`
+(sample-aligned tv_dual), arm `v2`:
+
+| capture | long | WL | doc'd WL | imag_frac | benefit | kappa | ctl |
+|---|---:|---:|---:|---:|---:|---:|---|
+| rf34 clean | 403 | **403** | 403 | 0.206 | 0.932 | 0.000 | OK |
+| rf34+AWGN 2147 (knee) | 130 | **226** | 226-230 | 0.120 | 0.597 | 0.000 | OK |
+| rf7 marginal | 251 | **257** | 257 | 0.146 | 0.589 | 0.000 | OK |
+| rf9 marginal | 112 | **349** | 348-350 | 0.119 | 0.634 | 0.003 | OK |
+
+Every WL number is on or inside its recorded band; `imag_frac`, benefit and
+kappa reproduce to three decimals. The `long` leg is the built-in control
+and was identical within each capture.
+
+**G3 `tools/tv_dual.py` reproduces its documented md5 pair** — rf34_ctrl:
+
+| leg | md5 | expected |
+|---|---|---|
+| long | `F1F867C5567B33721684F4FBF7C423BB` | == production `tv_replay STVT_EQ=long` |
+| wl | `AF9769A6F60C2BEBF6C6A50CF7CD8440` | == the 7/27 fused hash |
+
+Both exact. The harness is still byte-for-byte the production decode on one
+leg and the recorded fused decode on the other.
+
+**G4 the levers still behave.** One replay each, scored on the ONE absolute
+ruler (`analyze_curves.py --target 0.5179` = MER 19.69 dB) so the arms are
+comparable:
+
+| arm | frames | fields_to_target | t_s | plateau | MER dB | banner |
+|---|---:|---:|---:|---:|---:|---|
+| default | 403 | 210 | 5.13 | 0.4708 | 20.52 | — |
+| `STVT_EQ_RECYCLE=8` | 403 | **24** | 0.55 | 0.4625 | 20.68 | `DATA RECYCLING x8 ... first 40 field syncs` |
+| tap cache, cold (empty) | 403 | 210 | 5.13 | 0.4709 | 20.52 | wrote `taps_TEST_rf34.bin` |
+| tap cache, warm | 403 | **6** | 0.12 | 0.4588 | 20.75 | `WARM START`, `cache persisted on stop` |
+
+§3's recycling table said 24 fields at N=8 — reproduced exactly. §4's
+fresh-process warm-start claim was 6 fields / 0.12 s / 403 frames —
+reproduced exactly. Frames never moved (403 in all four arms).
+
+**G4b lever 2 on the deterministic fixture rail** (`scan_gate_study.py`, 35
+OTA fixtures): `HOT TP=14 FP=0 FN=0 TN=21`, `VERDICT MISMATCHES: NONE`
+(hot / weak / atsc3 all match), phase-1 radio time 4.90 s -> 3.77 s =
+**1.30x**. Identical to §2.
+
+**G5 telemetry + docs.** `lab/speed_build/telemetry_check.py` over three
+post-merge chain logs (default / recycle / warm-cache): **TELEMETRY
+INTACT** — panel `RE_FS` 620 hits, `RE_FPLL` 115, `RE_RS5` 3,
+`quality_tuner` RELOCKS + ALIGNED, `tv_dual _RE_LONG` 620,
+`day_program_729` in_rms split, `OsO/overflow = 0` in all three.
+`tools/stvt_docs_guard.py` -> **CLEAN** (exit 0; 0 errors, warnings only,
+all four contract tags still emitted).
+
+## 11.5 Two findings that are NOT merge regressions, but must be recorded
+
+**(a) `atsc_wl_frontend` has an intermittent hard lock failure (~5%).** In a
+minority of standalone `tv_replay STVT_EQ=wl` runs the fused front end never
+achieves timing lock at all — `relocks=0`, `segs_aligned=0 (0.00%)`,
+`fs accepted=0` — and it free-runs, emitting `segs_emitted=291044` instead
+of `194030` (exactly the 1.5x SPS ratio, i.e. one output per input *sample*
+instead of per *symbol*). The TS comes out **0 bytes**.
+
+Measured, same deterministic 480 MB fixture, same env:
+
+| build | runs | lock failures |
+|---|---:|---:|
+| unified (`stvt-2.0-wl-speed`) | 39 | **2** (~5%) |
+| pre-merge WL backup (47d419f state) | 47 | 0 |
+
+Fisher exact p ~ 0.22 — **not significant**, and the arms are not perfectly
+matched (the backup DLL predates `e439374`, so it lacks the `[eq-wl]`
+banner). The stronger argument is structural: the only code this merge
+changed is `atsc_equalizer_long_impl.{cc,h}`, and on the `STVT_EQ=wl` replay
+path `atsc_equalizer_long` **is never even instantiated** — nothing merged
+can reach the front end's timing loop. The signature (deterministic input,
+nondeterministic all-or-nothing outcome, free-run at exactly the sample
+rate) points at work-call-boundary state in
+`atsc_wl_frontend_impl::general_work`, which has been there since
+2026-07-27. `tv_dual.py`, which drives the same block, has never shown it
+(0/14 here, plus every historical `lab/wl_v3` run).
+**Consequence: `STVT_EQ=wl` needs a lock watchdog before it goes anywhere
+user-facing.** Filed here, not fixed — fixing it is DSP surgery, not a merge.
+
+**(b) The volk non-reproducibility law extends to the WL path too.** §1 and
+`lab/wl_v3/WORKLOG.md` recorded it for `atsc_equalizer_long` only, and wl_v3
+explicitly said "WL is not affected (its taps/window happen to land
+stably)". Not so: 15 identical unified WL runs gave three distinct TS md5s
+(`af9769a6...` x12, `d8b4f370...` x2, `55eb2faa...`), and the pre-merge
+build gave three as well (`af9769a6...`, `55eb2faa...`, `bf5ffb10...`). The
+`AF9769A6...` gate hash is the *modal* value, not an invariant. Frames
+remain the gate for both equalizers.
+
+## 11.6 A new build gotcha, learned the hard way
+
+`_install.bat` invoked as `cmd /c "_install.bat"` **from Git Bash** does
+nothing at all — bash hands cmd an argument it drops, cmd opens an
+interactive prompt, returns 0, and the *stale* module stays installed. This
+silently produced 15 "unified" measurements that were actually running the
+pre-merge DLL. Invoke it from PowerShell with an absolute path:
+
+```powershell
+& cmd /c "Z:\src\magic-tv-decoder\gr-atscplus\_install.bat"
+```
+
+and **always confirm the installed md5 afterwards** — this is the
+`gr_atscplus_build_install_gotcha` wearing a new hat.
+
+## 11.7 REVERT PATH — how to get back to either parent
+
+| want | do |
+|---|---|
+| **the WL parent build** (`stvt-2.0-wl`) | `git checkout stvt-2.0-wl` then `_rebuild.bat` + `_install.bat` (from PowerShell, verify md5) |
+| ...without a rebuild | restore `<scratchpad>/atscplus_wl_installed_backup/` (DLL -> `%RADIOCONDA%\Library\bin\`, module dir -> `%RADIOCONDA%\Lib\site-packages\gnuradio\atscplus\`). NOTE: that backup is the **47d419f** build — WL v3 complete, but no `[eq-wl]` build banner. DLL md5 `b839d3721996c98d...` |
+| **the speed-1 parent build** | `git checkout speed-1` then `_rebuild.bat` + `_install.bat` |
+| ...without a rebuild | restore `<scratchpad>/atscplus_speed1_installed_backup/` (taken this session, the exact speed-1 binaries). DLL md5 `5d6b5d8199b5acf0...` |
+| **the unified build again** | `git checkout stvt-2.0-wl-speed` + rebuild/install. DLL md5 `54359c27a67014c2...`, pyd md5 `2e80d2da48a754ac...` |
+| **the uncommitted tv_live hardening alone** | still preserved as `stash@{0}` (applied, never popped) |
+| **plain main-universal** | `git checkout main-universal` + rebuild/install |
+
+The runtime revert knobs of §10 all still apply unchanged
+(`STVT_PERSIST_RETUNE_CACHE=0`, `STVT_EQ_CACHE_EVERY=1024`,
+`STVT_SCAN_FAST=0`, `STVT_PILOT_OFFSET_HZ=-2690000`, recycling off by
+default, `STVT_WL_SHRINK` off by default, `STVT_WL_FUSED=0` for the legacy
+WL companion path). **Nothing in this merge changes a default** — the
+default viewing path is still `STVT_EQ=long` with recycling and shrinkage
+off.
+
+## 11.8 State left behind
+
+* Installed gr-atscplus = the **unified** build (md5s above).
+* Branch `stvt-2.0-wl-speed` committed locally, **not pushed**. Parents
+  `stvt-2.0-wl` and `speed-1` untouched.
+* Panel health: the radio panel on **:8643** was up throughout and still
+  serves — `/api/band` and `/api/state` both answer with full payloads. It
+  does not link gr-atscplus, so the install could not disturb it, and it was
+  not restarted. The **TV panel on :8642 was NOT running** at any point in
+  this session (nothing listening on the port), so there was nothing to
+  restart; start it the usual detached way when you want to drive the
+  unified build.
+* No SDR access of any kind. `radio_lock` never taken.
