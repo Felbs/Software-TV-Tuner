@@ -12,6 +12,12 @@ Every pattern below is copied verbatim from the tool that owns it:
   tools/stvt_docs_guard.py      the four contract tags (run separately)
 
 Usage: python lab/speed_build/telemetry_check.py <chain.log> [more logs...]
+
+NOTE (2026-07-29) — this script gates TELEMETRY, not the decode. For the decode
+itself, `lab/gate_lib.py` is the only valid gate: no path in this tree is
+bit-reproducible across processes (volk picks its dot-product kernel from the
+runtime pointer alignment), so a single-run md5 comparison is a coin flip. Use
+`replay_bench.py --gate --runs 5` or `gate_lib.gate()`, never one hash.
 """
 from __future__ import annotations
 
@@ -35,16 +41,30 @@ RE_DUAL_LONG = re.compile(
     r"\[eq-long t=\s*([\d.]+)s\] fs=(\d+) fs_err_rms=([\d.]+)")
 
 # name -> (pattern, required?)  required = the dial goes dark without it
+#: name, pattern, required?, and the BLOCK whose presence in the graph the check
+#: depends on (None = every chain has it). A pattern cannot possibly match a log
+#: whose flowgraph never instantiated the emitting block, and reporting that as
+#: a BREAK is a false alarm — it cost a chunk of the 2026-07-29 gate run.
 CHECKS = [
-    ("panel RE_FS (the MER dial)", RE_FS, True),
-    ("panel RE_FPLL (in_rms / max|x|)", RE_FPLL, True),
-    ("panel RE_RS5 (loss %)", RE_RS5, False),
-    ("panel RE_CIR (echo viewer)", RE_CIR, False),
-    ("panel rs_turbo (rescue counter)", RE_TURBO, False),
-    ("quality_tuner RELOCKS_RE", RELOCKS_RE, True),
-    ("quality_tuner ALIGNED_RE", ALIGNED_RE, True),
-    ("tv_dual _RE_LONG (paired MER series)", RE_DUAL_LONG, True),
+    ("panel RE_FS (the MER dial)", RE_FS, True, None),
+    ("panel RE_FPLL (in_rms / max|x|)", RE_FPLL, True, None),
+    ("panel RE_RS5 (loss %)", RE_RS5, False, None),
+    ("panel RE_CIR (echo viewer)", RE_CIR, False, None),
+    ("panel rs_turbo (rescue counter)", RE_TURBO, False, None),
+    ("quality_tuner RELOCKS_RE", RELOCKS_RE, True, "sync_soft"),
+    ("quality_tuner ALIGNED_RE", ALIGNED_RE, True, "sync_soft"),
+    ("tv_dual _RE_LONG (paired MER series)", RE_DUAL_LONG, True, "eq_long"),
 ]
+
+#: how to tell from the log itself which blocks this flowgraph actually had
+PRESENCE = {
+    # atsc_sync_soft prints its banner whenever it is CONSTRUCTED. tv_dual.py
+    # never constructs it (it uses the fused atsc_wl_frontend), so its logs
+    # legitimately carry no sync_soft telemetry at all.
+    "sync_soft": lambda t: "sync_soft" in t,
+    # atsc_equalizer_long is not instantiated on the STVT_EQ=wl replay path.
+    "eq_long": lambda t: "[eq-long" in t,
+}
 
 
 def main():
@@ -56,14 +76,23 @@ def main():
         p = Path(arg)
         txt = p.read_text(errors="replace")
         print(f"\n=== {p.name} ({len(txt)} bytes) ===")
-        for name, rx, required in CHECKS:
+        for name, rx, required, needs in CHECKS:
             hits = rx.findall(txt)
-            state = "OK " if hits else ("BREAK" if required else "absent")
-            if not hits and required:
+            present = (needs is None) or PRESENCE[needs](txt)
+            if hits:
+                state = "OK "
+            elif required and present:
+                state = "BREAK"
                 bad += 1
+            elif required and not present:
+                state = " n/a "     # block not in this flowgraph — cannot break
+            else:
+                state = "absent"
             sample = ""
             if hits:
                 sample = f"  first={hits[0]!r}  n={len(hits)}"
+            elif state == " n/a ":
+                sample = f"  ({needs} not in this flowgraph)"
             print(f"  [{state:>6}] {name}{sample}")
         # day_program_729's in_rms extraction (a split(), not a regex)
         rms = None
@@ -79,7 +108,9 @@ def main():
         # speed-1's own additive lines — informational, nothing parses them yet
         for tag in ("[eq-long] WARM START", "[eq-long] COLD START",
                     "[eq-long] DATA RECYCLING", "cache persisted on stop",
-                    "SHERIFF cmd"):
+                    "SHERIFF cmd",
+                    # 2026-07-29 acquisition watchdog (WL path only, additive)
+                    "[wl_front WD FINAL]", "[wl_front wd]"):
             n = txt.count(tag)
             if n:
                 print(f"  [  new ] {tag}: {n}")

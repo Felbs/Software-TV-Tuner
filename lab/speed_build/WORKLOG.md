@@ -531,3 +531,167 @@ off.
   restart; start it the usual detached way when you want to drive the
   unified build.
 * No SDR access of any kind. `radio_lock` never taken.
+
+---
+
+# 12. THE TWO ROBUSTNESS JOBS (2026-07-29 late) — branch `stvt-2.0-wl-speed`
+
+Both items §11.5 filed as "recorded, not fixed" are now closed. CPU/build only:
+a balloon hunt (`wxTuna sonde_rx.py hunt --mhz 405.5`, alive all session) owned
+the SDR, so **no radio was touched and `radio_lock` was never taken.** Every
+number below is offline replay.
+
+## 12.1 §11.5(a) — the WL lock failure is a MEMORY BUG, and it is fixed
+
+Full log: **`lab/wl_watchdog/WORKLOG.md`**. Short version:
+
+* It would not reproduce on an idle box (0/40 sequential). Under real CPU
+  contention (8 parallel harnesses) it did: **1/64**. The trigger is what else
+  the machine is doing — because the trigger is heap CONTENTS, not the signal.
+* The failing run's own telemetry solved it: `peak=-nan rms=-nan` from the FIRST
+  debug print, while the FPLL's `out_rms=4.8` stayed finite for the whole 15 s.
+  So the input was clean and the NaN was manufactured inside the block — in the
+  one thing it computes before touching a sample: its interpolator taps table.
+* **ROOT CAUSE:** GR 3.10.12's `kernel::fir_filter_fff::filter()` rounds the
+  input pointer DOWN to volk's alignment and dot-products `ntaps + al` floats
+  from there, relying on the leading `al` values being multiplied by ZERO taps.
+  `0 * NaN = NaN`. The fused block probed it with a bare `std::vector<float>(8)`
+  off the recycled C++ heap (MSVC 16 B aligned, so `al == 4` about half the
+  time), so when the 16 bytes before that allocation happened to hold a NaN/Inf
+  pattern, **every** entry of the table came out NaN. GR's own callers always
+  pass a pointer into a zero-filled GR buffer, which is why nothing upstream
+  ever saw it — and why `atsc_sync_soft` (which passes `&in[d_si]`) is immune.
+* Then `d_mu` goes NaN, `(int)std::floor(NaN)` is INT_MIN, the `d_incr < 1`
+  clamp pins `d_incr` at **1 forever**, and the block advances one input SAMPLE
+  per output symbol: 242 150 000 / 832 = **291 044** — the exact number
+  §11.5(a) recorded, and the reason it is exactly the SPS ratio.
+* **PROVED, not inferred:** `STVT_WL_PROBE_DIAG=1` puts a NaN in the floats
+  before a deliberately misaligned probe pointer and reports
+  `poison_makes_nan=1` on this build of GR; and `STVT_WL_INJECT_NAN=99`
+  reproduces the field signature to within 2 segments (`291042` / `0.00 %` /
+  `relocks=0` / `fs=0` / 0-byte TS).
+* **FIX:** probe through the middle of a zero-filled buffer with 64 floats of
+  padding on both sides. Taps VALUES are unchanged whenever the old code
+  happened to work (`0*finite == 0*0 == 0`), and the post-fix WL decode is
+  telemetry- and hash-identical to the pre-fix one.
+
+### The watchdog (added anyway — defence in depth)
+
+One integer comparison per SEGMENT, gated on `d_fs_accepted == 0` so a healthy
+stream never enters it (first field sync lands at **seg 135**, reproducibly, in
+all 104 healthy runs; the window is 1252 segments = 4 fields = 2x that, with
+margin). Bounded at `STVT_WL_WD_MAX` (default 4) resets, each logged, then ONE
+loud `GIVING UP`; explicit success condition logged as
+`RECOVERED ... standing down`. Each reset also RE-PROBES the taps table, so the
+historical failure is now self-healing: the injected-fault run decoded
+**36 159 168 bytes** instead of 0, losing 1491 segments (~0.14 s).
+
+`[wl_front FINAL]` keeps its exact historical format; the watchdog adds a
+separate `[wl_front WD FINAL]` line (plus the new `first_align_seg` /
+`first_fs_seg` acquisition-latency numbers nobody had before). Knobs:
+`STVT_WL_WD`, `STVT_WL_WD_SEGS`, `STVT_WL_WD_MAX`, and the two test-only ones.
+
+### FAILURE RATE, before vs after
+
+| build | batch | runs | failures |
+|---|---|---:|---:|
+| pre-fix DLL `54359c27` | sequential, idle | 40 | 0 |
+| pre-fix | 8-way parallel, contended | 64 | **1** |
+| pre-fix (7/29 earlier session) | mixed load | 39 | **2** |
+| **post-fix DLL `cac54ce0`** | 8-way parallel, contended | **64** | **0** |
+| **post-fix** | sequential | **40** | **0** |
+
+Pre-fix pooled **3/143 (2.1 %)**, post-fix **0/104**. Fisher p ~ 0.09 — the
+statistics alone are suggestive, not conclusive; the load-bearing evidence is the
+proved mechanism plus the injected-fault reproduction.
+
+## 12.2 §11.5(b) — the measurement methodology is now honest
+
+**`lab/gate_lib.py`** is the new single home of the law and the valid gate.
+
+| call | does |
+|---|---|
+| `replay_multi(iq, tag, env, runs=5, ...)` | N identical `tv_replay.py` (or `tv_dual.py`) runs -> `[RunRow]` (md5, ffmpeg-null-sink frames, wall, bytes, parsed extras) |
+| `hash_stats(rows)` / `frame_stats(rows)` | modal hash + full counted set + reproducibility flag; frame median / range / spread |
+| `gate(rows, expect_md5=<set>, expect_frames=N, frame_tol=2)` | PASSES on **modal-hash-in-the-known-set OR frame-median-within-tolerance**; always renders the whole hash set |
+| `control_ok(rows_a, rows_b, frame_tol)` | two run-sets that must be the same decode: modal agreement, else hash-set overlap, else frame-median agreement |
+| `render(res)` | the printable evidence block |
+| `SingleRunGateError` | **raised for fewer than 3 runs** unless `allow_single_run="<why>"` — this is what makes the invalid test hard to use by accident |
+| `KNOWN`, `EXPECT_FRAMES` | growing registry of hashes/frames this tree has legitimately produced (8-char prefixes supported, because that is all some worklogs recorded) |
+| `DETERMINISTIC_ENV` / `DETERMINISTIC_REF` | the test-only `VOLK_GENERIC=1` knob (below) |
+
+Wired in:
+
+* **`lab/wl_v3/sweep.py`** — its `control_ok = (lm == base_long_md5)` WAS the
+  invalid test, and it was producing false alarms. Now every arm's `long` leg is
+  collected (the WL knobs cannot reach it, so the arms ARE repeated runs of one
+  control) and judged as a set. Proof it mattered: 3 identical rf34cliff runs
+  gave **3 distinct hashes** and 3 rf34clean runs gave 2 — the old test would
+  have marked those rows VOID.
+* **`lab/speed_build/replay_bench.py`** — new `--gate --runs N --expect-frames
+  --expect-md5 (repeatable) --frame-tol`; exits non-zero on failure and REFUSES
+  to judge fewer than 3 runs.
+* **`lab/speed_build/telemetry_check.py`** — docstring now points at gate_lib and
+  states plainly that a single-run md5 is not a gate; it also counts the new
+  watchdog lines.
+
+### The hash set is OPEN-ENDED — measured again today
+
+| path / capture | hashes seen | frames |
+|---|---|---|
+| `long` rf34_ctrl | `F1F867C5` x3, `92D014CD`, `3D8C11EE` in **5** runs — `92D014CD` is NEW today, a 4th value | 403 x5 |
+| `wl` rf34_ctrl | `AF9769A6` x39, `BF5FFB10` x1 in **40** runs | 403 |
+| `long` rf34+AWGN knee | **3 distinct in 3 runs** | 133 / 132 / 131 |
+| `long` rf7_marg | **3 distinct in 3 runs** | 251 / 250 / 251 |
+| `long` rf9_marg | **3 distinct in 3 runs** | 111 / 114 / 112 |
+
+**New sub-law: the FRAME COUNT is not reproducible to +-2 on marginal captures
+either.** Measured spread on the `long` control leg: clean 0, rf7 1, knee 2,
+**rf9 3** (and §11.4-era 5 over 5 runs at the knee). The first run of the new
+pooled control used a tolerance of 2 and manufactured a VOID on rf9 — corrected
+to a measured default of 4 (`--ctl-frame-tol`).
+
+### Deterministic volk for TESTS: it works
+
+volk 3.2.0 honours `VOLK_GENERIC=1` (and `VOLK_CONFIGPATH`; both appear in the
+DLL's strings). Forcing the plain-C kernels removes the alignment-dependent
+summation order entirely:
+
+| arm | 3 runs | wall/run vs SIMD |
+|---|---|---|
+| `STVT_EQ=long` + `VOLK_GENERIC=1` | **3/3 identical** -> `F1F867C5567B33721684F4FBF7C423BB`, the documented MODAL hash | 27.8 s vs 15.5 s (1.8x) |
+| `STVT_EQ=wl` + `VOLK_GENERIC=1` | **3/3 identical** -> `D8B4F370...`, a member of the recorded WL set | 25.3 s vs 15.7 s (1.6x) |
+
+So a bit-exact comparison IS available at ~1.7x cost, as an env var with no
+global side effect (no `~/.volk/volk_config` write). Recorded as
+`gate_lib.DETERMINISTIC_ENV`, **test-only, never a default** — it costs speed,
+and a change that only altered the SIMD summation order would slip past a
+generic-only test. It is a bisecting tool, not the gate.
+
+## 12.3 Gates re-run after the change
+
+| gate | result |
+|---|---|
+| **G1 default path** (`STVT_EQ=long`, 5 runs, gate_lib) | **PASS** — frames 403 x5 (median 403, spread 0); modal `F1F867C5` in the known set; converge_field 210 in all 5 = the §1 baseline exactly |
+| **G2 WL numbers** (`tv_dual` via wl_v3/sweep, 3 repeats x 4 captures) | rf34 clean **403/403**; knee long 131-133 / **WL 227-229**; rf7 long 250-251 / **WL 255-256**; rf9 long 111-114 / **WL 350-351** — every WL value on or within 1 frame of its recorded band (403 / 226-230 / 257 / 348-350). `imag_frac`, benefit and kappa reproduce to 3 decimals. |
+| **G3 front-end telemetry unchanged** (104 post-fix WL runs) | `segs_emitted=194030`, `aligned 99.99 %`, `relocks=33`, `fs accepted=620`, `first_fs_seg=135`, TS 36 335 136 B — **identical in all 104** |
+
+The rf9 WL band widens to **348-351** and rf7's WL sits at 255-256 against a
+recorded 257: both inside the frame-noise floor measured above, and both
+recorded here rather than quietly rounded.
+
+## 12.4 State left behind
+
+* Installed gr-atscplus = DLL md5 **`CAC54CE0CBE637B742B9ADA915C487D5`**, pyd
+  `2E80D2DA48A754ACA276844FEB6AA0F9` (bindings unchanged — the entire change is
+  C++ inside the DLL). Previous unified build was `54359C27...`.
+* **No default changed.** The watchdog lives only in `atsc_wl_frontend`, which
+  the default `STVT_EQ=long` viewing path never instantiates; it is enabled but
+  strictly inert unless a stream has failed to frame at all.
+* Still owed before any WL user-facing promotion: the **live OsO==0 gate**
+  (`drizzle_wave_interferer`). This session had no radio access.
+* `lab/wl_watchdog/front_in_{r,i}.f32` (185 MB each) are gitignored — regenerate
+  with `dump_front_in.py`.
+* The `0 * NaN` hazard is in GNU Radio itself; every GR block that probes
+  `fir_filter::filter()` with a heap array is exposed. That is an upstream bug
+  report, not a change to make inside this tree.

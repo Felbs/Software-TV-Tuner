@@ -270,6 +270,23 @@ held — but any conclusion about `long` drawn from a +-2-frame difference acros
 processes is inside the noise. WL is not affected (its taps/window happen to
 land stably), which is luck, not design.
 
+> **CORRECTION 2026-07-29 (evening) — "WL is not affected" is WRONG, and the
+> single-run hash gate is INVALID for both equalizers.** 15 identical WL runs
+> gave three distinct TS md5s (`AF9769A6...` x12, `D8B4F370...` x2,
+> `55EB2FAA...`); a 40-run repeat added `BF5FFB10...`, and the `long` path has
+> now shown a fourth (`92D014CD...`) as well. The known hash SET is open-ended
+> for both. The law and the valid replacement gate now live in
+> **`lab/gate_lib.py`** (multi-run modal hash + frame median/spread), and this
+> file's own control test was rebuilt on it — see §6 below. Also measured: at the
+> AWGN knee the `long` leg's FRAME COUNT is not reproducible to +-2 either
+> (131 / 132 / 133 over three identical runs), so cliff comparisons need a
+> wider tolerance than clean ones.
+>
+> One thing DID become bit-reproducible: `VOLK_GENERIC=1` (volk 3.2.0) forces the
+> plain-C kernels, and 3/3 runs match exactly — `long` -> `F1F867C5...` (the
+> documented modal hash), `wl` -> `D8B4F370...`. Cost 1.6-1.8x wall time, so it
+> is a TEST-ONLY bisecting knob (`gate_lib.DETERMINISTIC_ENV`), never a default.
+
 ## 4. Gates
 
 - **Default path bit-identity**: `tv_replay STVT_EQ` unset/long on rf34_ctrl ->

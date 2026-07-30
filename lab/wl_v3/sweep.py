@@ -81,17 +81,50 @@ def main():
     ap.add_argument("--captures", default="rf34clean,rf34cliff")
     ap.add_argument("--arms", default="v2,g05,g10")
     ap.add_argument("--diag", action="store_true")
+    ap.add_argument("--repeats", type=int, default=1,
+                    help="repeat every (capture, arm) N times. The control "
+                         "verdict needs >=3 samples of the `long` leg per "
+                         "capture (gate_lib.MIN_RUNS) — with 3+ arms the arms "
+                         "themselves supply them; with fewer, raise this.")
+    # MEASURED volk noise floor on the `long` control leg, 3 identical runs per
+    # capture, 2026-07-29: rf34clean spread 0, rf7 1, rf34cliff 2, rf9 3
+    # (and lab/wl_v3/WORKLOG §3 saw 5 over 5 runs at the knee). The control
+    # tolerance must therefore be >= 4 or it manufactures false VOIDs on
+    # marginal captures — the first run of this gate did exactly that on rf9.
+    ap.add_argument("--ctl-frame-tol", type=int, default=4,
+                    help="frame spread the `long` control leg is allowed across "
+                         "identical runs (default 4 = the measured volk noise "
+                         "floor on marginal captures)")
     a = ap.parse_args()
+
+    sys.path.insert(0, str(REPO / "lab"))
+    from gate_lib import RunRow, control_ok, hash_stats, frame_stats, MIN_RUNS
 
     rows = []
     for cap in a.captures.split(","):
+        # ── THE CONTROL, done validly (2026-07-29) ────────────────────────
+        # The `long` leg is the same computation in every arm (the WL knobs
+        # cannot reach it), so the arms ARE repeated runs of one control. The
+        # old test — `lm == the first arm's md5` — was the invalid single-run
+        # hash comparison: NEITHER equalizer is bit-reproducible across
+        # processes (volk kernel choice by pointer alignment; see
+        # lab/gate_lib.py THE LAW). It passed by luck whenever both runs drew
+        # the modal hash. Now every arm's long leg is COLLECTED and judged
+        # together, on the modal hash and the frame median.
         base_long_md5 = None
+        ctl_rows: list = []
         for arm in a.arms.split(","):
+          for rep in range(a.repeats):
             r = run(cap, arm, a.diag)
             lm = r.get("long", {}).get("md5")
             if base_long_md5 is None:
                 base_long_md5 = lm
-            r["control_ok"] = (lm == base_long_md5)
+            # kept for the ledger, but it is NOT the verdict any more
+            r["long_md5_equals_first_arm"] = (lm == base_long_md5)
+            ctl_rows.append(RunRow(tag=f"{cap}_{arm}", run=rep,
+                                   md5=(lm or "").upper(),
+                                   frames=r.get("long", {}).get("frames", 0)))
+            r["control_ok"] = True   # provisional; the pooled verdict follows
             rows.append(r)
             t = r.get("telemetry", {})
             p = t.get("paired") or {}
@@ -103,7 +136,27 @@ def main():
                   f"ben {str((t.get('imag_benefit') or {}).get('mean')):>8}  "
                   f"kap {str((t.get('kappa') or {}).get('mean')):>7}  "
                   f"MERwl_p10 {str(mw.get('p10')):>7} MERlong_p10 {str(ml.get('p10')):>7}  "
-                  f"ctl {'OK' if r['control_ok'] else 'VOID'}", flush=True)
+                  f"long_md5 {(lm or '')[:8]}", flush=True)
+
+        # ── the pooled control verdict for this capture ────────────────────
+        hs, fs = hash_stats(ctl_rows), frame_stats(ctl_rows)
+        if len(ctl_rows) < MIN_RUNS:
+            verdict = (f"CONTROL UNDECIDED — only {len(ctl_rows)} sample(s) of "
+                       f"the `long` leg; a hash claim needs >= {MIN_RUNS} "
+                       f"(use --repeats or more arms). {hs} | {fs}")
+            ok = None
+        else:
+            ok, why = control_ok(ctl_rows, ctl_rows,
+                                 frame_tol=a.ctl_frame_tol)
+            ok = ok and fs.spread <= a.ctl_frame_tol
+            verdict = (f"CONTROL {'OK' if ok else 'VOID'} "
+                       f"(tol {a.ctl_frame_tol}) — {hs} | {fs}")
+        print(f"  [{cap}] {verdict}", flush=True)
+        for r in rows:
+            if r.get("capture") == cap:
+                r["control_ok"] = ok
+                r["control_verdict"] = verdict
+                r["control_hashes"] = hs.counts
     (OUT / "sweep_summary.json").write_text(json.dumps(rows, indent=2))
 
 
