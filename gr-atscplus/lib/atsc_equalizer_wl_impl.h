@@ -10,6 +10,7 @@
 #include <gnuradio/atscplus/atsc_equalizer_wl.h>
 #include <gnuradio/dtv/atsc_consts.h>
 #include <gnuradio/gr_complex.h>
+#include <string>
 #include <vector>
 
 namespace gr {
@@ -113,6 +114,20 @@ private:
     float d_fs_err_rms = 0.0f;  // field-sync error rms => MER = 20 log10(5/err)
     unsigned long long d_fs_count = 0;
 
+    // ── warm-start tap cache (2026-07-30, ported from atsc_equalizer_long) ──
+    // Own magic ('TAPW') and own file (long's path + ".wl") so the two
+    // equalizers keep INDEPENDENT warm starts and can never adopt each other's
+    // taps. Inert unless STVT_EQ_TAP_CACHE_FILE is set.
+    std::vector<gr_complex> d_w1_lkg;   // last-known-good main branch
+    std::vector<gr_complex> d_w2_lkg;   // last-known-good conjugate branch
+    bool d_lkg_valid = false;
+    unsigned long long d_last_cache_save_fs = 0;
+
+    static std::string cache_path();
+    bool cache_load();
+    bool cache_save();
+    void reset_to_delta();
+
     void fold_taps();
     void filterN(const float* inr, const float* ini, float* out, int nsamples);
     void adaptN(const gr_complex* in, const float* training, float* out, int nsamples);
@@ -120,6 +135,9 @@ private:
 public:
     atsc_equalizer_wl_impl();
     ~atsc_equalizer_wl_impl() override;
+
+    // Persist the warm-start cache on a clean shutdown.
+    bool stop() override;
 
     std::vector<float> taps() const override;
     std::vector<float> data() const override;

@@ -25,8 +25,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
-#define ATSC_EQ_WL_BUILD "2026-07-29"
+#define ATSC_EQ_WL_BUILD "2026-07-30"
 
 namespace gr {
 namespace atscplus {
@@ -55,6 +56,102 @@ static void init_field_sync_common(float* p, int mask)
         p[i++] = bin_map(atsc_pn63[j] ^ mask);
     for (int j = 0; j < 63; j++) // PN63
         p[i++] = bin_map(atsc_pn63[j]);
+}
+
+// ── warm-start tap cache for the WIDELY-LINEAR filter (2026-07-30) ──────────
+// Ported from atsc_equalizer_long, which had this and WL did not — measured
+// consequence (7/29-30): warm start reaches first field sync at segment 21 vs
+// 202 cold (~9.3x faster acquisition), so before this existed, choosing WL
+// THREW AWAY the warm-start win and STVT's two flagship features were mutually
+// exclusive.
+//
+// WL stores TWO complex branches (w1 for x, w2 for x*), so the payload and the
+// magic differ from long's 'TAPC' single real bank. The cache also lives in its
+// OWN file — long's path with ".wl" appended — so the two equalizers keep
+// independent warm starts and a user switching between them never hands one
+// equalizer the other's taps. A magic/size mismatch simply fails the load and
+// falls back to the delta init, so a stale or foreign file is harmless.
+//
+// Nothing here runs unless STVT_EQ_TAP_CACHE_FILE is set: an install with no
+// cache directory behaves exactly as it did before this existed.
+std::string atsc_equalizer_wl_impl::cache_path()
+{
+    const char* base = std::getenv("STVT_EQ_TAP_CACHE_FILE");
+    if (!base || !*base)
+        return std::string();
+    return std::string(base) + ".wl";
+}
+
+bool atsc_equalizer_wl_impl::cache_load()
+{
+    const std::string path = cache_path();
+    if (path.empty())
+        return false;
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f)
+        return false;
+    bool adopted = false;
+    uint32_t magic = 0, n = 0;
+    if (std::fread(&magic, 4, 1, f) == 1 && std::fread(&n, 4, 1, f) == 1 &&
+        magic == 0x54415057u /* 'TAPW' */ && n == (uint32_t)NTAPS) {
+        std::vector<gr_complex> t1(NTAPS), t2(NTAPS);
+        if (std::fread(t1.data(), sizeof(gr_complex), NTAPS, f) == (size_t)NTAPS &&
+            std::fread(t2.data(), sizeof(gr_complex), NTAPS, f) == (size_t)NTAPS) {
+            // Same vetting long uses: every coefficient finite, and total energy
+            // inside a sane window so a corrupt file cannot poison the filter.
+            double e = 0.0;
+            bool fin = true;
+            for (int k = 0; k < NTAPS && fin; k++) {
+                if (!std::isfinite(t1[k].real()) || !std::isfinite(t1[k].imag()) ||
+                    !std::isfinite(t2[k].real()) || !std::isfinite(t2[k].imag())) {
+                    fin = false;
+                    break;
+                }
+                e += (double)std::norm(t1[k]) + (double)std::norm(t2[k]);
+            }
+            if (fin && e > 0.01 && e < 50.0 * 50.0) {
+                d_w1 = t1;
+                d_w2 = t2;
+                d_w1_lkg = t1;
+                d_w2_lkg = t2;
+                d_lkg_valid = true;
+                fold_taps();          // refresh the folded d_a/d_b we filter with
+                std::fprintf(stderr,
+                             "[eq-wl] WARM START from %s (|w|=%.3f)\n",
+                             path.c_str(), std::sqrt(e));
+                adopted = true;
+            }
+        }
+    }
+    std::fclose(f);
+    return adopted;
+}
+
+bool atsc_equalizer_wl_impl::cache_save()
+{
+    const std::string path = cache_path();
+    if (path.empty() || !d_lkg_valid)
+        return false;
+    const std::string tmp = path + ".tmp";
+    std::FILE* f = std::fopen(tmp.c_str(), "wb");
+    if (!f)
+        return false;
+    const uint32_t magic = 0x54415057u, n = (uint32_t)NTAPS;
+    std::fwrite(&magic, 4, 1, f);
+    std::fwrite(&n, 4, 1, f);
+    std::fwrite(d_w1_lkg.data(), sizeof(gr_complex), NTAPS, f);
+    std::fwrite(d_w2_lkg.data(), sizeof(gr_complex), NTAPS, f);
+    std::fclose(f);
+    std::remove(path.c_str());
+    return std::rename(tmp.c_str(), path.c_str()) == 0;
+}
+
+void atsc_equalizer_wl_impl::reset_to_delta()
+{
+    d_w1.assign(NTAPS, gr_complex(0.0f, 0.0f));
+    d_w2.assign(NTAPS, gr_complex(0.0f, 0.0f));
+    d_w1[NPRETAPS] = gr_complex(1.0f, 0.0f);
+    fold_taps();
 }
 
 atsc_equalizer_wl_impl::atsc_equalizer_wl_impl()
@@ -122,9 +219,25 @@ atsc_equalizer_wl_impl::atsc_equalizer_wl_impl()
     std::memset(d_win_i, 0, sizeof(d_win_i));
     std::memset(d_cwin, 0, sizeof(d_cwin));
     std::memset(data_mem2, 0, sizeof(data_mem2));
+
+    // WARM START: adopt cached taps for this antenna+channel if we have them.
+    // Last, so it overrides the delta init above; silently does nothing when
+    // STVT_EQ_TAP_CACHE_FILE is unset or the file is absent/stale/foreign.
+    cache_load();
 }
 
 atsc_equalizer_wl_impl::~atsc_equalizer_wl_impl() {}
+
+// A clean shutdown may land between periodic persist ticks, so write on stop
+// too — otherwise a short visit to a channel never banks anything and the next
+// visit starts cold. No-op without a configured cache path.
+bool atsc_equalizer_wl_impl::stop()
+{
+    if (cache_save())
+        std::fprintf(stderr, "[eq-wl] cache persisted on stop: %s\n",
+                     cache_path().c_str());
+    return true;
+}
 
 // Fold the complex widely-linear taps into the two REAL vectors of the fused
 // filter form (see header). Exact algebra, refreshed after every adaptation.
@@ -266,6 +379,36 @@ void atsc_equalizer_wl_impl::adaptN(const gr_complex* in,
         e2 += std::norm(d_w2[j]);
     }
     d_conj_frac = static_cast<float>(e2 / (e1 + e2 + 1e-12));
+
+    // ── warm-start cache: bank a LAST-KNOWN-GOOD, then persist periodically ──
+    // Only snapshot when this field actually decoded well, so a cache can never
+    // record a diverged filter and hand it to the next tune as a "warm start".
+    // err < 1.0 is MER = 20*log10(5/err) > ~14 dB, i.e. at or above the
+    // watchability cliff; energy bounds match cache_load()'s vetting so
+    // anything we write is something we would be willing to read back.
+    {
+        const double etot = e1 + e2;
+        if (std::isfinite(d_fs_err_rms) && d_fs_err_rms > 0.0f &&
+            d_fs_err_rms < 1.0f && etot > 0.01 && etot < 50.0 * 50.0) {
+            d_w1_lkg = d_w1;
+            d_w2_lkg = d_w2;
+            d_lkg_valid = true;
+        }
+    }
+    // Our chains die by force-kill, so waiting for stop() alone loses the taps.
+    // Same knob and default as atsc_equalizer_long (0 = only on stop()).
+    static const int CACHE_EVERY = []() -> int {
+        if (const char* p = std::getenv("STVT_EQ_CACHE_EVERY")) {
+            int v = std::atoi(p);
+            if (v >= 0 && v <= 100000) return v;
+        }
+        return 128;
+    }();
+    if (CACHE_EVERY > 0 && d_lkg_valid) {
+        d_last_cache_save_fs++;
+        if ((d_last_cache_save_fs % (unsigned long long)CACHE_EVERY) == 0)
+            cache_save();
+    }
 
     // ── v3: measure what the imaginary (conjugate) plane is actually WORTH ──
     // Post-adaptation, re-run the field sync through the folded filter twice:
