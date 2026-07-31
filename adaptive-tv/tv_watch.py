@@ -737,7 +737,7 @@ def main():
         layout, pay the full-discovery cost once, and reload the player the
         same way the hourly solo-rotation does.
         """
-        nonlocal ex, last_pos, ex_deaths, resyncs
+        nonlocal ex, last_pos, ex_deaths, resyncs, last_cc
         log(f"REBUILD extractor via full discovery ({reason})")
         try:
             cache.pop(key, None)
@@ -769,6 +769,11 @@ def main():
         time.sleep(2)
         seek_live_solo()
         last_pos = None
+        # EIA-608 captions carry no keyframe state: any seek/reload can garble
+        # the caption decoder, and the periodic flush is 8 MINUTES away. Seen
+        # live 2026-07-30 ("CC was fine, then glitched after flipping around").
+        # Pull the next flush to ~6 s from now instead of waiting out the timer.
+        last_cc = time.time() - 474
         ex_deaths = resyncs = 0
     # CAPTION KEEPER (2026-07-21): captions ON by default now; keep the
     # eia_608 CC track selected + visible once the stream settles. The old
@@ -818,6 +823,7 @@ def main():
                 time.sleep(2)
                 seek_live_solo()
                 last_pos = None
+                last_cc = time.time() - 474   # reload garbles 608 — flush soon
                 continue
         except OSError:
             pass
@@ -848,6 +854,7 @@ def main():
                 log(f"RESYNC (stall={stall} eof={eof})")
                 seek_live_solo()
                 stall = 0
+                last_cc = time.time() - 474   # seek garbles 608 — flush soon
         if _cc_want and time.time() - t_start > _cc_delay:
             tl = ipc(["get_property", "track-list"], req=6) or []
             cc = next((t for t in tl if t.get("type") == "sub"
