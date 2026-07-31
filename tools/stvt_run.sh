@@ -23,7 +23,20 @@ set -u
 # instances fight over the SDR and the player, each restarting the other's
 # children. flock is immune to pgrep argv self-match tricks.
 exec 9>/tmp/stvt_run.lock
-flock -n 9 || { echo "another stvt_run.sh holds /tmp/stvt_run.lock — refusing to double-supervise"; exit 1; }
+# LOCK_FD_LEAK (2026-07-31): every child of this script inherits fd 9, so a
+# plain `sleep 20` kept the lock ALIVE for up to 20 s after the supervisor
+# itself was killed. Symptom for a user: stop TV, start TV again straight
+# away, and it silently refuses with the message below and exits 1 —
+# reproduced twice on this Pi. Two independent fixes:
+#   1. `snooze` closes fd 9 in the child (below), so nothing outlives us
+#      holding the lock;
+#   2. wait a bounded 15 s for the lock rather than failing instantly, which
+#      also covers a predecessor that is still shutting down. A genuinely
+#      concurrent supervisor still loses — it just takes 15 s to say so.
+flock -w 15 9 || { echo "another stvt_run.sh holds /tmp/stvt_run.lock — refusing to double-supervise"; exit 1; }
+
+# Sleep without handing the lock fd to the child. Use this, never bare `sleep`.
+snooze(){ sleep "$1" 9>&- ; }
 
 RF="${1:-34}"
 PROG="${2:-3}"
@@ -97,10 +110,24 @@ start_chain(){
   ( cd "$HERE" && setsid python3 tv_live.py --rf "$RF" > "$CLOG" 2>&1 < /dev/null 9>&- & )
   # Pi: chain outranks the nice+10 player stack (passwordless sudo; no-op if absent)
   if [ "$(uname -m)" = "aarch64" ]; then
-    sleep 1
+    snooze 1
     sudo -n renice -n -10 -p "$(pgrep -f "[t]v_live.py" | head -1)" >/dev/null 2>&1 || true
   fi
   log "started chain (RF$RF, lean config)"
+}
+
+# The radio is single-tenant: a replacement chain must never be started while
+# the outgoing one still holds the SDR. SIGINT (never TERM/KILL — those wedge
+# the sdrplay API) and then WAIT for the process to be gone. Measured teardown
+# on this Pi is ~2 s; the 30 s bound is pure insurance.
+stop_chain(){
+  pkill -INT -f '[t]v_live.py' 2>/dev/null
+  for _i in $(seq 1 30); do
+    chain_up || { log "chain stopped in ${_i}s"; return 0; }
+    snooze 1
+  done
+  log "WARNING: chain did not exit 30s after SIGINT — NOT escalating (kill -9 wedges the sdrplay API)"
+  return 1
 }
 
 start_player(){
@@ -122,7 +149,7 @@ print(len(s))' 2>/dev/null || echo 0
 restarts=0
 log "=== stvt_run starting (RF$RF, prog $PROG) ==="
 # Adopt an already-running healthy chain/player instead of restarting them.
-if chain_up; then log "adopting running chain"; else start_chain; sleep 8; fi
+if chain_up; then log "adopting running chain"; else start_chain; snooze 8; fi
 player_up || start_player
 
 while true; do
@@ -131,7 +158,7 @@ while true; do
     restarts=$((restarts+1))
     [ "$restarts" -gt "$MAX_CHAIN_RESTARTS" ] && { log "MAX_CHAIN_RESTARTS hit — giving up (check the SDR)"; exit 1; }
     log "chain DOWN — restart #$restarts"
-    sleep "$COOLDOWN"; start_chain; sleep 10; continue
+    snooze "$COOLDOWN"; start_chain; snooze 10; continue
   fi
 
   # 2. noise drought? (only meaningful once the file has grown a bit)
@@ -141,12 +168,12 @@ while true; do
       restarts=$((restarts+1))
       [ "$restarts" -gt "$MAX_CHAIN_RESTARTS" ] && { log "MAX_CHAIN_RESTARTS hit — giving up"; exit 1; }
       log "NOISE DROUGHT ($u PIDs) — restart chain #$restarts"
-      pkill -f '[t]v_live.py'; sleep "$COOLDOWN"; start_chain; sleep 10; continue
+      stop_chain; start_chain; snooze 10; continue
     fi
   fi
 
   # 3. player supervisor not running (e.g. it exited when the chain bounced)?
   if ! player_up; then start_player; fi
 
-  sleep 20
+  snooze 20
 done
