@@ -195,10 +195,33 @@ while true; do
   if [ -f "$TS" ] && [ "$(stat -c%s "$TS" 2>/dev/null || echo 0)" -gt 3000000 ]; then
     u=$(unique_pids)
     if [ "$u" -gt "$DROUGHT_PIDS" ]; then
-      restarts=$((restarts+1))
-      [ "$restarts" -gt "$MAX_CHAIN_RESTARTS" ] && { log "MAX_CHAIN_RESTARTS hit — giving up"; exit 1; }
-      log "NOISE DROUGHT ($u PIDs) — restart chain #$restarts"
-      stop_chain; start_chain; snooze 10; continue
+      # DROUGHT CONFIRMATION (2026-07-31). The detector reads the last 2 MB of
+      # live.ts, which at the full mux rate is only ~0.85 s of stream. The
+      # residual errors on a healthy channel are BURSTY, not a steady drip
+      # (measured: 94% of one-second bins completely clean, Fano factor 24),
+      # so a single ordinary RF burst can spike the unique-PID count in that
+      # short window while the chain is perfectly healthy. Restarting on one
+      # sample therefore costs a ~10 s black screen for nothing.
+      #
+      # Evidence from the 2026-07-31 soak: a once-a-minute sampler recorded
+      # 231 unique PIDs at minute 19 and the stream carried on healthily with
+      # no restart, while the supervisor read 233 at minute 46 and restarted.
+      # Same magnitude, opposite outcome — decided purely by poll timing.
+      #
+      # So re-sample before spending a restart. A REAL drought (the chain
+      # locked onto noise) persists for many seconds and still trips this;
+      # only the single-burst false positive is filtered out. This can only
+      # ever make the supervisor restart LESS eagerly.
+      snooze 3
+      u2=$(unique_pids)
+      if [ "$u2" -le "$DROUGHT_PIDS" ]; then
+        log "drought reading ($u PIDs) NOT confirmed ($u2 on re-sample) — no restart"
+      else
+        restarts=$((restarts+1))
+        [ "$restarts" -gt "$MAX_CHAIN_RESTARTS" ] && { log "MAX_CHAIN_RESTARTS hit — giving up"; exit 1; }
+        log "NOISE DROUGHT ($u PIDs, confirmed $u2) — restart chain #$restarts"
+        stop_chain; start_chain; snooze 10; continue
+      fi
     fi
   fi
 
