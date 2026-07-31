@@ -167,6 +167,171 @@ def _linux_usb_checks():
         pass
 
 
+def _sdr_is_busy_with_us():
+    """True if OUR decode chain currently holds the radio.
+
+    A radio in use disappears from enumeration. Reporting that as "no SDR"
+    sends a newcomer hunting for a hardware fault while their television is
+    playing perfectly on the next screen.
+    """
+    try:
+        r = subprocess.run(["pgrep", "-af", "tv_" + "live.py"],
+                           capture_output=True, text=True, timeout=10)
+        return r.returncode == 0 and bool(r.stdout.strip())
+    except Exception:
+        return False
+
+
+def _single_tenant_checks():
+    """The three things that make a working Pi look broken to a newcomer.
+
+    Every one of these was found the hard way on 2026-07-30/31: an overnight
+    run died after 1h13m because the recovery path could not run, and a
+    channel that read as stone dead was one gain setting away. None of them
+    announce themselves - the symptom is always "it just stops working".
+    """
+    if sys.platform == "win32":
+        return
+
+    # ---- 1. can the documented SDR cure actually run? -------------------
+    # tv_live's self-heal restarts the vendor service when the API wedges.
+    # On Linux that needs passwordless sudo for exactly that command. Without
+    # it the cure raises, the supervisor burns its retries, and you get the
+    # 30-restart collapse with no explanation.
+    try:
+        # -l asks "may I run this?" and runs nothing. Testing the EXACT
+        # command matters: a properly narrow sudoers rule grants only the
+        # restart, so probing with is-active would wrongly report failure.
+        r = subprocess.run(["sudo", "-n", "-l", "/bin/systemctl", "restart",
+                            "sdrplay"], capture_output=True, text=True,
+                           timeout=15)
+        if r.returncode == 0:
+            ok("passwordless sudo for the sdrplay service (self-heal can run)")
+        else:
+            raise OSError(r.stderr.strip()[:60] or "sudo refused")
+    except Exception as e:
+        fail("self-heal cannot restart the SDR service without a password "
+             f"({type(e).__name__})",
+             "add a sudoers rule so recovery works unattended:\n"
+             "         echo \"$USER ALL=(root) NOPASSWD: /bin/systemctl restart "
+             "sdrplay, /bin/systemctl is-active sdrplay\" | \\\n"
+             "           sudo tee /etc/sudoers.d/stvt-sdrplay && sudo chmod 440 "
+             "/etc/sudoers.d/stvt-sdrplay\n"
+             "         Without this the documented cure for a wedged SDR fails "
+             "on Linux and a stalled chain cannot recover on its own.")
+
+    # ---- 2. is anything else going to grab the radio? -------------------
+    # ONE SDR, ONE CONSUMER. The panel (~44% CPU) and the network tuner are
+    # both perfectly good software that must not run while a direct chain
+    # does. "stopped" is not enough - "enabled" means they come back at boot.
+    rivals = [("stvt-panel.service", "--user"), ("stvt-hdhr.service", "--user"),
+              ("soapyremote-server.service", "--system")]
+    armed = []
+    for unit, scope in rivals:
+        try:
+            args = ["systemctl"] + (["--user"] if scope == "--user" else [])
+            en = subprocess.run(args + ["is-enabled", unit],
+                                capture_output=True, text=True, timeout=10)
+            act = subprocess.run(args + ["is-active", unit],
+                                 capture_output=True, text=True, timeout=10)
+            state, running = en.stdout.strip(), act.stdout.strip()
+            if running == "active":
+                armed.append(f"{unit} RUNNING NOW")
+            elif state == "enabled":
+                armed.append(f"{unit} enabled (starts at boot)")
+        except Exception:
+            continue
+    if not armed:
+        ok("no rival SDR consumer is running or enabled at boot")
+    else:
+        fail("another process will fight for the single-tenant SDR: "
+             + "; ".join(armed),
+             "this Pi runs ONE radio consumer at a time. Pick a mode:\n"
+             "         TV on this screen ->  systemctl --user disable --now "
+             "stvt-panel stvt-hdhr\n"
+             "         network tuner     ->  use stvt-hdhr, and do not launch a "
+             "direct chain\n"
+             "         Measured cost of ignoring this: 1416 kB/s and 597 CC "
+             "errors with the panel up,\n"
+             "         2384 kB/s and 19 CC errors with it stopped - same signal, "
+             "same code.")
+
+    # ---- 3. tap cache hygiene ------------------------------------------
+    # Warm start is a real win, but the banking gate only looks at the error
+    # residual, and a channel that never locks can sit under that gate. A
+    # poisoned entry teaches the equalizer nonsense on the next tune.
+    #
+    # Measured 2026-07-31: the tap vector CANNOT tell you which is which.
+    # Known-bad taps_AntennaA_rf36 (AM loop at UHF, deaf) reads |taps|=1.531;
+    # known-good taps_AntennaB_rf36 reads 1.521. Peak/norm overlaps too. So
+    # this check reasons about what each antenna can physically hear instead
+    # of pretending the file knows.
+    cache = Path(__file__).resolve().parent / "data" / "tv_live" / "tapcache"
+    if not cache.is_dir():
+        return
+    entries = sorted(cache.glob("taps_*_rf*.bin"))
+    if not entries:
+        return
+
+    def _band(rf):
+        return "UHF" if 14 <= rf <= 36 else "VHF"
+
+    # what each port has actually been measured to receive here
+    DEAF = {("AntennaA", "UHF"): "the AM loop is deaf at UHF",
+            ("AntennaB", "VHF"): "the TV yagi is deaf at VHF",
+            ("AntennaC", "UHF"): "port C does not reach UHF"}
+    suspect = []
+    for f in entries:
+        try:
+            stem = f.stem.split("_")
+            ant, rf = stem[1], int(stem[2].replace("rf", ""))
+        except (IndexError, ValueError):
+            continue
+        why = DEAF.get((ant, _band(rf)))
+        if why:
+            suspect.append(f"{f.name} ({why})")
+    if not suspect:
+        ok(f"tap cache: {len(entries)} warm-start entries, none from a "
+           f"combination this rig cannot hear")
+    else:
+        warn(f"tap cache has {len(suspect)} entry(s) banked from a channel "
+             f"that cannot lock on that port",
+             "; ".join(suspect))
+        print("         these were saved by sessions that never decoded, so "
+              "they warm-start the")
+        print("         equalizer with noise. Delete them:  rm " +
+              " ".join(str(cache / s.split(' ')[0]) for s in suspect[:3]) +
+              (" ..." if len(suspect) > 3 else ""))
+        print("         Real fix (not yet done): stamp the banking fs_err_rms "
+              "into the cache file, so")
+        print("         a future doctor can judge quality instead of inferring "
+              "it from the antenna.")
+
+    # ---- 4. thermal / real-time headroom --------------------------------
+    try:
+        r = subprocess.run(["vcgencmd", "get_throttled"], capture_output=True,
+                           text=True, timeout=10)
+        val = r.stdout.strip().split("=")[-1]
+        if r.returncode == 0 and val.startswith("0x"):
+            bits = int(val, 16)
+            if bits == 0:
+                ok("no thermal throttling or under-voltage recorded")
+            else:
+                notes = []
+                if bits & 0x1:
+                    notes.append("under-voltage NOW")
+                if bits & 0x4:
+                    notes.append("throttled NOW")
+                if bits & 0x50000:
+                    notes.append("throttled/under-volted since boot")
+                warn(f"power or thermal event flagged ({val})",
+                     ", ".join(notes) or "see vcgencmd get_throttled")
+                print("         a throttled Pi drops samples and looks like bad "
+                      "reception. Check the PSU first.")
+    except Exception:
+        pass
+
+
 def main():
     print("=" * 62)
     print("Software TV Tuner - install doctor")
@@ -259,13 +424,20 @@ def main():
                 if _windows_autoheal():
                     pass                       # wedge diagnosed - skip generic advice
                 else:
-                    fail("SoapySDR only sees audio devices (no SDR)",
-                     "three usual causes: (1) another program is USING the "
-                     "SDR right now - busy radios vanish from the list, close "
-                     "other SDR apps; (2) vendor driver missing - Windows: "
-                     "install the SDRplay API v3 / run from a radioconda "
-                     "prompt, Linux: docs/install/linux.md 'SDRplay on "
-                     "Linux'; (3) it's not plugged in (short direct USB)")
+                    if _sdr_is_busy_with_us():
+                        ok("SDR is present but BUSY - our own decode chain "
+                           "holds it (correct while TV is playing)")
+                    else:
+                        fail("SoapySDR only sees audio devices (no SDR)",
+                         "three usual causes: (1) another program is USING the "
+                         "SDR right now - busy radios vanish from the list, close "
+                         "other SDR apps; (2) vendor driver missing - Windows: "
+                         "install the SDRplay API v3 / run from a radioconda "
+                         "prompt, Linux: docs/install/linux.md 'SDRplay on "
+                         "Linux'; (3) it's not plugged in (short direct USB)")
+            elif _sdr_is_busy_with_us():
+                ok("SDR is present but BUSY - our own decode chain holds it "
+                   "(this is correct while TV is playing)")
             else:
                 fail("SoapySDR enumerates zero devices",
                      "plug the SDR in (short direct USB), install its vendor "
@@ -314,6 +486,7 @@ def main():
     # 4. platform notes
     if sys.platform.startswith("linux"):
         _linux_usb_checks()
+    _single_tenant_checks()
     if os.name == "nt":
         api = Path(r"C:\Program Files\SDRplay\API")
         if api.is_dir():
