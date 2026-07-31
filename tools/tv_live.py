@@ -195,9 +195,17 @@ class LiveTVTopBlock(gr.top_block):
                  stream_args: str = ""):
         super().__init__("tv_live")
         freq = rf_to_freq_hz(rf_channel)
+        # HONESTY (2026-07-31): this line printed the CONFIG DEFAULTS while
+        # the code ~60 lines below applied the STVT_* environment overrides
+        # instead, so every Pi launch opened by contradicting itself:
+        #   "Tuning RF 36 ... (antenna=Antenna A, IFGR=59, rfgain_sel=5)"
+        #   "gain knobs: IFGR=40 rfgain_sel=3 antenna=Antenna B"
+        # Anyone debugging a gain or antenna problem read the wrong numbers
+        # first, and the wrong ones came first. Report what is really applied.
         LOG.info(f"Tuning RF {rf_channel} = {freq/1e6:.3f} MHz "
-                 f"(antenna={ATSC_ANTENNA}, IFGR={ATSC_IF_GAIN_REDUCTION}, "
-                 f"rfgain_sel={ATSC_RFGAIN_SEL})")
+                 f"(antenna={os.environ.get('STVT_ANTENNA', ATSC_ANTENNA)}, "
+                 f"IFGR={os.environ.get('STVT_IFGR', ATSC_IF_GAIN_REDUCTION)}, "
+                 f"rfgain_sel={os.environ.get('STVT_RFGAIN_SEL', ATSC_RFGAIN_SEL)})")
         LOG.info(f"SoapySDR device: {soapy_args}")
         if stream_args:
             LOG.info(f"SoapySDR stream args: {stream_args}")

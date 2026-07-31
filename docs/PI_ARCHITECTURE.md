@@ -9,7 +9,7 @@ SIMD kernels that make it fit.
 
 ```mermaid
 flowchart TD
-  ANT_A["Port A: rabbit ears"] -.-> RSP
+  ANT_A["Port A: wideband AM loop<br/>(the VHF port, RF7-13)"] --> RSP
   ANT_B["Port B: UHF yagi<br/>(set STVT_ANTENNA!)"] --> RSP["RSPdx<br/>8 MS/s"]
   ANT_C["Port C: discone<br/>(VHF, under 200 MHz)"] -.-> RSP
 
@@ -36,10 +36,28 @@ flowchart TD
 
 Operational laws learned the hard way:
 
-- **Export `STVT_ANTENNA` (and gains) before launching** — the baked defaults
-  reflect whatever antenna layout existed when the script was last tuned. A
-  chain "decoding" the wrong port reads `in_rms ≈ 2` (static) and produces
-  nothing, cheaply — which can masquerade as a healthy low-CPU run.
+- **Export `STVT_ANTENNA` before launching.** You no longer have to pick the
+  gains: `stvt_run.sh` carries a per-antenna, per-band gain profile, because
+  one hardcoded pair cannot serve two different antennas. Measured 2026-07-31:
+  the loop on VHF RF9 at the old yagi hardcode (IFGR=40, rfgain_sel=3) railed
+  the front end — `in_rms` 1148, `max|x|` 1.5707, 100% TEI, zero bytes
+  decoded — while IFGR=45 / rfgain_sel=4 on the same port and channel gave 36
+  real PIDs at 14 CC errors/s. A channel that read as stone dead was one gain
+  setting away. An explicit `STVT_IFGR` / `STVT_RFGAIN_SEL` still wins.
+- A chain "decoding" the wrong port reads `in_rms ≈ 2` (static) and produces
+  nothing, cheaply — which can masquerade as a healthy low-CPU run. The
+  mirror-image failure is a **railed** front end: `max|x|` pinned at 1.5707
+  with a large `in_rms` is too much gain, not a strong station.
+- **`stvt_run.sh` warm-starts the equalizer.** It points `STVT_EQ_TAP_CACHE`
+  at `tools/data/tv_live/tapcache`, and `tv_live.py` keys the file by antenna
+  AND channel (`taps_<antenna>_rf<N>.bin`). A warm tune opens at its plateau
+  error instead of converging to it; measured on RF36, CC errors in the first
+  60 s fell from 84/42/268 (cold, n=3) to 9/28/0 (warm, n=3). Caveat: the
+  cache is gated on the equalizer's own LMS error (`STVT_EQ_LKG_RMS`, default
+  1.5), which is ABOVE the ~1.05-1.19 that a non-locking channel sits at — so
+  a channel that never decoded can still bank taps. Delete the file if a
+  channel starts behaving oddly; a missing or bad cache just falls back to a
+  cold start.
 - **Never hard-kill the chain** (`kill -9`/TERM storms wedge the SDRplay API
   service until a physical USB replug). SIGINT only; restart the service
   after any kill; verify with an actual open-and-stream test, not just
