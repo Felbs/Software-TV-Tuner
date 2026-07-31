@@ -13,8 +13,7 @@ flowchart TD
   ANT_B["Port B: UHF yagi<br/>(set STVT_ANTENNA!)"] --> RSP["RSPdx<br/>8 MS/s"]
   ANT_C["Port C: discone<br/>(VHF, under 200 MHz)"] -.-> RSP
 
-  subgraph RUN["stvt_run.sh - watchdog supervisor"
-    ]
+  subgraph RUN["stvt_run.sh - watchdog supervisor"]
     CHAIN["tv_live.py chain<br/>fused resampler + FPLL<br/>sync + fs_check<br/>NEON int16 equalizer<br/>viterbi + RS"]
     PLAY["stvt_play_hd.sh<br/>tail -F live.ts | ffmpeg -map 0:p:N | mpv"]
     WD{"health checks<br/>chain dead? noise? frozen?"}
@@ -27,11 +26,25 @@ flowchart TD
   WD -->|restart| CHAIN
   WD -->|relaunch| PLAY
 
-  HDHR["stvt_hdhr.py<br/>network tuner daemon"] -.->|"serves TS to<br/>Jellyfin/VLC clients"| NET["LAN"]
+  %% These are NOT peers of the chain - the SDR is single-tenant.
+  %% Whichever holds the radio, the others must be stopped AND disabled.
+  subgraph ALT["the other two modes - mutually exclusive with the chain"]
+    HDHR["stvt_hdhr.py<br/>network tuner daemon"]
+    PANEL["stvt_panel<br/>web UI :8642 (~44% CPU)"]
+  end
+  HDHR -.->|"serves TS to<br/>Jellyfin/VLC clients"| NET["LAN"]
+  RSP -.->|"ONE consumer only"| ALT
+  ALT -.->|"run either alongside the chain and it starves:<br/>1416 kB/s vs 2384 - 597 CC errors vs 19 - same signal"| CHAIN
+
+  TAPS[("tapcache/<br/>taps_&lt;ant&gt;_rf&lt;N&gt;.bin")] -.->|"warm start"| CHAIN
+  CHAIN -.->|"bank when locked"| TAPS
 
   style CHAIN fill:#1a2740,color:#dce6f2
   style RUN fill:#0d1626,color:#dce6f2
   style HDHR fill:#12222a,color:#9fe0c0
+  style PANEL fill:#12222a,color:#9fe0c0
+  style ALT fill:#2a1414,color:#f0d0d0
+  style TAPS fill:#22201a,color:#e8e0c8
 ```
 
 Operational laws learned the hard way:
@@ -68,6 +81,86 @@ Operational laws learned the hard way:
   thread saturated the chain can still miss real time. The fix is
   `STVT_MIN_BUF_BYTES=8388608` (per-edge byte-scaled GNU Radio buffers),
   plus the player stack at `nice +10`.
+
+## What actually differs from the x86 / radioconda build
+
+Same decoder, same DSP, same `.py` files. The Pi differs in five places, and
+every one of them was forced by a measurement rather than chosen:
+
+| | x86 (radioconda) | Pi 5 (aarch64) |
+|---|---|---|
+| **Equalizer inner loop** | VOLK AVX float dot products | **hand-written NEON int16 kernel** (`STVT_EQ_S16=1`). The generic path left the Pi at a fraction of real time. |
+| **Inter-block buffers** | GNU Radio defaults are fine | `STVT_MIN_BUF_BYTES=8388608`. The Pi's stall mode is **pipeline lockstep, not compute** — no thread saturated and still missing real time. |
+| **FPLL fold** | on by default (−42% CPU on Threadripper) | on — and it *does* help here, but only once S16 + the bigger buffers are in. An earlier note calling the fold x86-only was wrong. |
+| **Player** | full resolution, no interaction | **half-res MPEG-2** (`lowres=1`). A full-res player starves the chain through **memory bandwidth**, not CPU — renice does not fix it, halving the decode does. Pi 5 has no hardware MPEG-2 decode. |
+| **SDR self-heal** | `Restart-Service SDRplayAPIService` | `systemctl restart sdrplay`, which needs a sudoers rule no installer creates. See `tools/doctor.py`. |
+
+And one difference that is not about ARM at all but bites hardest: **four
+cores and one radio** mean the panel, the network tuner and a direct chain
+cannot coexist. See the section above.
+
+Everything else — the decode maths, the equalizer's behaviour, the telemetry
+contract — is identical by design. A capture recorded on either machine
+replays bit-for-bit comparably on the other, frame counts within the usual
+±3 wobble.
+
+
+## One radio, one consumer — the rule that costs the most to learn
+
+The Pi has **one SDR and four cores**. Three pieces of this project all want
+that radio, and only one may have it at a time:
+
+| mode | what runs | what must be off |
+|---|---|---|
+| **TV on the Pi's own screen** | `tools/stvt_run.sh <rf> <prog>` | `stvt-panel`, `stvt-hdhr` |
+| **Network tuner** (watch from another device) | `stvt-hdhr` | the direct chain |
+| **Web panel** (tune from a browser) | `stvt-panel` | the direct chain |
+
+Running two is not "a bit slower". Measured on the same channel, same signal,
+same code, with only the web panel added alongside a direct chain:
+
+| | panel stopped | panel running |
+|---|---|---|
+| transport | **2384 kB/s** (real time = 2420) | 1416 kB/s |
+| distinct PIDs | 38 | 1208 |
+| CC errors | 19 | 597 |
+| CPU idle | healthy | 0% |
+
+The panel alone costs ~44% of a core, and `stvt-hdhr` is a *standing* SDR
+consumer. Together they starve the chain until it drops samples, which
+presents as terrible reception from a perfectly good antenna. An overnight
+run in this state played for 1 h 13 m, then hit a 30-restart storm and froze
+on its last frame.
+
+**"Stopped" is not enough — check "enabled".** A service that is merely
+stopped comes back at the next boot and recreates the conflict, which is the
+nastiest version of this bug: it works all day, then breaks after a power
+blip. Pick your mode and disable the others:
+
+```bash
+# TV on this screen (disable the two that would fight it)
+systemctl --user disable --now stvt-panel stvt-hdhr
+
+# ...or the network tuner instead
+systemctl --user disable --now stvt-panel
+systemctl --user enable  --now stvt-hdhr
+```
+
+There is also a **system**-level stowaway worth checking once:
+`soapyremote-server` will spin at ~128% CPU in an error loop if it cannot get
+the radio, and it is enabled by default on some images —
+`sudo systemctl disable --now soapyremote-server`.
+
+`python3 tools/doctor.py` checks all of this for you and prints the exact fix.
+Run it first whenever reception looks bad; the answer is more often a rival
+process than an antenna.
+
+**Fastest health tell:** distinct PIDs in the transport. Roughly 20–40 is a
+healthy mux; hundreds means the chain is dropping samples and the demuxer is
+inventing PIDs out of corrupted headers. Judge by transport rate and CC
+errors, never by MER alone — MER samples *between* overflows and reads
+healthy straight through heavy frame loss.
+
 
 ## The NEON int16 equalizer kernel (`STVT_EQ_S16=1`)
 

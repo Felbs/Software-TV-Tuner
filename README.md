@@ -331,6 +331,15 @@ gain ranges).
 
 ## Troubleshooting
 
+**Reception suddenly bad on a Raspberry Pi?** Check for a rival process
+before you touch the antenna. The Pi has one SDR and one may use it: a
+running (or merely boot-*enabled*) `stvt-panel` / `stvt-hdhr` starves a
+direct chain badly enough to look like a reception fault — measured 1416
+kB/s with the panel up vs 2384 with it stopped, same signal. Run
+`python3 tools/doctor.py`, which checks this and prints the fix, and see
+[docs/PI_ARCHITECTURE.md](docs/PI_ARCHITECTURE.md#one-radio-one-consumer--the-rule-that-costs-the-most-to-learn).
+
+
 | Symptom | Cause / fix |
 |---|---|
 | `--probe` shows no devices | SoapySDR vendor module not installed |
