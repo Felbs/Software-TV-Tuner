@@ -30,8 +30,8 @@ doctor → watch.
 New in this release: **`adaptive-tv/` — a universal tuning layer that
 calibrates itself to whatever antenna you plug in.** It will *try*
 any antenna — our lab rig has pulled watchable TV from a discone
-scanner antenna and $10 rabbit ears — but **dedicated TV antennas
-work best**: broadcast TV is horizontally polarized, and TV antennas
+scanner antenna, $10 rabbit ears, and (yes, really) an **AM loop
+antenna** — but **dedicated TV antennas work best**: broadcast TV is horizontally polarized, and TV antennas
 are built to match (a vertical whip gives away real dB to
 cross-polarization before the software ever gets a vote). Whatever
 you have, the tuner measures it honestly. It measures the live MER
@@ -199,6 +199,22 @@ Everything the panel reports is measured on *your* signal, at *your*
 location — nothing is hardcoded to a market.
 
 ## Tune ANY antenna — the universal layer (`adaptive-tv/`)
+
+> **Field-tested absurdity (2026-07-30):** we watched a VHF ATSC station —
+> RF 9, 189 MHz — for an evening on a **K-180WLA amplified AM loop**, an
+> antenna designed for 0.5–1.7 MHz medium-wave. That is more than **100×
+> its design frequency**. Measured MER off the decoder's own equalizer:
+> **~16.7 dB, sitting right on the ~16 dB watchability cliff** — a stable
+> picture with occasional glitches, exactly what that number predicts.
+> Funnier still: on that channel the loop out-performed our actual TV
+> yagi, which is UHF-only and deaf at VHF. This is not a recommendation —
+> a real TV antenna is better on every channel it can hear (horizontal
+> polarization matters, gain matters). It is a *demonstration*: strong
+> local broadcast has enormous link margin, any conductor is an antenna
+> at some SNR, and the equalizer + per-antenna calibration eat the
+> mismatch and tell you honestly what you're getting. If the software
+> can make watchable TV out of an AM loop, it will make the most of
+> whatever is in your attic.
 
 The core problem with SDR TV is that every antenna + amp + cable
 combination needs different settings, and the difference between
