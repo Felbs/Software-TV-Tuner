@@ -168,10 +168,16 @@ launch(){
   # (+genpts+igndts) so discarded/lost packets don't leave timestamp holes,
   # drop the low-latency flags, and let video play smoothly over audio gaps
   # (video-sync=desync) — trading a few seconds of latency for no skipping.
-  local ff_fflags="nobuffer+flush_packets+discardcorrupt" ff_lowdelay="-flags low_delay"
+  # +discardcorrupt is OPT-IN (STVT_DISCARD_CORRUPT=1). Default off to match
+  # main and pi-port: it drops corrupt packets before the audio decoder
+  # (fewer pops) but visibly mangles video -- the 2026-07-10 "datamosh"
+  # regression, re-reported by the user on 2026-07-31. The alimiter and
+  # error_concealment=3 below cover the pops without the video cost.
+  local _dc=""; [ "${STVT_DISCARD_CORRUPT:-0}" = "1" ] && _dc="+discardcorrupt"
+  local ff_fflags="nobuffer+flush_packets${_dc}" ff_lowdelay="-flags low_delay"
   local vsync="${STVT_MPV_SYNC:-audio}"
   if [ "${STVT_MPV_SMOOTH:-1}" != "0" ]; then
-    ff_fflags="+genpts+igndts+discardcorrupt+flush_packets"; ff_lowdelay=""
+    ff_fflags="+genpts+igndts${_dc}+flush_packets"; ff_lowdelay=""
     vsync="desync"
   fi
   setsid bash -c "tail -c $bytes -F '$F' | \
