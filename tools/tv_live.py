@@ -231,10 +231,25 @@ class LiveTVTopBlock(gr.top_block):
             LOG.info("SDR still busy after ~64s; restarting SDRplay API "
                      "service (the documented cure) and retrying once")
             try:
-                subprocess.run(["powershell", "-NoProfile", "-Command",
-                                "Restart-Service -Name SDRplayAPIService "
-                                "-Force -Confirm:$false"],
-                               capture_output=True, timeout=60)
+                # PLATFORM LAYER (fixed 2026-07-31): this fallback shipped
+                # PowerShell-only and therefore CRASHED on Linux with
+                # "[Errno 2] No such file or directory: 'powershell'" — the
+                # documented cure turned into a confusing traceback on the
+                # one rig most likely to need it. Caught on radiopi2 after an
+                # overnight run: the chain hit SDR contention, tried to
+                # self-heal, and died here instead. Same cure, right command
+                # per OS.
+                if sys.platform == "win32":
+                    _cure = ["powershell", "-NoProfile", "-Command",
+                             "Restart-Service -Name SDRplayAPIService "
+                             "-Force -Confirm:$false"]
+                else:
+                    _cure = ["sudo", "-n", "systemctl", "restart", "sdrplay"]
+                _r = subprocess.run(_cure, capture_output=True, timeout=60)
+                if _r.returncode != 0:
+                    LOG.info("service-restart cure failed rc=%s: %s",
+                             _r.returncode,
+                             (_r.stderr or b"")[:200].decode(errors="replace"))
                 time.sleep(10)
                 src = soapy.source(soapy_args, "fc32", 1, "", stream_args,
                                    [""], [""])
