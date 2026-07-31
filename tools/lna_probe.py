@@ -13,6 +13,15 @@ Bias-T note: on the RSPdx the bias-T output exists on Antenna B only, so
 toggling it while another port is selected is a no-op in hardware. Pass
 --no-biast to skip the powered half entirely if you would rather not send
 DC toward anything at all.
+
+BIAS-T IS A BOOLEAN SETTING, AND THE DRIVER FAILS UNSAFE (fixed 2026-07-31).
+SoapySDRPlay3 parses it as `if (value == "false") off; else ON;` — only the
+exact string "false" turns it off, and EVERYTHING else turns it on. This file
+used to write "1"/"0", so the "off" half of the sweep energised the LNA just
+like the "on" half (making the comparison meaningless), and the cleanup write
+of "0" that claimed to de-power the coax actually left DC on it. Always write
+"true"/"false", and always read the setting back — a writeSetting that the
+driver ignores raises no exception, so an unverified write is a silent lie.
 """
 import argparse
 import sys
@@ -31,6 +40,29 @@ from tv_live import rf_to_freq_hz                     # noqa: E402
 
 RATE, FFT = 8_000_000, 4096
 DWELL_S = 1.0
+
+
+def set_biast(sdr, on):
+    """Set bias-T and confirm the driver actually took it.
+
+    Returns the state the hardware reports, or None if it could not be read.
+    The readback is the whole point: writeSetting() is fire-and-forget, so a
+    key the driver does not recognise — or a value it parses differently than
+    you assumed — fails completely silently.
+    """
+    want = "true" if on else "false"
+    try:
+        sdr.writeSetting("biasT_ctrl", want)
+    except Exception as exc:
+        print(f"  !! bias-T write failed: {exc!r}")
+        return None
+    try:
+        got = str(sdr.readSetting("biasT_ctrl")).strip().lower()
+    except Exception:
+        return None                      # driver has no readback; caller warns
+    if got != want:
+        print(f"  !! bias-T did NOT latch: wrote {want!r}, device reports {got!r}")
+    return got
 
 
 def measure(sdr, antenna, center_hz):
@@ -112,29 +144,34 @@ def main():
     ants = list(sdr.listAntennas(SOAPY_SDR_RX, 0))
     print(f"  ports: {ants}   (measuring RF{args.rf} / {center/1e6:.3f} MHz)\n")
     print(f"  {'port':<12}{'biasT':>6}{'rawRMS':>10}{'peak':>8}{'shelf dB':>10}")
-    states = ("0",) if args.no_biast else ("0", "1")
-    for ant in ants:
-        for bt in states:
-            try:
-                sdr.writeSetting("biasT_ctrl", bt)
-            except Exception:
-                pass
-            time.sleep(0.3)
-            m = measure(sdr, ant, center)
-            if m is None:
-                print(f"  {ant:<12}{bt:>6}{'  (no samples)':>28}")
-            else:
-                flag = "  <-- signal!" if m["shelf"] > 4 else ""
-                print(f"  {ant:<12}{bt:>6}{m['rms']:>10.4f}{m['peak']:>8.3f}"
-                      f"{m['shelf']:>+10.1f}{flag}")
+    states = (False,) if args.no_biast else (False, True)
+    unverified = False
     try:
-        sdr.writeSetting("biasT_ctrl", "0")      # never leave DC on the coax
-    except Exception:
-        pass
+        for ant in ants:
+            for bt in states:
+                if set_biast(sdr, bt) is None:
+                    unverified = True
+                time.sleep(0.3)
+                m = measure(sdr, ant, center)
+                label = "on" if bt else "off"
+                if m is None:
+                    print(f"  {ant:<12}{label:>6}{'  (no samples)':>28}")
+                else:
+                    flag = "  <-- signal!" if m["shelf"] > 4 else ""
+                    print(f"  {ant:<12}{label:>6}{m['rms']:>10.4f}{m['peak']:>8.3f}"
+                          f"{m['shelf']:>+10.1f}{flag}")
+    finally:
+        # Never leave DC on the coax — including when the sweep dies partway.
+        # "false" is the ONLY string SoapySDRPlay3 reads as off; "0" turns it ON.
+        set_biast(sdr, False)
 
     print("\n  shelf > ~4 dB = a real ATSC carrier is present on that port.")
-    print("  If a port jumps from biasT 0 -> 1, that LNA is bias-T powered (keep it ON).")
+    print("  If a port jumps from biasT off -> on, that LNA is bias-T powered (keep it ON).")
     print("  All ports flat and low? Try --rf with a channel you know is strong here.")
+    if unverified:
+        print("\n  NOTE: this driver offers no bias-T readback, so the states above\n"
+              "  are what was requested, not confirmed. Treat a 0 dB delta as\n"
+              "  'unknown', not as proof the LNA is unpowered.")
 
 
 if __name__ == "__main__":
