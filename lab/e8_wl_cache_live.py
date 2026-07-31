@@ -52,7 +52,14 @@ def visit(tag):
         "STVT_EQ_TELEM_EVERY": "1",
         "STVT_VITERBI": "soft",
         "STVT_RS": "erasure",
-        "STVT_BIAST": "1",
+        # bias-T OFF by default. The RSPdx bias-T lives on port B ONLY, and port
+        # B currently carries "Old Faithful" — a PASSIVE TV yagi that needs no
+        # phantom power and may be DC-shorted through its matching network.
+        # This script shipped with STVT_BIAST=1 on 7/30 and duly powered it for
+        # three runs before anyone noticed; the banked law is "never power it
+        # blindly". Only set this when an ACTIVE antenna/LNA is on the selected
+        # port, and set it deliberately per-run, never as a script default.
+        "STVT_BIAST": os.environ.get("E8_BIAST", "0"),
         "STVT_NB": "0",
     })
     with open(log, "wb") as lf:
