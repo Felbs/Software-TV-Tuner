@@ -61,7 +61,37 @@ DROUGHT_PIDS=150            # unique-PID count above this = noise drought
 # expected to be a free win here. STVT_FPLL_FOLD=1 to enable.
 export STVT_RS=stock STVT_VITERBI=hard STVT_EQ=long
 export STVT_SPS="${STVT_SPS:-1.1}" STVT_RRC_SYMS="${STVT_RRC_SYMS:-4}" STVT_TEISCRUB="${STVT_TEISCRUB:-0}"
-export STVT_IFGR="${STVT_IFGR:-40}" STVT_RFGAIN_SEL="${STVT_RFGAIN_SEL:-3}" STVT_ANTENNA="${STVT_ANTENNA:-Antenna B}"
+# ── PER-ANTENNA GAIN PROFILE ────────────────────────────────────────────────
+# This script used to hardcode IFGR=40 / rfgain_sel=3 for every antenna. Those
+# are Antenna B (the UHF yagi) numbers, and they are not merely suboptimal
+# elsewhere -- they are the difference between a channel and no channel.
+# Measured on this Pi, 2026-07-31, 30 s chain-only probes:
+#
+#   Antenna A (attic AM loop), VHF RF9, IFGR=40 rfsel=3  (the old hardcode)
+#       in_rms 1148, max|x| 1.5707 -> front end railed, 100% TEI, 0 bytes decoded
+#   Antenna A (attic AM loop), VHF RF9, IFGR=45 rfsel=4
+#       in_rms  612, max|x| 0.31   -> 36 real PIDs, MER 0.70, 14 CC err/s
+#
+# A channel that read as stone dead was one gain setting away from decoding.
+# The same yagi numbers are also wrong in the other direction on the loop at
+# UHF (in_rms 51, starved). Gains are therefore chosen per antenna AND per
+# band -- an RSPdx LNA state that is right at 605 MHz is not right at 189 MHz.
+# An explicit STVT_IFGR / STVT_RFGAIN_SEL in the environment always wins, so
+# the tuners and lab harnesses that set them are unaffected.
+#
+# Honest limits of this table: Antenna A at UHF does not decode at any gain
+# tried (best was IFGR=32 rfsel=2, still ~900 CC errors/s) -- the loop is
+# simply not a UHF antenna, and no gain fixes that. Antenna B at VHF is deaf
+# for the mirror-image reason (in_rms 24 at IFGR=50, 147 at IFGR=40, never
+# locks). Antenna C is not characterised here; see docs/ANTENNA_PORTS.
+STVT_ANTENNA="${STVT_ANTENNA:-Antenna B}"
+if [ "$RF" -le 13 ]; then _band=vhf; else _band=uhf; fi
+case "$STVT_ANTENNA/$_band" in
+  "Antenna A/vhf") _ifgr=45; _rfsel=4 ;;   # measured; the loop IS the VHF antenna
+  "Antenna A/uhf") _ifgr=32; _rfsel=2 ;;   # least-bad of the sweep; still no lock
+  *)               _ifgr=40; _rfsel=3 ;;   # Antenna B / unknown: the proven yagi pair
+esac
+export STVT_IFGR="${STVT_IFGR:-$_ifgr}" STVT_RFGAIN_SEL="${STVT_RFGAIN_SEL:-$_rfsel}" STVT_ANTENNA
 
 # ── WARM START: per-antenna+channel equalizer tap cache ─────────────────────
 # The single biggest thing a viewer notices is that a fresh tune "starts
