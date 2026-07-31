@@ -9,8 +9,10 @@
 
 #include <gnuradio/atscplus/atsc_sync_soft.h>
 #include <gnuradio/dtv/atsc_consts.h>
+#include <gnuradio/filter/mmse_fir_interpolator_cc.h>
 #include <gnuradio/filter/mmse_fir_interpolator_ff.h>
 #include <gnuradio/filter/single_pole_iir.h>
+#include <gnuradio/gr_complex.h>
 #include <cstdint>
 
 namespace gr {
@@ -21,6 +23,12 @@ class atsc_sync_soft_impl : public atsc_sync_soft
 private:
     gr::filter::single_pole_iir<float, float, float> d_loop;
     gr::filter::mmse_fir_interpolator_ff d_interp;
+    // OPTIONAL imaginary companion (widely-linear equalizer, v2 2026-07-26): a
+    // 2nd float interpolator with the SAME (d_si, d_mu) timing as the real path.
+    // Carrying imag-only (float, not full complex) halves the WL data flow — the
+    // real symbol is already the primary output. Used only when in1/out1 connected.
+    gr::filter::mmse_fir_interpolator_ff d_interp_imag;
+    float d_data_mem_imag[gr::dtv::ATSC_DATA_SEGMENT_LENGTH];
 
     double d_rx_clock_to_symbol_freq;
     int d_si;

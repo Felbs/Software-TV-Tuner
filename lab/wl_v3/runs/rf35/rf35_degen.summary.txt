@@ -1,0 +1,13 @@
+
+=== tv_dual A/B  [rf35_degen] — sample-aligned, one input stream ===
+leg      frames     TS MB   MER p5     p10     p50
+long        396      36.3    18.69  19.064   20.04
+wl          396      36.4    18.54  18.659  19.079
+WL frame advantage: 0.0%
+paired fields n=620  WL MER advantage -0.875 dB  (WL better 47 / long better 565 / tie 8)
+conj_frac     mean 0.029  p10 0.028  p90 0.03
+imag_frac     mean 0.0  p10 0.0  p90 0.0
+imag_benefit  mean 0.902  p10 0.852  p90 0.943
+imag_benefit_insample mean 0.0  p10 0.0  p90 0.0
+kappa         mean 1.0  p10 1.0  p90 1.0
+

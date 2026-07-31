@@ -22,6 +22,8 @@ namespace py = pybind11;
 /**************************************/
 // BINDING_FUNCTION_PROTOTYPES(
 void bind_atsc_equalizer_long(py::module& m);
+void bind_atsc_equalizer_wl(py::module& m);
+void bind_atsc_wl_frontend(py::module& m);
 void bind_atsc_equalizer_pilot(py::module& m);
 void bind_atsc_equalizer_pilot_dd(py::module& m);
 void bind_atsc_equalizer_pilot_dd_soft(py::module& m);
@@ -71,6 +73,8 @@ PYBIND11_MODULE(atscplus_python, m)
     /**************************************/
     // BINDING_FUNCTION_CALLS(
     bind_atsc_equalizer_long(m);
+    bind_atsc_equalizer_wl(m);
+    bind_atsc_wl_frontend(m);
     bind_atsc_equalizer_pilot(m);
     bind_atsc_equalizer_pilot_dd(m);
     bind_atsc_equalizer_pilot_dd_soft(m);

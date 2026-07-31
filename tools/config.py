@@ -94,8 +94,12 @@ DASHBOARD_PORT = 5555
 
 # ────────────────────────────────────────────────────────────
 # Geo (used by APT pass scheduler + propagation grayline)
-# Set these to your actual coordinates if running APT or HF.
+# Set STVT_LAT / STVT_LON / STVT_GRID env vars to your own
+# coordinates (or edit here). Defaults are a metro-area-level
+# placeholder, deliberately NOT anyone's home: precision beyond
+# ~city level is never needed by any tool in this repo.
 # ────────────────────────────────────────────────────────────
-LATITUDE = 38.9
-LONGITUDE = -77.0
-GRID_SQUARE = "FM18"
+import os as _os
+LATITUDE = float(_os.environ.get("STVT_LAT", "38.9"))
+LONGITUDE = float(_os.environ.get("STVT_LON", "-77.0"))
+GRID_SQUARE = _os.environ.get("STVT_GRID", "FM18")

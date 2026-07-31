@@ -1,0 +1,43 @@
+﻿# lock_loop tag=before runs=40 iq=rf34_ctrl.cs16 extra={} debug=True
+[  1/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.9s)  running_fails=0
+[  2/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.7s)  running_fails=0
+[  3/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 55EB2FAA (15.8s)  running_fails=0
+[  4/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 55EB2FAA (15.6s)  running_fails=0
+[  5/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (16.0s)  running_fails=0
+[  6/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.6s)  running_fails=0
+[  7/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.6s)  running_fails=0
+[  8/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.8s)  running_fails=0
+[  9/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.7s)  running_fails=0
+[ 10/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.6s)  running_fails=0
+[ 11/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.7s)  running_fails=0
+[ 12/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.6s)  running_fails=0
+[ 13/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.6s)  running_fails=0
+[ 14/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.7s)  running_fails=0
+[ 15/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.7s)  running_fails=0
+[ 16/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.7s)  running_fails=0
+[ 17/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.7s)  running_fails=0
+[ 18/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.6s)  running_fails=0
+[ 19/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.7s)  running_fails=0
+[ 20/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.6s)  running_fails=0
+[ 21/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.8s)  running_fails=0
+[ 22/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.9s)  running_fails=0
+[ 23/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.8s)  running_fails=0
+[ 24/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.6s)  running_fails=0
+[ 25/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.9s)  running_fails=0
+[ 26/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.7s)  running_fails=0
+[ 27/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.8s)  running_fails=0
+[ 28/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.5s)  running_fails=0
+[ 29/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.8s)  running_fails=0
+[ 30/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.7s)  running_fails=0
+[ 31/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.9s)  running_fails=0
+[ 32/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.9s)  running_fails=0
+[ 33/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.9s)  running_fails=0
+[ 34/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.9s)  running_fails=0
+[ 35/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.9s)  running_fails=0
+[ 36/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.7s)  running_fails=0
+[ 37/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.6s)  running_fails=0
+[ 38/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.7s)  running_fails=0
+[ 39/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (16.0s)  running_fails=0
+[ 40/40] ok   emitted=194030 aligned=99.99% relocks=33 fs=620 wd=0 ts=36335136 AF9769A6 (15.7s)  running_fails=0
+
+== before: 0/40 lock failures (0.0%) ==

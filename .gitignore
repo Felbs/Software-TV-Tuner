@@ -64,3 +64,41 @@ tools/scan_temp/
 # Overnight report from the cleanup branch (review artifact, not source)
 OVERNIGHT_REPORT.md
 iq_captures/
+
+# --- dev lab & internal notes (full history preserved on the lab-archive branch) ---
+handoff/
+**/attic/
+adaptive-tv/lab/
+# runtime-generated telemetry / logs (not part of the shipped software)
+*.jsonl
+*.log
+
+run_tv.bat
+run_tv_panel.bat
+adaptive-tv/belief_map.json
+adaptive-tv/cube_map.json
+adaptive-tv/cube_state.json
+adaptive-tv/cube_log.jsonl
+
+# speed-1 offline bench artifacts (large TS + chain logs, regenerable)
+lab/speed_build/runs/
+lab/speed_build/bench.jsonl
+lab/speed_build/live/
+lab/speed_build/retune/
+lab/speed_build/cachetest/
+lab/speed_build/live.jsonl
+lab/speed_build/retune.jsonl
+
+# lab/wl_watchdog: frozen front-end input planes (185 MB each, regenerate with
+# dump_front_in.py) and the harness's per-run TS/logs. The FAILING-run logs are
+# force-added because they are the evidence.
+lab/wl_watchdog/*.f32
+lab/wl_watchdog/runs/*.ts
+lab/wl_watchdog/runs/*.log
+lab/gate_runs/
+
+# equalizer tap caches are LEARNED PER INSTALL (they describe the local
+# antenna+multipath) - never ship them
+*.bin
+tapcache/
+**/tapcache/

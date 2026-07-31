@@ -33,6 +33,7 @@ private:
 
     interleaver_fifo<unsigned char> alignment_fifo;
     int m_commutator;
+    int d_syncs_this_window = 0;  // DEAF forensics
     std::vector<interleaver_fifo<unsigned char>> m_fifo;
 
     // Telemetry for the tag-forwarding feature — printed to stderr so we

@@ -100,6 +100,11 @@ int atsc_deinterleaver_impl::work(int noutput_items,
         // reset commutator if required using INPUT pipeline info
         if (plin[i].first_regular_seg_p()) {
             sync();
+            d_syncs_this_window++;   // DEAF forensics: field realignments
+            // SICKMAP anchor (turbo stage-2a): mark commutator-phase zero
+            // so rs_erasure can map codeword bytes to transmission time
+            add_item_tag(0, nitems_written(0) + (uint64_t)i,
+                         pmt::intern("deint_sync"), pmt::PMT_T);
         }
 
         // remap OUTPUT pipeline info to reflect all data segment end-to-end delay
@@ -120,11 +125,13 @@ int atsc_deinterleaver_impl::work(int noutput_items,
     if (d_total_segments - d_last_log_segments >= 150000) {
         std::fprintf(stderr,
                      "[atsc_deinterleaver t=%llu] tags_forwarded=%llu "
-                     "(rate=%.2f tags/12segs)\n",
+                     "(rate=%.2f tags/12segs) field_syncs=%d\n",
                      (unsigned long long)d_total_segments,
                      (unsigned long long)d_total_tags_forwarded,
-                     12.0 * (double)d_total_tags_forwarded / (double)d_total_segments);
+                     12.0 * (double)d_total_tags_forwarded / (double)d_total_segments,
+                     d_syncs_this_window);
         std::fflush(stderr);
+        d_syncs_this_window = 0;
         d_last_log_segments = d_total_segments;
     }
 

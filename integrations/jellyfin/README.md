@@ -1,62 +1,70 @@
-# STVT → Jellyfin (native Linux)
+# Jellyfin (and Plex / Emby / Channels) integration
 
-Turn this box (SDR + antenna) into a network TV tuner that Jellyfin auto-detects,
-then watch live TV on any Jellyfin client (phone, TV, browser). This box only
-**tunes** — Jellyfin does the decode/transcode — which is why streaming plays
-smoother than decoding locally.
+STVT exposes the tuner as a **network HDHomeRun** (`adaptive-tv/stvt_hdhr.py`),
+so any media server can pull live antenna TV from it. The media server does the
+video decode + transcode — which is the whole point: the Raspberry Pi has no
+hardware MPEG-2 decoder, so it should only ever *tune*, never *decode*. A
+capable client (a PC/GPU) does the heavy lifting and streams to phones, tablets,
+browsers, TVs.
 
-## 1. Start the tuner server
-
-```bash
-cd ~/Software-TV-Tuner
-python3 tools/stvt_hdhr.py
+```
+antenna → SDR → Pi (stvt_hdhr :5004, HDHomeRun) → Jellyfin server (transcode) → apps
 ```
 
-It serves the HDHomeRun API on `:5004` (`http://<this-box>:5004/discover.json`)
-and tunes the SDR on demand. Gain defaults to the passive-antenna config
-(`IFGR=20/RFGAIN_SEL=7/Antenna B`); override any `STVT_*` knob from the env.
+## 1. Run the tuner server (on the Pi)
 
-Run it as a persistent user service:
-
-```bash
-systemd-run --user --unit=stvt-hdhr \
-  --working-directory=$HOME/Software-TV-Tuner \
-  python3 tools/stvt_hdhr.py
-# stop:  systemctl --user stop stvt-hdhr
-```
-
-## 2. Point Jellyfin at it
-
-**Automatic** (fresh Jellyfin — creates the admin user, adds the tuner + guide):
+`stvt_hdhr.py` runs as the `stvt-hdhr` user service (see the Raspberry Pi
+install section of the top-level README). Verify it:
 
 ```bash
-JF_PASS='your-password' STVT_TUNER='http://localhost:5004' \
-  python3 integrations/jellyfin/jf_setup.py
+curl http://<pi-ip>:5004/discover.json     # HDHomeRun descriptor
+curl http://<pi-ip>:5004/lineup.json        # channel list
 ```
 
-Use `STVT_TUNER='http://<this-box-ip>:5004'` if Jellyfin runs on another
-machine. `JF_URL` defaults to `http://localhost:8096`.
+Put the Pi in **tuner-only (headless)** mode so it doesn't waste CPU decoding a
+local screen nobody's watching:
 
-**Manual** (existing Jellyfin): Dashboard → Live TV → Tuner Devices → **+** →
-HDHomeRun → `http://<this-box>:5004`. Then TV Guide Data → **+** → XMLTV →
-`http://<this-box>:5004/guide.xml`. Refresh the guide.
+```bash
+# in the Pi's ~/start_panel.sh
+export STVT_HEADLESS=1        # 1 = stream-only (no local player); 0 = watch on the Pi
+```
 
-## 3. Watch
+## 2. Install a media server
 
-Jellyfin → **Live TV** → pick a channel. First tune takes a few seconds while
-the SDR locks; switching to a different RF re-tunes (single tuner).
+Any of Jellyfin / Plex / Emby / Channels DVR works. Jellyfin (free, no account):
 
-## Endpoints
+```bash
+# on the machine that will do the decoding (a PC/GPU box, NOT the Pi)
+curl https://repo.jellyfin.org/install-debuntu.sh | sudo bash
+```
 
-| path | purpose |
-|------|---------|
-| `/discover.json` | device descriptor (auto-detect) |
-| `/lineup.json` | channel list |
-| `/lineup.m3u` | generic M3U (Plex/VLC) |
-| `/guide.xml` | minimal XMLTV so Live-TV setup completes |
-| `/auto/v5.1` | HDHomeRun-standard stream path |
-| `/stream/<rf>/<minor>` | tune + stream one program |
+## 3. Point the server at the tuner
 
-The channel list comes from `tools/default_stations.py` (edit it for your
-market); the MPEG program for each subchannel is resolved live from the tuned
-mux's PAT.
+**Automatic (Jellyfin):** on a *fresh* Jellyfin, this completes the wizard and
+adds the tuner + guide in one shot:
+
+```bash
+JF_PASS='pick-a-password' STVT_TUNER='http://<pi-ip>:5004' \
+    python3 jf_setup.py
+```
+
+**Manual (any server), via the web UI** — Dashboard → Live TV:
+- **Tuner Devices → +** → *HDHomeRun* → `<pi-ip>:5004`
+  (or *M3U Tuner* → `http://<pi-ip>:5004/lineup.m3u`)
+- **Guide Data Providers → +** → *XMLTV* → `http://<pi-ip>:5004/guide.xml`
+- Refresh the guide; the 5.1/4.1-style channels populate.
+
+Then open the server address (e.g. `http://<server-ip>:8096`) in a browser or
+the Jellyfin app on your phone/TV.
+
+## Notes / gotchas
+
+- **Single tuner:** the SDR is one 6 MHz channel at a time. All sub-channels of
+  the tuned channel and multiple clients on it are fine; switching to a channel
+  on a different RF re-tunes (~20–30 s).
+- **WSL host + mirrored networking:** if the server runs in WSL, other LAN
+  devices (your phone) are blocked by the Windows firewall until you allow the
+  port, e.g. in an **Administrator** PowerShell:
+  `New-NetFirewallRule -DisplayName "Jellyfin" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8096`
+- **Guide** is currently a minimal placeholder XMLTV (channel names + rolling
+  blocks). Real PSIP program data is a future enrichment.

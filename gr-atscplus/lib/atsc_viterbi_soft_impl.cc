@@ -16,6 +16,8 @@
 #include "atsc_viterbi_soft_impl.h"
 #include "atsc_viterbi_mux.h"
 #include <gnuradio/io_signature.h>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <pmt/pmt.h>
 
@@ -33,8 +35,13 @@ atsc_viterbi_soft_impl::atsc_viterbi_soft_impl()
           "dtv_atsc_viterbi_soft",
           io_signature::make2(
               2, 2, sizeof(float) * ATSC_DATA_SEGMENT_LENGTH, sizeof(plinfo)),
-          io_signature::make2(
-              2, 2, sizeof(unsigned char) * ATSC_MPEG_RS_ENCODED_LENGTH, sizeof(plinfo)))
+          // port 2 (optional): SOVA per-byte reliability plane — same
+          // 207-byte vector geometry as the data so a second
+          // deinterleaver instance can carry it to the RS decoder
+          io_signature::make3(
+              2, 3, sizeof(unsigned char) * ATSC_MPEG_RS_ENCODED_LENGTH,
+              sizeof(plinfo),
+              sizeof(unsigned char) * ATSC_MPEG_RS_ENCODED_LENGTH))
 {
     set_output_multiple(NCODERS);
 
@@ -48,8 +55,11 @@ atsc_viterbi_soft_impl::atsc_viterbi_soft_impl()
     // the -4 is for the 4 sync symbols
     const int fifo_size = ATSC_DATA_SEGMENT_LENGTH - 4 - viterbi[0].delay();
     fifo.reserve(NCODERS);
-    for (int i = 0; i < NCODERS; i++)
+    cfifo.reserve(NCODERS);
+    for (int i = 0; i < NCODERS; i++) {
         fifo.emplace_back(fifo_size);
+        cfifo.emplace_back(fifo_size);
+    }
 
     reset();
 }
@@ -58,8 +68,10 @@ atsc_viterbi_soft_impl::~atsc_viterbi_soft_impl() {}
 
 void atsc_viterbi_soft_impl::reset()
 {
-    for (int i = 0; i < NCODERS; i++)
+    for (int i = 0; i < NCODERS; i++) {
         fifo[i].reset();
+        cfifo[i].reset();
+    }
 }
 
 std::vector<float> atsc_viterbi_soft_impl::decoder_metrics() const
@@ -79,10 +91,67 @@ int atsc_viterbi_soft_impl::work(int noutput_items,
     auto plin = static_cast<const plinfo*>(input_items[1]);
     auto plout = static_cast<plinfo*>(output_items[1]);
 
+    // ── 2026-07-06 THE SCALPEL ── the corruption/DEAF forensics left
+    // exactly one un-alibied organ: this block's internal state (12
+    // trellis path memories + alignment fifos). STVT_VIT_CMD_FILE lets
+    // the FEC sheriff order a FULL state reset mid-stream — fifos AND
+    // decoders (the stock reset() only touched fifos). Poll cost: one
+    // fopen attempt per work() call.
+    static const char* VIT_CMD = std::getenv("STVT_VIT_CMD_FILE");
+    if (VIT_CMD) {
+        std::FILE* cf = std::fopen(VIT_CMD, "rb");
+        if (cf) {
+            std::fclose(cf);
+            std::remove(VIT_CMD);
+            for (int i = 0; i < NCODERS; i++) {
+                fifo[i].reset();
+                viterbi[i].reset();
+            }
+            std::fprintf(stderr,
+                         "[viterbi_soft] SCALPEL: full state reset "
+                         "(12 decoders + fifos)\n");
+        }
+    }
+
     // The way the fs_checker works ensures we start getting packets
     // starting with a field sync, and out input multiple is set to
     // NCODERS, so we should always get a mod-NCODERS first packet
     assert(noutput_items % NCODERS == 0);
+
+    // ── 2026-07-06 MOD-12 PHASE SLIP DETECTOR ── the last-suspect
+    // hypothesis: a mid-stream discontinuity rotates the segment-to-
+    // decoder mapping (this block batches rigidly by 12 with no plinfo
+    // realign). If the field-start's position within our batch grid
+    // ever CHANGES, the mapping has slipped — 100% garbage at perfect
+    // upstream health, remissions at 1-in-12, resets useless. Logged
+    // here; the fix (plinfo-driven realign) comes after conviction.
+    {
+        static int last_field_pos = -1;
+        const uint64_t base = nitems_read(0);
+        for (int i = 0; i < noutput_items; i++) {
+            if (plin[i].first_regular_seg_p()) {
+                const int pos = (int)((base + (uint64_t)i) % NCODERS);
+                if (last_field_pos >= 0 && pos != last_field_pos) {
+                    std::fprintf(stderr,
+                                 "[viterbi_soft] MOD12 SLIP: field-start "
+                                 "phase %d -> %d\n", last_field_pos, pos);
+                    // announce to the sheriff for an immediate targeted
+                    // restart (the only cure until the plinfo-realign
+                    // fix lands) — corruption lifetime: minutes -> ~2 s
+                    static const char* SLIP_FILE =
+                        std::getenv("STVT_VIT_SLIP_FILE");
+                    if (SLIP_FILE) {
+                        std::FILE* sf = std::fopen(SLIP_FILE, "wb");
+                        if (sf) {
+                            std::fputs("slip", sf);
+                            std::fclose(sf);
+                        }
+                    }
+                }
+                last_field_pos = pos;
+            }
+        }
+    }
 
     int dbwhere;
     int dbindex;
@@ -115,12 +184,21 @@ int atsc_viterbi_soft_impl::work(int noutput_items,
                        enco_which_syms[encoder][k] % ATSC_DATA_SEGMENT_LENGTH];
 
         /* Now run each of the 12 Viterbi decoders over their subset of
-           the input symbols */
+           the input symbols. SOVA: capture each decision's confidence
+           (best-vs-runner-up margin, already traceback-aligned). */
+        static float confs[NCODERS][enco_which_max];
         for (unsigned int encoder = 0; encoder < NCODERS; encoder++)
-            for (unsigned int k = 0; k < enco_which_max; k++)
+            for (unsigned int k = 0; k < enco_which_max; k++) {
                 dibits[encoder][k] = viterbi[encoder].decode(symbols[encoder][k]);
+                confs[encoder][k] = viterbi[encoder].last_confidence();
+            }
 
-        /* Move dibits into their location in the output buffer */
+        /* Move dibits into their location in the output buffer; the
+           confidence of a BYTE is the weakest of its four dibits,
+           each delayed through a mirror fifo to stay aligned. */
+        float conf_min[OUTPUT_SIZE];
+        for (int j = 0; j < OUTPUT_SIZE; j++)
+            conf_min[j] = 1e9f;
         for (unsigned int encoder = 0; encoder < NCODERS; encoder++) {
             for (unsigned int k = 0; k < enco_which_max; k++) {
                 /* Store the dibit into the output data segment */
@@ -129,8 +207,30 @@ int atsc_viterbi_soft_impl::work(int noutput_items,
                 shift = dbwhere & 0x7;
                 out_copy[dbindex] = (out_copy[dbindex] & ~(0x03 << shift)) |
                                     (fifo[encoder].stuff(dibits[encoder][k]) << shift);
+                const float dc = cfifo[encoder].stuff(confs[encoder][k]);
+                if (dc < conf_min[dbindex])
+                    conf_min[dbindex] = dc;
             } /* Symbols fed into one encoder */
         }     /* Encoders */
+
+        /* SOVA reliability plane on optional port 2: quantized 0-255
+           (0 = the trellis was torn between paths = erase me first). */
+        if (output_items.size() > 2) {
+            auto rel = static_cast<unsigned char*>(output_items[2]);
+            static const float SCALE = []() -> float {
+                if (const char* p = std::getenv("STVT_SOVA_SCALE")) {
+                    char* e = nullptr;
+                    double v = std::strtod(p, &e);
+                    if (e != p && v > 0) return (float)v;
+                }
+                return 16.0f;
+            }();
+            for (int j = 0; j < OUTPUT_SIZE; j++) {
+                float q = conf_min[j] * SCALE;
+                rel[(i / NCODERS) * OUTPUT_SIZE + j] =
+                    (unsigned char)(q > 255.0f ? 255 : (q < 0 ? 0 : q));
+            }
+        }
 
         // copy output from contiguous temp buffer into final output
         for (int j = 0; j < NCODERS; j++) {

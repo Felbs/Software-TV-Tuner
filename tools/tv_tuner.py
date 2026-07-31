@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -79,6 +80,22 @@ def _clear_pid_file():
         PID_PATH.unlink()
     except (FileNotFoundError, OSError):
         pass
+
+
+def _doctor_signpost():
+    """Point a stuck user at the one command that diagnoses their system and
+    prints the exact fix. Shown on ANY error exit so a dead-end is never a
+    dead-end — the single most common 'I installed it and it broke' recovery."""
+    doctor = Path(__file__).resolve().parent / "doctor.py"
+    py = "python" if sys.platform == "win32" else "python3"
+    bar = "─" * 64
+    print(f"\n{bar}\n"
+          f"  Something isn't set up right yet. For a full diagnosis of your\n"
+          f"  system — every dependency checked, with the exact fix for each —\n"
+          f"  run:\n\n"
+          f"      {py} {doctor}\n\n"
+          f"  It's safe to run anytime and changes nothing on its own.\n"
+          f"{bar}", file=sys.stderr)
 
 # tv_live needs a Python that has gr-atscplus + SoapySDR available.
 #   Windows: radioconda's bundled Python (override with $RADIOCONDA_PY).
@@ -299,6 +316,16 @@ CHAIN_DEFAULTS = {
     "STVT_RFGAIN_SEL": "3",
     "STVT_ANTENNA":    "Antenna A",
 }
+# FEATURE GOVERNOR seed (2026-07-11, born on the WSL port): soft Viterbi
+# + the full RRC-8 matched filter miss the real-time deadline on
+# WSL-over-SoapyRemote (measured: 10,728 source overflows, 1.15% loss on
+# a channel the lean chain decodes at 0.0%) — and an overflowing scan
+# chain under-reports lockable channels. Non-Windows machines start
+# LEAN; force with STVT_CHAIN_PROFILE=full after an overflow-gated A/B
+# (OsO == 0) proves the hardware can afford the heavy levers.
+if (os.environ.get("STVT_CHAIN_PROFILE")
+        or ("full" if sys.platform == "win32" else "lean")) == "lean":
+    CHAIN_DEFAULTS.update({"STVT_VITERBI": "hard", "STVT_RRC_SYMS": "4"})
 
 
 def env_with_sdrplay() -> dict:
@@ -345,6 +372,55 @@ def spawn_tv_live(rf: int, log_fh, viterbi: str = "stock") -> subprocess.Popen:
         stderr=subprocess.STDOUT,
         creationflags=NEW_PROCESS_GROUP,
     )
+
+
+_RE_FS_ERR = re.compile(r"fs_err_rms=([\d.]+)")
+_RE_NCO = re.compile(r"nco_freq_hz=([+-]?[\d.]+)")
+_RE_RS5 = re.compile(r"last5s: pkts=(\d+) era_dec=\d+ era_ok=\d+ bad=(\d+)")
+
+
+def ncos_from_log(path, tail_bytes=8000):
+    """Recent FPLL NCO frequencies (Hz). Pilot-lock detector: a locked
+    pilot pins the NCO within a few hundred Hz; on noise it wanders by
+    thousands. Unlike in_rms this survives the hardware AGC (which
+    gain-pumps dead channels up to the setpoint)."""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            f.seek(max(0, size - tail_bytes))
+            vals = _RE_NCO.findall(f.read())
+    except OSError:
+        return []
+    out = []
+    for v in vals[-8:]:
+        try:
+            out.append(float(v))
+        except ValueError:
+            pass
+    return out
+
+
+def mers_from_log(path, tail_bytes=20000):
+    """Recent MER readings (dB) from a chain log's equalizer telemetry.
+    fs_err_rms IS the MER dial: MER = 20*log10(5/err) (see science.md
+    §12.5). Returns [] when the log has no telemetry yet."""
+    import math
+    try:
+        size = os.path.getsize(path)
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            f.seek(max(0, size - tail_bytes))
+            vals = _RE_FS_ERR.findall(f.read())
+    except OSError:
+        return []
+    out = []
+    for v in vals[-12:]:
+        try:
+            e = float(v)
+            if e > 0:
+                out.append(20.0 * math.log10(5.0 / e))
+        except ValueError:
+            pass
+    return out
 
 
 def wait_for_live_ts(timeout_sec: float = 30.0) -> bool:
@@ -627,37 +703,77 @@ def _build_regions():
 REGIONS = _build_regions()
 
 
+def _print_region(i, r):
+    if r["decodable"] is True:
+        mark = "✓ can decode + watch"
+    elif r["decodable"] == "atsc_only":
+        mark = "✓ decodes ATSC; others detect-only"
+    else:
+        mark = "✗ detect-only (we're ATSC 1.0; this region uses a "\
+               "different standard)"
+    print(f"  {i}) {r['name']}")
+    print(f"      {r['standard']}")
+    print(f"      {mark}")
+    print()
+
+
 def prompt_region() -> dict:
     """Ask the user to pick a region before scanning. Returns the region
-    dict; the scan then tunes only that region's allocated frequencies."""
+    dict; the scan then tunes only that region's allocated frequencies.
+
+    The menu leads with the regions this decoder can actually WATCH (ATSC
+    1.0) and tucks the detect-only regions behind one extra keypress — a
+    scan menu shouldn't open with six standards you can't decode. The
+    other regions stay reachable (spectrum survey abroad is a real use
+    case, and DVB-T/ISDB decode is a future port), just not in the way.
+    """
+    watchable = [r for r in REGIONS if r["decodable"] is not False]
+    others = [r for r in REGIONS if r["decodable"] is False]
     print()
     print("─" * 60)
     print("  What region are you in?")
     print("─" * 60)
     print()
-    for i, r in enumerate(REGIONS, 1):
-        if r["decodable"] is True:
-            mark = "✓ can decode + watch"
-        elif r["decodable"] == "atsc_only":
-            mark = "✓ decodes ATSC; others detect-only"
-        else:
-            mark = "✗ detect-only (we're ATSC 1.0; this region uses a "\
-                   "different standard)"
-        print(f"  {i}) {r['name']}")
-        print(f"      {r['standard']}")
-        print(f"      {mark}")
-        print()
+    for i, r in enumerate(watchable, 1):
+        _print_region(i, r)
+    print(f"  {len(watchable) + 1}) Somewhere else "
+          f"({len(others)} non-ATSC regions — spectrum survey only)")
+    print()
     while True:
         try:
-            ans = input(f"Pick a region [1-{len(REGIONS)}]: ").strip()
+            ans = input(f"Pick a region [1-{len(watchable) + 1}]: ").strip()
         except EOFError:
             raise SystemExit("no input")
         try:
             n = int(ans)
-            if 1 <= n <= len(REGIONS):
-                return REGIONS[n - 1]
         except ValueError:
-            pass
+            print("  invalid")
+            continue
+        if 1 <= n <= len(watchable):
+            return watchable[n - 1]
+        if n == len(watchable) + 1:
+            print()
+            print("  These regions use a different broadcast standard, so we")
+            print("  can map their carriers but not decode video (yet).")
+            print()
+            for j, r in enumerate(others, 1):
+                _print_region(j, r)
+            while True:
+                try:
+                    a2 = input(f"Pick [1-{len(others)}], or 0 to go "
+                               f"back: ").strip()
+                except EOFError:
+                    raise SystemExit("no input")
+                try:
+                    m = int(a2)
+                except ValueError:
+                    print("  invalid")
+                    continue
+                if m == 0:
+                    return prompt_region()
+                if 1 <= m <= len(others):
+                    return others[m - 1]
+                print("  invalid")
         print("  invalid")
 
 
@@ -724,11 +840,19 @@ def ffprobe_programs(timeout_sec: float = 20.0,
         }
         # Audio streams may be plural (English + Spanish SAP, etc.).
         audio_streams: list[dict] = []
+        def _pid(st):
+            # ffprobe stream "id" is the TS PID as hex ("0x31")
+            try:
+                return int(str(st.get("id")), 16)
+            except (TypeError, ValueError):
+                return None
         for s in p.get("streams", []) or []:
             ct = s.get("codec_type")
             if ct == "video":
                 info["video_codec"] = s.get("codec_name")
                 info["video_height"] = s.get("height")
+                if _pid(s) is not None:
+                    info["vpid"] = _pid(s)
                 # Frame rate: ffprobe gives "avg_frame_rate" as "num/den".
                 fps_str = s.get("avg_frame_rate", "0/1")
                 try:
@@ -747,9 +871,19 @@ def ffprobe_programs(timeout_sec: float = 20.0,
                     "codec": s.get("codec_name"),
                     "channels": s.get("channels"),
                     "lang": lang,
+                    "pid": _pid(s),
                 })
+            elif ct == "subtitle" and _pid(s) is not None:
+                info.setdefault("spids", []).append(_pid(s))
         if audio_streams:
             info["audio_streams"] = audio_streams
+            # English-first, matching the player's extraction rule
+            apids = [a["pid"] for a in audio_streams
+                     if a.get("pid") is not None and a.get("lang") == "eng"]
+            apids += [a["pid"] for a in audio_streams
+                      if a.get("pid") is not None and a.get("lang") != "eng"]
+            if apids:
+                info["apids"] = apids
         progs.append(info)
     return progs
 
@@ -770,8 +904,44 @@ def scan_one_rf(rf: int, dwell_sec: float = 12.0,
     except (FileNotFoundError, PermissionError, OSError):
         pass
 
-    fh = log_fh if log_fh is not None else subprocess.DEVNULL
+    # MER EARLY VERDICT (2026-07-07): keep the chain log readable so the
+    # equalizer's fs_err_rms telemetry — the MER dial — can call dead
+    # candidates in ~9 s instead of burning the full 25 s + dwell, and
+    # so every scanned channel gets a quality number in the map.
+    own_log = log_fh is None
+    log_path = LIVE_TS.parent / f"scan_rf{rf}.log"
+    if own_log:
+        os.environ.setdefault("STVT_EQ_TELEM", "1")
+        fh = open(log_path, "w", encoding="utf-8", errors="replace")
+    else:
+        fh = log_fh
     proc = None
+
+    def mer_med():
+        m = mers_from_log(log_path) if own_log else []
+        return round(sorted(m)[len(m) // 2], 1) if m else None
+
+    def mer_p10():
+        m = mers_from_log(log_path) if own_log else []
+        return round(sorted(m)[len(m) // 10], 1) if len(m) >= 10 else None
+
+    def loss_pct():
+        # measured packet loss over the dwell — the metric MER can't
+        # fake: fast faders (RF9) alias the 41 Hz MER sampling and read
+        # "flawless" by median while losing 10%/min (2026-07-10 lesson).
+        # Last 4 RS windows only: the first ones are EQ convergence.
+        if not own_log:
+            return None
+        try:
+            with open(log_path, "r", encoding="utf-8",
+                      errors="replace") as f:
+                rs = _RE_RS5.findall(f.read())[-4:]
+        except OSError:
+            return None
+        pk = sum(int(p) for p, _ in rs)
+        bd = sum(int(b) for _, b in rs)
+        return round(100.0 * bd / pk, 2) if pk else None
+
     try:
         proc = spawn_tv_live(rf, fh, viterbi=viterbi)
     except Exception as e:
@@ -782,13 +952,54 @@ def scan_one_rf(rf: int, dwell_sec: float = 12.0,
         # cold-starts 4-6s slower than the old softvit fork, especially
         # on VHF and marginal UHF carriers. 15s was too tight and cut
         # off legitimately-locking channels (RF 7 WJLA, RF 24, RF 27).
-        if not wait_for_live_ts(timeout_sec=25.0):
-            return {"rf": rf, "lock": False, "reason": "no live.ts growth"}
-        # Wait for the equalizer to converge — POLL with early exit instead
-        # of sitting out the full dwell. ATSC mandates the PSIP VCT repeat
-        # every <=400ms, so once PAT flows, ~2s more of TS already carries
-        # the channel table. Saves 5-10s on every locking channel (the Pi
-        # scan's dominant cost was this fixed dwell).
+        # MER-aware wait: growth check as before, plus the early verdict.
+        t_spawn = time.time()
+        grew = False
+        last_size = -1
+        while time.time() - t_spawn < 25.0:
+            if proc.poll() is not None:
+                return {"rf": rf, "lock": False, "reason": "tv_live died"}
+            try:
+                sz = LIVE_TS.stat().st_size
+            except FileNotFoundError:
+                sz = 0
+            if sz > 1_000_000 and sz != last_size and last_size >= 0:
+                grew = True
+                break
+            last_size = sz
+            if own_log and (time.time() - t_spawn) > 9.0:
+                mers = mers_from_log(log_path)
+                if len(mers) >= 3 and max(mers) < 11.5:
+                    return {"rf": rf, "lock": False, "mer_med": mer_med(),
+                            "reason": f"MER floor {max(mers):.1f} dB "
+                                      "(cliff is 15.2 — nothing here)"}
+                # no equalizer telemetry yet (it starts at field sync):
+                # judge the pilot by NCO stability instead
+                if not mers:
+                    ncos = ncos_from_log(log_path)
+                    if len(ncos) >= 5:
+                        mid = sorted(ncos)[len(ncos) // 2]
+                        spread = max(abs(x - mid) for x in ncos)
+                        if spread > 3000.0:
+                            return {"rf": rf, "lock": False,
+                                    "reason": "no pilot (NCO wandering "
+                                              f"±{spread:.0f} Hz)"}
+                        # THIRD VERDICT (2026-07-07 bench finding): a
+                        # STABLE pilot with no field sync by 15 s is the
+                        # discone-class signature — carrier present,
+                        # data unreachable. The full 25 s adds nothing.
+                        if (time.time() - t_spawn) > 15.0 \
+                                and spread <= 3000.0:
+                            return {"rf": rf, "lock": False,
+                                    "reason": "pilot, no field sync "
+                                              "(carrier without data)"}
+            time.sleep(0.5)
+        if not grew:
+            r = {"rf": rf, "lock": False, "reason": "no live.ts growth"}
+            if mer_med() is not None:
+                r["mer_med"] = mer_med()
+            return r
+        # Wait for the equalizer to converge.
         deadline = time.time() + dwell_sec
         pat = 0
         while time.time() < deadline:
@@ -812,6 +1023,58 @@ def scan_one_rf(rf: int, dwell_sec: float = 12.0,
             "tei_pct": measure_tei_rate(),
             "programs": progs,
         }
+        # channel quality + provenance for the map (belief map / panel
+        # ranking / time-knob science all eat this)
+        if mer_med() is not None:
+            result["mer_med"] = mer_med()
+        if mer_p10() is not None:
+            result["mer_p10"] = mer_p10()   # low tail: impulse/breather flag
+        if loss_pct() is not None:
+            result["loss_pct"] = loss_pct()  # measured loss during dwell
+        result["antenna"] = os.environ.get("STVT_ANTENNA", "?")
+        # seed the player's PID cache for the WHOLE market at scan time
+        # (2026-07-11): the scan already discovers every program's PIDs
+        # and used to throw them away — keeping them turns every
+        # first-ever visit into a warm memory-tune. The player's PSI
+        # probe + no-output watchdog self-heal any staleness.
+        qc = os.environ.get("STVT_PID_CACHE")
+        if qc and progs:
+            try:
+                cache = (json.loads(Path(qc).read_text(encoding="utf-8"))
+                         if os.path.exists(qc) else {})
+                now_iso = time.strftime("%Y-%m-%dT%H:%M:%S")
+                for pinfo in progs:
+                    pn, vp = pinfo.get("program_num"), pinfo.get("vpid")
+                    if pn and vp:
+                        cache[f"{rf}:{pn}"] = {
+                            "vpid": vp,
+                            "apids": pinfo.get("apids", []),
+                            "spids": pinfo.get("spids", []),
+                            "ts": now_iso, "src": "scan"}
+                Path(qc).write_text(json.dumps(cache, indent=1),
+                                    encoding="utf-8")
+            except (OSError, ValueError):
+                pass
+        # feed the learned hour-curves (time-knob v2): every scan is a
+        # timestamped quality sample. Env-gated; schema matches
+        # time_knob.FIELDS (ts,rf,ant,mer,loss_pct,source,date_known).
+        qh = os.environ.get("STVT_QUALITY_HISTORY")
+        if qh and (result.get("mer_med") is not None
+                   or result.get("loss_pct") is not None):
+            try:
+                import csv as _csv
+                _new = not os.path.exists(qh)
+                with open(qh, "a", newline="", encoding="utf-8") as _f:
+                    _w = _csv.writer(_f)
+                    if _new:
+                        _w.writerow(["ts", "rf", "ant", "mer", "loss_pct",
+                                     "source", "date_known"])
+                    _w.writerow([time.strftime("%Y-%m-%dT%H:%M:%S"), rf,
+                                 result["antenna"],
+                                 result.get("mer_med", ""),
+                                 result.get("loss_pct", ""), "scan", 1])
+            except OSError:
+                pass
         # ATSC PSIP: virtual-channel labels + the next ~12 hours of EIT
         # show titles, decoded directly from the captured TS via our
         # stdlib-only parser. Events are stored with GPS start_time so
@@ -832,6 +1095,11 @@ def scan_one_rf(rf: int, dwell_sec: float = 12.0,
         return result
     finally:
         kill_proc(proc, "scan_tv_live")
+        if own_log:
+            try:
+                fh.close()
+            except OSError:
+                pass
         # SDRplay driver needs ~4 s to fully release between back-to-back
         # tunes. 3s was sometimes too tight on this rig and the next
         # channel's SDR open would fail silently (presents as
@@ -862,8 +1130,13 @@ def scan_one_rf_with_retry(rf: int, dwell_sec: float = 12.0,
         if res.get("lock"):
             res["lock_attempt"] = attempt + 1
             return res
-        if res.get("reason") == "no live.ts growth":
-            break  # stable outcome — see docstring
+        # carrier-without-data earns ONE cold-start retry (equalizer
+        # luck is real) but never a third attempt — the 7/07 discone
+        # benchmark burned ~12 min on 3x25s for channels physics had
+        # already answered
+        if attempt >= 1 and str(res.get("reason", "")).startswith(
+                ("pilot, no field sync", "no pilot", "MER floor")):
+            return res
     return last or {"rf": rf, "lock": False, "reason": "all retries failed"}
 
 
@@ -888,12 +1161,22 @@ def run_power_sweep(freqs_hz: list[int], log_fh=None,
     is enough for fast detection of strong carriers. Deep-scan mode
     uses 1.5s, which sdr_sweep's _analyze() automatically converts
     into a Welch-averaged PSD for ~12 dB extra pilot SNR — pulls
-    weak/distant ATSC carriers out of the noise floor."""
+    weak/distant ATSC carriers out of the noise floor.
+
+    TWO-STAGE (2026-07-29, speed-1 lever 2): sdr_sweep now spends only
+    2.05 ms per frequency up front (one 16384-pt FFT — the measured
+    detection floor, lab/speed_dossier.md §2.2) and pays `dwell_sec` only
+    where stage A saw a possible pilot. This is HDHomeRun's
+    `if (!signal_present) return 1;`. Verdict parity with the single-stage
+    sweep is proven on all 35 fixtures (lab/speed_build/scan_gate_study.py).
+    STVT_SCAN_FAST=0 restores the single-stage sweep exactly."""
     payload = json.dumps([int(f) for f in freqs_hz]).encode("utf-8")
     fh = log_fh if log_fh is not None else sys.stderr
+    fast = os.environ.get("STVT_SCAN_FAST", "1") != "0"
     proc = subprocess.Popen(
         [PYTHON_EXE, "-u", str(SDR_SWEEP_PY),
-         "--dwell-sec", f"{dwell_sec:.3f}"],
+         "--dwell-sec", f"{dwell_sec:.3f}",
+         "--fast" if fast else "--no-fast"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=fh,
@@ -979,8 +1262,45 @@ def run_scan(region: dict | None = None,
         n = len(all_freqs)
         print(f"[scan] region: {region['name']}")
         print(f"[scan] standard: {region['standard']}")
+        # Pre-flight: a USB link that gaps under full-rate load produces a
+        # garbage scan that LOOKS like a bad antenna (few channels, huge
+        # loss on the survivors). Refuse to scan through a broken pipe.
+        link = None
+        if os.environ.get("STVT_SKIP_LINK_CHECK", "0") != "1":
+            try:
+                import probe_throughput as _ptp
+                print("[scan] pre-flight: measuring USB link at full rate "
+                      "(2s)...")
+                link = _ptp.measure(seconds=2.0)
+                if link["delivered_pct"] < 90:
+                    print("=" * 62, file=sys.stderr)
+                    print(f"[scan] ABORT: USB link delivered only "
+                          f"{link['delivered_pct']:.0f}% of samples at full "
+                          f"rate -\n[scan] " + _ptp.LINK_FIX_HINT,
+                          file=sys.stderr)
+                    print("=" * 62, file=sys.stderr)
+                    return {"scanned_at": datetime.now()
+                            .isoformat(timespec="seconds"), "channels": [],
+                            "error": "usb_link_bad", "link_health": link}
+                if link["delivered_pct"] < 99.5 or link["overflows"] > 25:
+                    print(f"[scan] WARNING: USB link imperfect "
+                          f"({link['delivered_pct']:.1f}% delivered, "
+                          f"{link['overflows']} overflows) - scan results "
+                          f"may miss channels.\n[scan] " + _ptp.LINK_FIX_HINT)
+                else:
+                    print(f"[scan] link healthy "
+                          f"({link['delivered_pct']:.1f}% delivered, "
+                          f"{link['overflows']} overflows)")
+                time.sleep(2)   # let the SDR release before the sweep
+            except ImportError:
+                pass
+            except Exception as e:
+                print(f"[scan] link pre-flight skipped ({e})")
+        _fast_scan = os.environ.get("STVT_SCAN_FAST", "1") != "0"
         print(f"[scan] phase 1 — power sniff across {n} frequencies "
-              f"(~{n * 0.5:.0f}s)...")
+              f"(~{n * (0.25 if _fast_scan else 0.5):.0f}s"
+              f"{', two-stage' if _fast_scan else ''})...")
+        _t_phase1 = time.time()
         try:
             sweep_in = [f for _atsc_rf, f, _label in all_freqs]
             sweep_out = run_power_sweep(sweep_in, log_fh=log_fh,
@@ -995,6 +1315,9 @@ def run_scan(region: dict | None = None,
                   "[scan] verify with:  SoapySDRUtil --probe", file=sys.stderr)
             return {"scanned_at": datetime.now().isoformat(timespec="seconds"),
                     "channels": [], "error": str(e)}
+        _n_conf = sum(1 for s in sweep_out if s.get("stage") == "confirm")
+        print(f"[scan] phase 1 done in {time.time() - _t_phase1:.2f}s"
+              f"{f' ({_n_conf}/{n} needed the full dwell)' if _fast_scan else ''}")
         time.sleep(3)  # let SDR fully release before phase 2
 
         # Decision logic per channel:
@@ -1005,10 +1328,19 @@ def run_scan(region: dict | None = None,
         # Non-ATSC region: fall back to RMS threshold for carrier presence.
         rms_values = [r["rms_dbfs"] for r in sweep_out
                       if r["rms_dbfs"] > -150]
-        if rms_values:
-            median = sorted(rms_values)[len(rms_values) // 2]
-        else:
-            median = -50.0
+        if not rms_values:
+            # DEAF SWEEP (2026-07-10): every channel at -inf = the SDR is
+            # streaming silence. No retry fixes this (firmware stick);
+            # tell the user the one real cure instead of quietly failing.
+            print("[scan] RADIO IS STREAMING SILENCE — every frequency "
+                  "read -inf. This is the stuck-SDR state: unplug the "
+                  "SDR's USB cable, wait 5 s, plug it back in, then scan "
+                  "again.", file=sys.stderr)
+            print("[scan] radio silent — REPLUG THE SDR (unplug USB, "
+                  "wait 5s, replug), then scan again")
+            return {"scanned_at": datetime.now().isoformat(timespec="seconds"),
+                    "channels": [], "error": "radio streaming silence — replug SDR"}
+        median = sorted(rms_values)[len(rms_values) // 2]
         rms_threshold = median + rms_threshold_db
         print(f"[scan] noise floor ≈ {median:+.1f} dBFS")
 
@@ -1027,6 +1359,22 @@ def run_scan(region: dict | None = None,
             atsc1_carrier = (pilot_snr >= pilot_snr_threshold_db
                              and pilot_sharp >= pilot_sharpness_threshold_db
                              and vsb_asym >= vsb_asymmetry_threshold_db)
+            # STRONG-PILOT RESCUE (2026-07-11, born on the WSL port): the
+            # sniff is a heuristic and can read a few dB soft (remote
+            # transports, marginal propagation moments). Measured twice
+            # on RF36 the same evening: sniffed sharp 25.0 vs the 26.25
+            # gate (hard-rejected) while the demod decoded 0.007% loss;
+            # then sniffed SNR +33 (rejected again) while the demod
+            # decoded 0.000% at full rate. If the pilot alone clears the
+            # strict SNR bar and sharpness shows a real pilot, that
+            # earns a REAL lock attempt; the ~9 s MER early-verdict
+            # keeps wrong guesses cheap. The demod is ground truth —
+            # the sniff doesn't get a veto over it.
+            pilot_rescue = (not atsc1_carrier
+                            and pilot_snr >= pilot_snr_threshold_db
+                            and pilot_sharp >= 18.0)
+            if pilot_rescue:
+                atsc1_carrier = True
             # Weak ATSC 1.0 gate (only checked in include_weak mode):
             # all three relaxed thresholds present. Catches carriers that
             # HDHomeRun's hardware front-end can resolve but our software
@@ -1052,6 +1400,8 @@ def run_scan(region: dict | None = None,
                        "vsb_asymmetry_db": vsb_asym,
                        "atsc3_db": atsc3_score,
                        "hot": atsc1_carrier}
+                if pilot_rescue:
+                    rec["pilot_rescue"] = True
                 if atsc1_carrier:
                     hot_atsc.append((atsc_rf, rec))
                 elif weak_atsc1 and include_weak:
@@ -1103,6 +1453,22 @@ def run_scan(region: dict | None = None,
                 print(f"[scan]   (also {len(atsc3_carriers)} ATSC 3.0 / "
                       f"NextGen TV carrier(s) detected — skipping phase 2; "
                       f"need a 3.0 decoder to watch those)")
+            # planner ordering (opt-in, ordering ONLY — no dwell changes):
+            # STVT_SCAN_ORDER="36,34,..." is a preference list computed
+            # from the learned quality history; stable sort keeps the
+            # original relative order for RFs the planner doesn't know.
+            _order = os.environ.get("STVT_SCAN_ORDER", "")
+            if _order:
+                try:
+                    _rank = {int(x): i for i, x in
+                             enumerate(_order.replace(" ", "").split(","))
+                             if x}
+                    hot_atsc = sorted(
+                        hot_atsc, key=lambda t: _rank.get(t[0], 10**6))
+                    print("[scan] phase-2 order from learned history: "
+                          + ", ".join(f"RF{rf_}" for rf_, _ in hot_atsc))
+                except ValueError:
+                    pass
             for rf, rec in hot_atsc:
                 print(f"  RF {rf:>2} ({rec['freq_mhz']:5.1f} MHz, "
                       f"SNR {rec['pilot_snr_db']:+4.0f} / sharp "
@@ -1120,9 +1486,14 @@ def run_scan(region: dict | None = None,
                 # STVT_VITERBI=soft from CHAIN_DEFAULTS. The "soft" branch
                 # routes to tv_live_softvit.py, an older fork that ignores
                 # env vars — do not use it here, it strips our chain config.
+                # log_fh=None so each RF gets its own readable log —
+                # that is what arms the MER-floor / NCO-pilot early
+                # verdicts and the per-channel mer_med in the map
+                # (2026-07-07: passing the shared handle disabled all
+                # of it silently)
                 res = scan_one_rf_with_retry(rf, dwell_sec=dwell_sec,
                                               viterbi="stock",
-                                              log_fh=log_fh, retries=2)
+                                              log_fh=None, retries=2)
                 # Preserve phase-1 metrics into the post-lock record so
                 # the picker can show signal strength %.
                 res["rms_dbfs"] = rec["rms_dbfs"]
@@ -1152,6 +1523,10 @@ def run_scan(region: dict | None = None,
 
         scan = {
             "scanned_at": datetime.now().isoformat(timespec="seconds"),
+            # which antenna this sweep measured — prerequisite for all
+            # verdict learning (a dead verdict without its antenna is
+            # unattributable)
+            "antenna": os.environ.get("STVT_ANTENNA", "?"),
             "region": region["key"],
             "region_name": region["name"],
             "standard": region["standard"],
@@ -1201,6 +1576,28 @@ def load_scan() -> dict | None:
         return json.loads(SCAN_PATH.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
+
+
+_NVENC_OK: bool | None = None
+
+
+def _nvenc_available() -> bool:
+    """True when h264_nvenc can actually initialize (NVIDIA GPU + driver).
+    Merely being compiled into ffmpeg is not enough - on a GPU-less box
+    the encoder dies at first frame with 'Cannot load libcuda.so.1'.
+    Probe once by really encoding a frame; cache the answer."""
+    global _NVENC_OK
+    if _NVENC_OK is None:
+        try:
+            r = subprocess.run(
+                [FFMPEG, "-hide_banner", "-loglevel", "error",
+                 "-f", "lavfi", "-i", "nullsrc=s=64x64:d=0.1",
+                 "-frames:v", "1", "-c:v", "h264_nvenc", "-f", "null", "-"],
+                capture_output=True, timeout=15)
+            _NVENC_OK = r.returncode == 0
+        except Exception:
+            _NVENC_OK = False
+    return _NVENC_OK
 
 
 def build_ffmpeg_cmd(play: bool, record_path: Path | None,
@@ -1298,7 +1695,10 @@ def build_ffmpeg_cmd(play: bool, record_path: Path | None,
 
     cmd = [
         FFMPEG,
-        "-hide_banner", "-loglevel", "warning",
+        # -y: a crash-recovery respawn must be able to overwrite the
+        # record file it was writing; without it the respawn dies with
+        # "File exists" and recording never recovers.
+        "-hide_banner", "-y", "-loglevel", "warning",
         # Input: maximally tolerant TS demux. discardcorrupt drops bad
         # packets, output_corrupt keeps the partially-decoded frames the
         # decoder DOES produce (rather than freezing waiting for clean
@@ -1324,15 +1724,24 @@ def build_ffmpeg_cmd(play: bool, record_path: Path | None,
         # the full 60-field-per-second temporal smoothness of 1080i. mode=0
         # would halve temporal info to 30 fps. No-op on 720p60 progressive.
         "-vf", "yadif=mode=1:parity=auto:deint=interlaced",
+    ]
+    if _nvenc_available():
         # NVENC: live-streaming tune (ll, not hq — hq wants two-pass which
         # breaks on a stdin pipe). p7 gives best quality at the cost of
         # GPU time; lookahead helps allocate bitrate in motion. No
         # maxrate cap so bursts during high-motion scenes get the headroom
         # they need.
-        "-c:v", "h264_nvenc", "-preset", "p7", "-tune", "ll",
-        "-rc", "vbr", "-cq", "19", "-b:v", "0",
-        "-rc-lookahead", "32",
-        "-bf", "3", "-spatial-aq", "1", "-temporal-aq", "1",
+        cmd += [
+            "-c:v", "h264_nvenc", "-preset", "p7", "-tune", "ll",
+            "-rc", "vbr", "-cq", "19", "-b:v", "0",
+            "-rc-lookahead", "32",
+            "-bf", "3", "-spatial-aq", "1", "-temporal-aq", "1",
+        ]
+    else:
+        # No NVIDIA GPU: CPU encode. veryfast keeps a 720p60/1080i
+        # transcode real-time on modest CPUs.
+        cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "19"]
+    cmd += [
         "-pix_fmt", "yuv420p",
         # Shorter GOP so ffplay can resync after corruption within ~1s
         # instead of waiting up to 2s for the next keyframe.
@@ -3331,8 +3740,9 @@ def _spawn_in_new_console(cmd: list[str]) -> subprocess.Popen:
     _xauth = os.environ.get("XAUTHORITY", "")
     _display_prefix = f"export DISPLAY={_display}; export XAUTHORITY={_xauth}; "
     tee_suffix = " 2>&1 | tee ~/stvt_stream.log; exec bash"
-    for emu, wrap in (
-        ("gnome-terminal", ["gnome-terminal", "--", "bash", "-c",
+    # Only try GUI terminals when there's a display to draw on.
+    emulators = () if not _display else (
+        ("gnome-terminal", ["gnome-terminal", "--wait", "--", "bash", "-c",
                             f"{_display_prefix}{quoted}{tee_suffix}"]),
         ("konsole",        ["konsole", "-e", "bash", "-c",
                             f"{_display_prefix}{quoted}{tee_suffix}"]),
@@ -3343,14 +3753,30 @@ def _spawn_in_new_console(cmd: list[str]) -> subprocess.Popen:
                             "bash", "-c", f"{_display_prefix}{quoted}{tee_suffix}"]),
         ("xterm",          ["xterm", "-e", "bash", "-c",
                             f"{_display_prefix}{quoted}{tee_suffix}"]),
-    ):
-        if shutil.which(emu):
-            return subprocess.Popen(wrap, start_new_session=True)
-    # Fallback: no terminal emulator on the system (headless / WSL).
-    # Run inline; output goes to the picker's terminal.
-    print("[tv_tuner] no terminal emulator found — output will appear "
-          "in this window (install gnome-terminal or xterm for a "
-          "separate window).")
+    )
+    for emu, wrap in emulators:
+        if not shutil.which(emu):
+            continue
+        p = subprocess.Popen(wrap, start_new_session=True)
+        # A terminal that dies within a second didn't open a window —
+        # e.g. gnome-terminal with no dbus session (ssh login, headless,
+        # containers) prints "Failed to execute child process
+        # dbus-launch" and exits. Detect that and try the next one
+        # instead of silently never starting the chain. (--wait above
+        # keeps a healthy gnome-terminal process alive so it isn't
+        # mistaken for this.)
+        try:
+            p.wait(timeout=1.2)
+        except subprocess.TimeoutExpired:
+            return p          # still running = window is up
+        if p.returncode == 0:
+            return p          # exited cleanly after handing off
+        print(f"[tv_tuner] {emu} couldn't open a window "
+              f"(rc={p.returncode}) — trying another terminal...")
+    # Fallback: no working terminal emulator (headless / WSL / broken
+    # session). Run inline; output goes to the picker's terminal.
+    print("[tv_tuner] no working terminal emulator — output will appear "
+          "in this window (install xterm for a separate window).")
     return subprocess.Popen(cmd, start_new_session=True)
 
 
@@ -3804,8 +4230,52 @@ def _resolve_neighbor_row(rows: list[dict], current: dict | None,
     return detected[new]
 
 
+def _radio_env_ok() -> bool:
+    try:
+        import SoapySDR                          # noqa: F401
+        import numpy                             # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _radio_env_gate(what: str) -> None:
+    """Fail FAST, before any interactive prompt, when this interpreter has
+    no radio bindings — and hand back a command that actually works.
+
+    Learned the hard way 2026-07-29: launched with a bare `python`, the
+    region menu ran happily and only the SUBPROCESS discovered the missing
+    SoapySDR, so the user answered a whole questionnaire before failing.
+    A dependency gate belongs at the top of main(), not two layers down.
+    """
+    if _radio_env_ok():
+        return
+    here = Path(__file__).resolve().parent
+    script = here / "tv_tuner.py"
+    print(f"[tv_tuner] {what} needs the SDR python environment "
+          f"(SoapySDR + numpy).", file=sys.stderr)
+    print(f"[tv_tuner] this interpreter has neither: {sys.executable}",
+          file=sys.stderr)
+    for cand in (Path(os.path.expanduser(r"~\radioconda\python.exe")),
+                 Path(r"C:\radioconda\python.exe")):
+        if cand.exists():
+            print("", file=sys.stderr)
+            print("[tv_tuner] run this instead:", file=sys.stderr)
+            print(f'  "{cand}" "{script}" '
+                  f'{" ".join(sys.argv[1:])}', file=sys.stderr)
+            print("", file=sys.stderr)
+            raise SystemExit(2)
+    print("[tv_tuner] install radioconda (or any python with SoapySDR + "
+          "numpy) and run this script with it.", file=sys.stderr)
+    raise SystemExit(2)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+
+    # Radio-dependent verbs get gated before anything interactive.
+    if getattr(args, "scan", False):
+        _radio_env_gate("--scan")
 
     # Always make sure config exists / is loaded
     cfg = load_config()
@@ -3903,3 +4373,20 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n[tv_tuner] interrupted")
         sys.exit(130)
+    except SystemExit as e:
+        # A SystemExit carrying a STRING is a genuine runtime failure raised by
+        # our code ("ffmpeg not found", "no channels available", ...) — signpost
+        # the doctor. Integer codes (0 = clean, 2 = argparse usage error, etc.)
+        # and Ctrl-C pass through untouched, so a mistyped flag never nags.
+        if isinstance(e.code, str):
+            print(e.code, file=sys.stderr)   # emit the message Python would have
+            _doctor_signpost()
+            sys.exit(1)
+        raise
+    except Exception:
+        # Any unhandled crash (missing decoder interpreter, SoapySDR import, a
+        # bug) — show the traceback for debugging AND the recovery path.
+        import traceback
+        traceback.print_exc()
+        _doctor_signpost()
+        sys.exit(1)

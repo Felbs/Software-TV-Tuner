@@ -9,10 +9,10 @@ Jellyfin install. Config via environment variables:
   JF_URL      Jellyfin base URL         (default http://localhost:8096)
   JF_USER     admin username to create  (default admin)
   JF_PASS     admin password to set     (default changeme — OVERRIDE THIS)
-  STVT_TUNER  tuner base URL            (default http://localhost:5004)
+  STVT_TUNER  tuner base URL            (default http://raspberrypi.local:5004)
 
 Example:
-  JF_PASS='my-password' STVT_TUNER='http://192.168.4.76:5004' python3 jf_setup.py
+  JF_PASS='my-password' STVT_TUNER='http://192.168.1.100:5004' python3 jf_setup.py
 
 Jellyfin 10.11 rejects a blank password. To reset a Jellyfin to first-run:
   sudo systemctl stop jellyfin
@@ -22,7 +22,7 @@ Jellyfin 10.11 rejects a blank password. To reset a Jellyfin to first-run:
 import json, os, time, urllib.request, urllib.error
 
 BASE = os.environ.get("JF_URL", "http://localhost:8096").rstrip("/")
-TUNER = os.environ.get("STVT_TUNER", "http://localhost:5004").rstrip("/")
+TUNER = os.environ.get("STVT_TUNER", "http://raspberrypi.local:5004").rstrip("/")
 ADMIN = os.environ.get("JF_USER", "admin")
 PASSWORD = os.environ.get("JF_PASS", "changeme")
 AUTH_HDR = ('MediaBrowser Client="stvt", Device="stvt-setup", '

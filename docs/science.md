@@ -18,23 +18,15 @@ engineering background. Read it start to finish and you should understand:
   than the Viterbi stage does
 - And why the analog **gain knob** quietly matters more than any of it
 
-## The one idea that ties it together
+…and in **Part Two**, the questions only live experiments could
+answer: why tune TV in software at all (the honest silicon-vs-code
+scorecard), the seven laws the adaptive era was paid to learn —
+metrics that lie, optimizers that cheat, configs that die at sunset
+— and how one codebase learned to tune any antenna and tell the
+truth about it.
 
-A digital TV receiver is a pipeline that **removes uncertainty one layer
-at a time**. The antenna hands you a faint, noisy, distorted, rotating
-mess, and every stage strips away one specific unknown:
-
-> *unknown carrier frequency* → FPLL · *unknown sample instant* → timing
-> recovery · *unknown channel echoes* → equalizer · *unknown bit under
-> the noise* → Viterbi · *leftover byte errors* → Reed-Solomon.
-
-Each stage only works if the one before it has already done its job, which
-is why a single weak link — a wrong gain setting, an equalizer that trains
-on garbage — collapses the whole chain into noise. Keep that ordering in
-mind and the rest of this document is just the details of each arrow.
-
-We'll walk it in the order the signal travels: from the transmitter to
-the pixels on your screen.
+It's structured roughly in the order the signal travels: starting at
+the transmitter, ending at your TV's screen.
 
 ## 1. The signal at the transmitter
 
@@ -140,12 +132,21 @@ landing in it is the single most important thing you do.
 
 On the SDRplay RSPdx, two knobs control it:
 
-- **`rfgain_sel`** — selects how many front-end LNA stages are enabled.
-  Confusingly, *higher* values mean *fewer* stages and *less* gain. For a
-  strong ATSC station you want fewer stages on; `rfgain_sel=5` (2 stages)
-  is the empirical sweet spot.
-- **`IFGR`** (IF Gain Reduction) — post-mixer attenuation in dB, set to
-  59 so the AGC-controlled IF stage stops slamming peaks into clipping.
+- **`rfgain_sel`**: enables/disables stages of the front-end LNA.
+  Higher values = fewer LNA stages enabled = less RF gain.
+- **`IFGR`** (IF Gain Reduction): post-mixer attenuation in dB
+  (inverted: bigger number = quieter).
+
+An early version of this document declared one magic setting "the
+empirical sweet spot." That aged badly, and how it aged is one of the
+project's best lessons: **there is no universal gain setting.** The
+optimum depends on the antenna, the amplifier, the cable, the channel
+— and, we eventually proved, the *time of day* (a setting calibrated
+at noon became overload garbage at sunset). The real answers live in
+Part Two below: measure a live quality signal (MER), grid-search the
+two knobs against it per-setup, and hand level-tracking to the
+radio's hardware AGC so drift is absorbed in silicon instead of
+chased in software.
 
 Get these wrong and they look like perfectly reasonable settings while
 producing 100% TEI=1 — i.e. "the decoder is broken" — when nothing
@@ -627,7 +628,430 @@ top — most "decoder" problems are really front-end problems.)
 | 50%+ RS-clean but the player won't show HD | HD generally needs 80%+. Try a stronger station or a better antenna |
 | 100% RS-clean but the picture is scrambled | RS decoded fine, but byte alignment between the deinterleaver and the RS frame is off. Check PN63 polarity |
 
-## 15. Further reading
+## 12.5 MER — the dial between "locked" and "decoding"
+
+For most of this project's life, we had exactly two signal-quality
+readings: the FPLL's pilot-lock telemetry (`mean|x|` — is the
+*carrier* locked?) and the MPEG-2 sequence-header count in the output
+TS (did *video* actually decode?). Between those two lies a cliff:
+8-VSB's trellis + Reed-Solomon FEC means a channel decodes essentially
+perfectly above ~15.2 dB of SNR and produces essentially *nothing*
+below it (the industry calls this the "threshold of visibility").
+A pilot can lock beautifully at an SNR where the wideband data has no
+chance — the pilot is a narrowband tone, robust in exactly the way the
+6 MHz of data isn't. So "it locks but won't decode" was a black box:
+we couldn't see whether a failing antenna was 1 dB short or 10.
+
+The dial was hiding in the equalizer the whole time. Every ATSC data
+field starts with a **field sync** segment whose contents are fixed
+and known (PN511/PN63 training sequences at ±5 levels). The LMS
+equalizer already computes the RMS error between what it received and
+that known training pattern (`fs_err_rms`) — that error *is* the
+**Modulation Error Ratio**, the same metric broadcast engineers read
+off a $5,000 signal analyzer:
+
+```
+MER(dB) ≈ 20 · log10( 5.0 / fs_err_rms )
+```
+
+Enable it with `STVT_EQ_TELEM=1` (zero overhead when off) and the
+chain prints a continuous, field-sync-rate MER estimate. Its value:
+
+- **It's continuous where decode is binary.** Gain calibration and
+  antenna aiming become hill-climbs on a gradient ("13.4 dB, need
+  15.2, keep going") instead of guess-and-check against a cliff.
+- **It diagnoses by shape.** MER flat as gain rises → the antenna is
+  SNR/aperture-limited; no electronics will fix it. MER falls as gain
+  rises → front-end overload. MER healthy but zero TS → the problem
+  is plumbing (USB throughput, dead stream), not RF. MER oscillating
+  ±2 dB on a timescale of seconds → multipath fading.
+- **It's the honest aim signal.** In-band power and even spectral
+  flatness both peak on multipath reflections that don't decode; the
+  equalizer's own training error is the only cheap metric that tracks
+  what the FEC actually experiences.
+
+### The universal calibration algorithm
+
+`adaptive-tv/` uses the MER dial to make one code path work on any
+antenna. Order matters — each stage rules out a failure class the
+later stages would misdiagnose:
+
+1. **Plumbing probe** — stream at 2/6/8 MS/s and count overflows.
+   A long/passive USB extension can carry 2 MS/s but starve at the
+   6–8 MS/s ATSC needs, which masquerades perfectly as "antenna
+   suddenly stopped decoding" (strong carriers, clean pilot, zero
+   data, uniformly on every channel).
+2. **Interferer census** — coarse spectrum sweep; a big wideband
+   antenna can deliver the FM band 10 dB louder than the wanted UHF
+   channel, saturating the front end. Cure is hardware notches +
+   *less* RF gain, never more.
+3. **Port + carrier scan** — in-band shelf (central 6 MHz vs guard
+   bands) per antenna port per RF channel. Any active device (mast
+   amp, LNA) must be powered before this scan means anything.
+4. **MER gain calibration** — sweep the (RF gain × IF gain) grid,
+   score each cell by MER, not by lock and not by output-file growth
+   (garbage grows at full rate too). The optimum moves every time
+   anything in the RF path changes — amp in/out, LNA, even cable
+   swaps — so calibrate per-configuration, never hardcode.
+5. **Channel survey by MER** — multipath is channel-specific;
+   a mux 6 MHz away can be 5 dB better at the same antenna position.
+6. **Recovery-config shootout** — for signals riding the cliff edge,
+   A/B the erasure-mode Reed-Solomon budget and the equalizer's
+   tracking options (gear-shift LMS, quality-triggered tap resets),
+   scored by an ffmpeg null-decode judge (fps + concealment-error
+   rate), because MER stops discriminating once you're above cliff.
+7. **Verdict** — if the best MER is still short of 15.2 dB, report
+   *how far* short and why (aperture / overload / multipath /
+   plumbing). A 4-dB-short antenna is a hardware problem with a
+   number attached, not a software mystery.
+
+### Field results that shaped the algorithm (June–July 2026)
+
+- **An amplified antenna's own amp usually beats an external LNA.**
+  The antenna-branded amp is TV-band-filtered; a wideband LNA
+  amplifies FM + cellular + everything, and the intermod products
+  land in-band. Measured on one directional antenna: its own amp
+  MER 15.8 (decodes), wideband LNA alone 6.5, both stacked 13.5
+  with the SDR's gain floored — the stack overloads unfixably.
+- **Bias-tee LNAs fail silent.** An unpowered LNA is a ~10 dB
+  attenuator that still passes enough signal to *look* connected.
+  Powering it raised the noise floor +22 dB — instantly visible.
+  Know which port your SDR feeds DC on (RSPdx: Antenna B only),
+  and that inline filters block DC if placed on the power path.
+- **Amplification is not SNR.** A passive indoor panel with a
+  genuinely powered 22 dB LNA measured MER 10.1 — the LNA moved
+  signal and noise up together. The missing 5 dB is antenna
+  aperture; only a bigger/better-sited antenna adds it.
+- **The gain knob is two knobs.** On SDRplay hardware, RF gain
+  (`rfgain_sel`, front-end LNA stages) and IF gain (`IFGR`,
+  inverted: higher = less) trade off against intermod. The same
+  MER can hide at several settings; only the grid search finds the
+  cell that also has headroom against fades.
+- **High MER + persistent errors = impulse noise.** A channel can
+  average 19 dB MER (well above cliff) and still glitch, because
+  MER is measured at field syncs while microsecond impulse bursts
+  corrupt packets between them. The tell: repeated full-scale
+  amplitude transients ("rails") in the FPLL telemetry at every
+  gain setting. Prime suspect: your own PC — USB 3.0 signalling
+  radiates broadband hash centered near 500 MHz, so RF channels
+  around there suffer while channels 60+ MHz away are pristine.
+  The fix is channel choice and antenna placement, not gain.
+- **A huge shelf that never field-syncs is not a TV channel.**
+  In-band power says *something* is transmitting; only the ATSC
+  field sync proves it's 8-VSB. The strongest "carrier" on one
+  scan (+28 dB!) was a phantom — some other service or intermod
+  product. Classify by MER-at-any-gain, never by shelf alone.
+- **Glitches with a perfect transport stream: the missing-packet class.**
+  A stream can show flawless MER and *zero* Reed-Solomon failures and
+  still glitch every few seconds — because impulse noise doesn't corrupt
+  packets, it snaps the sync chain, and during the fraction-of-a-second
+  dropout whole slices of the mux are simply *never emitted*. No error
+  counter sees them (there is nothing to count); only the MPEG
+  continuity counters betray the gaps, striking every program's PID at
+  the same instants. An amplitude-domain impulse blanker helps modestly
+  (threshold 2.2–3.0 trimmed the gap rate ~15–30% here), but at ≤2.0 it
+  clips 8-VSB's own modulation and the chain emits a full-rate stream
+  of pure null padding — which scores *perfect* on any gap or error
+  metric, because an empty stream has nothing to be discontinuous. We
+  briefly celebrated exactly that mirage. Two lessons: when a "glitchy"
+  signal has clean RF numbers, audit continuity, not error flags — and
+  every quality metric needs a liveness denominator (confirm real video
+  packets exist) before its zero means anything.
+- **USB cables are part of the radio — and they fail two different
+  ways.** The SDR ships its IQ samples over USB at 32 MB/s, and a
+  marginal cable breaks television while every RF number stays
+  perfect. Failure one, *starvation*: a long passive extension caps
+  the link so hard the radio delivers 2 MS/s when asked for 8 —
+  strong carriers, clean pilot, zero data, on every channel at once.
+  Failure two is sneakier, *leakage*: a cable that passes a 3-second
+  throughput probe at ~96% of the asked rate but drops USB
+  micro-bursts every couple of seconds. Each drop is too short to
+  unlock the phase loop — MER reads a healthy 19 dB — but each one
+  snaps the sync chain and punches a visible glitch. Measured
+  back-to-back on the same antenna, channel, and hour: short cable
+  0–3 stream gaps/min, long cable 27–33. The probe lesson: measuring
+  delivered *volume* is not enough, because a few percent "overhead"
+  can actually be the drops — the gap rate during real decode is the
+  only honest continuity meter. The practical law: put the shortest
+  possible USB 3.0 cable straight into a rear-panel port and never
+  touch it again; when the antenna needs to move, extend the *analog*
+  side with 75 Ω coax, which carries RF happily across a house. One
+  more replug gotcha: the first radio session after any hot-swap
+  tends to come up wedged (API init failure, or opens-but-delivers-
+  nothing) and the second session works — restart the vendor API
+  service after replugging and don't diagnose anything from the
+  first attempt.
+- **The filter you forgot about is jamming you: audit every default
+  against the local band plan.** For months, VHF-hi channels (RF 7–13)
+  presented a perfect paradox: the channel scanner locked them and read
+  their program guides, but the play chain starved at every gain
+  setting, on every antenna. Gain recipes, antenna theories, port
+  swaps — nothing moved it. The killer was a single default: the
+  SDR's *DAB notch*, a hardware filter meant to reject Europe's
+  digital-radio band, enabled since forever because it seemed
+  harmless. DAB band III spans 174–240 MHz. American VHF-hi
+  television lives at 174–216 MHz. The "harmless" notch was a ~20 dB
+  bite out of our own TV channels — the scanner only ever locked VHF
+  when its environment happened to omit the notch. The proof took 90
+  seconds once telemetry pointed at it: front-end level 16.5 with the
+  notch, 170 without, and minutes later channel 7 produced the first
+  VHF video in the project's history. Two lessons: a *filter-shaped*
+  symptom (level 10× down, uniform, gain-independent, but only on
+  certain channels) is a filter, not propagation; and any
+  region-specific default in a supposedly universal signal path is a
+  bug waiting for a continent to expose it.
+- **A good antenna needs no electronics at this location.** The
+  same attic antenna measured MER 19.5 bare, 19.5 with its own
+  amp, and 19.3 through a powered wideband LNA — but scored
+  100/100 quality bare and only 26 through the LNA (extra impulse
+  susceptibility + scan blindness from the raised floor). When
+  the bare wire already clears the cliff, every amplifier you add
+  is pure risk. Amps earn their keep on long coax runs and fringe
+  signals, not on the desk.
+
+---
+
+# Part Two — the adaptive era, or: what happens when the tuner
+# starts measuring itself
+
+Part One explained how a television signal becomes a picture. Part
+Two is about a harder question that took this project weeks of live
+experiments to answer: **how do you make one codebase tune ANY
+antenna** — a rooftop directional, a $40 flat panel, a ham-radio
+discone that was never meant for TV — and tell you the truth when it
+can't?
+
+## 14. Why do this in software at all?
+
+A hardware ATSC tuner chip costs a few dollars, draws milliwatts,
+locks in a fraction of a second, and has done so reliably since the
+Bush administration. Our software chain needs a desktop CPU to do the
+same job. So why bother?
+
+**What the chip does better** (the disadvantages of code):
+
+- **Speed and efficiency.** Fixed silicon demodulates in hardware
+  pipelines; we burn a CPU core doing math a $3 ASIC does for free.
+  A channel change takes it 100 ms; our chain relocks, refilters,
+  and relaunches a player in ~30 s.
+- **Real-time is unforgiving.** The broadcast never waits. Every
+  buffer, disk flush, and scheduler hiccup between the antenna and
+  the screen is a chance to drop samples — failure modes a chip
+  physically cannot have. Entire days of this project were spent on
+  problems (A/V clock runaway, pipe stalls, giant-file chokes) that
+  exist only because software is in the loop.
+- **Everything is your problem.** Clock sync between the station and
+  your sound card, caption renderer state, player recovery — the
+  chip's TV set solved these in 2005; you get to solve them again.
+
+**What code does that silicon never will** (the advantages):
+
+- **Visibility.** A chip reports "lock: yes/no." Our chain exposes
+  the equalizer's training error (a live broadcast-grade MER meter),
+  per-packet continuity forensics, the raw spectrum as a waterfall,
+  every intermediate signal. When reception fails, the chip shrugs;
+  the code tells you *which physical thing to fix, in decibels*.
+- **Adaptability.** The chip's designers froze their assumptions.
+  Ours are parameters: Reed-Solomon budgets, equalizer step sizes,
+  filter widths, sync policies — all tunable per antenna, per
+  channel, per *failure class*, even optimizable overnight by a
+  machine (an 834-trial live campaign found configurations no human
+  had tried).
+- **The floor keeps moving.** A software chain improves after
+  shipping. This one gained a signal-quality dial, an impulse-noise
+  diagnosis, a self-verifying player, and an adaptive channel-hopper
+  in a single week — on the same hardware.
+- **You learn the actual physics.** Every struggle above is a lesson
+  in how television really works. A chip hides the entire journey.
+
+The honest summary: **hardware is the better television; software is
+the better instrument.** This project exists because the instrument
+can eventually make ANY antenna into a television — which the chip,
+married to its assumptions, cannot.
+
+## 15. The laws the live experiments taught us
+
+Each of these was paid for with a failed evening and is now enforced
+by code:
+
+1. **Calibrate per setup, then keep calibrating.** The gain optimum
+   moved when we changed antennas, when we added an amplifier — and
+   when the sun set. A config that scored perfect at noon was garbage
+   at dusk, three times in one day. *No stored configuration survives
+   the sky.* Fix: measure MER live, grid-search per setup, and give
+   level-tracking to the radio's hardware AGC (microsecond silicon
+   servo) so only *regime* choices stay in software.
+
+2. **A metric without a liveness check will eventually lie to you.**
+   Our proudest "zero errors!" result turned out to be a stream of
+   100 % null packets — nothing to err because nothing was there. An
+   optimizer once "won" by making the chain emit silence. Every
+   quality number must be conditioned on proof that real content
+   exists (video headers per second), or its zero is meaningless.
+
+3. **Offline optimization overfits; live is the only judge.** A
+   Bayesian search over frozen signal recordings found a config 56 %
+   better than our hand tuning — which scored *zero* on live RF,
+   because a frozen recording rewards slowing the equalizer down and
+   a breathing sky punishes it. Replay screens candidates; only live
+   scoring ships them.
+
+4. **Failures come in classes, and each class has its own cure.**
+   Aperture-limited (MER flat vs gain — buy a better antenna),
+   overload (MER falls as gain rises — attenuate), plumbing (healthy
+   MER, no data — check USB), multipath (MER oscillates — aim), and
+   the sneakiest: **missing packets** (perfect error counters, holes
+   in the continuity counters — impulse noise snapping sync so
+   packets are never emitted at all; no error corrector can fix a
+   packet that doesn't exist).
+
+5. **Amplifiers are a loan, not a gift.** Across every antenna
+   tested, bare wire matched or beat every amplifier and LNA once
+   the software could calibrate honestly — because amplification
+   raises signal and noise together, and adds intermod risk on top.
+   Amps earn their keep only on long cable runs and fringe signals.
+
+6. **The player is part of the physics.** A live stream cannot be
+   paused, cannot wait, and drifts against your sound card's clock
+   (measured: +3.4 s/min of A/V runaway on a pipe that couldn't
+   seek). The cure was architectural: play from a growing *file*,
+   which can seek, so the player can always hop back to the live
+   edge — resetting sync and caption state in one motion.
+
+7. **One tuner is a vow of honesty.** A single SDR can watch one
+   channel, or sweep a waterfall, or record — never two at once.
+   Every feature must negotiate for the radio, and the UI should say
+   so plainly instead of pretending (our guide badges every station:
+   tuneable, weak, or out-of-reach *on the current antenna*).
+
+## 15.5 The time dimension — teaching the tuner what hour it is
+
+> This section is the short version. The Knob of Time now has its own
+> full treatment — estimator math, confidence tiers, training
+> arithmetic, code map — in
+> [`docs/knob_of_time.md`](knob_of_time.md).
+
+Law 1 said *no stored configuration survives the sky*. This section is
+what we built once we accepted that — instead of fighting the sky's
+schedule, learn it.
+
+*Terminology, so nobody is confused about what's old and what's new:*
+the underlying effect is **diurnal variation** — a century-old term in
+radio propagation — driven at TV frequencies by **tropospheric
+ducting** and temperature-inversion enhancement, plus man-made
+impulse noise that follows human schedules. The idea of a receiver
+building a time-aware model of its RF environment also has an
+academic cousin (cognitive radio's *radio environment maps*). What we
+add is the practical, consumer-grade closing of the loop: a TV tuner
+that learns per-channel, per-antenna hour curves **from its own
+decoder telemetry**, at zero user effort, and turns them into honest
+viewing advice. We searched for an existing community name for that
+closed loop and found none — so this project names it: **the Knob of
+Time**. (The joke being that it's the one knob you can't turn, only
+consult.)
+
+### The phenomenon (measured, not folklore)
+
+Hold everything constant — antenna, gain, decoder — and a channel's
+MER still walks several dB over a day. Our multi-day logs (13,800+
+samples) show per-channel swings of 3–7+ dB with *stable, repeating
+shape*: one channel only crosses the decode cliff in the 17–21h block;
+another holds a 10–21h plateau and collapses after 22h; a third is
+inverted — best before dawn, worst in the evening; a fourth barely
+moves at all. The physics is ordinary: overnight temperature
+inversions duct VHF/UHF; foliage moisture changes path loss; and
+impulse noise follows *human* schedules (appliances, chargers, HVAC).
+The consequence is not ordinary: **for a marginal channel, the hour is
+worth more dB than any knob in the flowgraph.** You cannot buy this
+SNR — but you can schedule around it.
+
+### The free sensor
+
+If you have the equalizer, you already have the instrument. The
+long-equalizer's field-sync error (`fs_err_rms`, one reading per data
+field, ~41 Hz) converts directly:
+
+```
+MER_dB = 20 · log10(5 / fs_err_rms)
+```
+
+(5 is the mean |level| of the 8-VSB constellation; the derivation is
+in §12.5.) Packet truth comes from the Reed-Solomon block's windowed
+counters (`bad / pkts` per 5 s). One row per watched minute and one
+per scan dwell — `(timestamp, rf, antenna_label, mer, loss_pct,
+source)` — appended to a plain CSV. The file *is* the model; there is
+no training step, no database, no daemon.
+
+### The estimator
+
+For channel `c` at hour-of-day `h` (24 local bins), over history rows
+`i` with ages Δt_i:
+
+```
+weight     w_i = 0.5 ^ (Δt_i / 14 days)          (recency half-life)
+estimate   M̂(c,h) = weighted_median({mer_i, w_i : hour(ts_i) = h})
+```
+
+Design choices, each paid for by a failed experiment:
+
+- **Median, not mean.** Impulse bursts put heavy outliers in the
+  tail; the median answers "what does a *typical* minute at 19h look
+  like," and the loss column carries the burst story separately.
+- **Recency decay, because every calibration is a loan** (Law 1).
+  Gain recals, antenna moves, and decoder upgrades create *config
+  epochs*; a 14-day half-life lets a stale epoch fade in about a
+  month instead of haunting the curve forever.
+- **Confidence tiers, because single-day bins lie.** A bin is
+  **solid** only with n ≥ 8 samples spread over ≥ 2 distinct days —
+  one bad Tuesday must not define 3 AM. Below that: **thin** (n ≥ 3,
+  shown with a caveat), **borrowed** (neighbor bins h±1 at half
+  weight, labeled), else **unknown** — rendered as "?", never
+  guessed. The UI only says "usually better around 21h" when the
+  current bin is confidently known *and* a solid bin beats it by
+  ≥ 2 dB. Silence over guessing.
+- **The antenna is an opaque string.** Ownership ("rabbit ears win
+  this channel at dawn") is a *learned statistic over labels the
+  user's own rig has used* — no antenna name, market, or coordinate
+  appears in a code path, so the same code learns anyone's sky.
+
+### Two ways to train it (they compose)
+
+- **Watch-training** — free and automatic: 60 samples/hour flow into
+  the bins of whatever you watch. Deep where you live, blind where
+  you don't. A normal week of evening TV makes your channels' evening
+  bins solid.
+- **Sweep-training** — a scan measures *every* channel once, in the
+  current hour bin, but it *takes the tuner* (Law 7). So it belongs
+  to hours when nobody is watching: an overnight trainer that sweeps
+  once per hour fills eight channels × eight hour-bins in a single
+  night, and a weekend of idle hours completes curves that
+  watch-training alone would take months to reach.
+
+The counting is worth internalizing: solid = 8 samples over 2 days,
+so hourly sweeps solidify a full night's bins for the *entire* market
+in two nights — while the viewer does nothing but sleep.
+
+## 16. Things the reader can now explain at parties
+
+- All of a market's stations usually ride a handful of transmitters:
+  we receive **42 stations from 6 towers**, because unrelated
+  broadcasters share multiplexes (Telemundo lives inside NBC's
+  6 MHz). Subchannels don't own frequency slices — they share the
+  whole channel *by taking turns, packet by packet, thousands of
+  times a second*.
+- Closed captions ride inside the video stream with per-byte parity
+  and decode to English — which makes them a free, always-on
+  ground-truth probe: if the captions read clean, the whole chain is
+  clean. (This tuner literally reads its own television to grade
+  itself.)
+- VHF and UHF are different worlds: wavelength changes what an
+  antenna can catch, evening tropospheric inversions can add the
+  decibels a marginal channel is missing (prime windows: calm summer
+  nights, 4–8 AM), and a scanner may lock a channel that the
+  playback chain can't yet hold — an open mystery in this repo as of
+  this writing.
+
+## 13. Further reading
 
 - **ATSC A/53** — the actual standard:
   https://www.atsc.org/atsc-documents/a53-atsc-digital-television-standard/

@@ -6,12 +6,8 @@ unattended for hours on marginal indoor antennas — the watchdogs and
 the equalizer's tracking margin keep a watchable picture up where
 off-the-shelf tuners give up.
 
-A custom GNU Radio fork (`gr-atscplus`) decodes ATSC 1.0 broadcast TV
-into a live MPEG-TS stream. A CLI launcher (`tv_tuner.py`) scans your
-area, builds an on-screen TV guide from the broadcast PSIP/EIT data,
-picks a channel, tunes it, and plays it — also records to MP4,
-re-streams to RTMP (Twitch, YouTube), changes channels live, and
-overlays closed captions in English or Spanish.
+📺 **Watch the full Windows install, from clone to live TV, in one take:**
+https://youtu.be/jhsTTnoqGTs
 
 It's also a **DVR**: read the on-air program guide, schedule shows,
 record whole muxes (several subchannels at once), and browse the
@@ -293,7 +289,8 @@ in-house**; the notes below are from their published specs, not our bench.
 | **BladeRF** | untested | wide bandwidth + good SNR on paper |
 | **RTL-SDR (R820T2 dongle)** | **not viable** | maxes out ~2.4–2.88 MS/s. ATSC occupies ~5.4 MHz and needs >6 MS/s to sample, so an RTL-SDR physically can't capture a full 6 MHz channel — don't expect ATSC decode regardless of signal strength |
 
-To check what SoapySDR sees on your machine:
+All three run the same tuner — the only difference is how you install the
+dependencies and build the decoder module.
 
 ```bash
 SoapySDRUtil --probe
@@ -392,34 +389,62 @@ python3 tools/tv_tuner.py --rf 36 --cc
 python3 tools/tv_tuner.py --rf 36 --dry-run
 ```
 
-`tv_tuner.py` uses ffmpeg's `tee` muxer so one command can play
-locally, record, and push to RTMP simultaneously without re-encoding
-twice.
+At the interactive prompt: row number or `5.1` tunes, `g` refreshes
+the guide, `i 7` inspects a row, `c` cycles captions
+(OFF → English → Spanish), `q` quits.
 
-## Live channel-changer
+## The web UI — TV Tuna panel
 
-The interactive picker doubles as a remote: pick a channel, watch
-it, then back at the picker prompt type another row number or
-virtual channel — the running TV instantly retunes to the new
-station without restarting from scratch. Single-keystroke commands
-at the prompt:
+Prefer clicking to typing? There's a browser dashboard that wraps the
+whole tuner. Start it and open the page:
 
-| key | action |
-|-----|--------|
-| `5` | tune the 5th row in the guide |
-| `5.1` | tune virtual channel 5.1 (`WTTG` Fox) |
-| `g` | reprint the guide (refreshes show titles + signal %) |
-| `i 7` | inspect row 7 (signal detail, all PIDs, EIT-now/next) |
-| `c` | cycle captions: OFF → English (CC1) → Spanish (CC2) |
-| `q` | quit |
+```sh
+python3 adaptive-tv/tv_tuna_panel.py     # Windows: python adaptive-tv\tv_tuna_panel.py
+# then open http://localhost:8642 in any browser
+```
 
-Spanish captions on bilingual stations (Univision, Telemundo,
-WFDC, WZDC) come through on CC2 / SAP — the `c` cycle is the
-fastest way to switch.
+**Guide tab** — a channel grid built from your last scan; click a
+station to tune, and the video opens in its own player window.
+**CH+ / CH−** buttons (or ↑/↓ arrow keys) surf the tuneable stations
+in guide order on the fast-tune stack. An **antenna picker** lets you
+tell the tuner which port's antenna to use (your manual pick always
+outranks learned recipes); **🔌 NEW ANTENNA** tells the model you
+physically swapped the hardware on a port. **📡 SCAN CHANNELS**
+re-surveys the airwaves — scans are planner-ordered from learned
+history, refresh the guide's measured-loss badges, and seed the PID
+cache for every program in the market; **REC** records the current
+channel. **🔬 DEEP TUNE** appears beside the status line for the
+tuned channel — including failed tunes, where the doctor earns its
+keep.
 
-## Closed captioning
+**NERD tab (Stats for Nerds)** — the live instrument panel, all reading
+straight off the decoder:
 
-Two backends, picked automatically:
+- **Live MER + signal telemetry** — the decodability dial in dB, updated
+  ~1 Hz, plus FPLL lock and equalizer state.
+- **🎯 SIGNAL FINDER** — aim-by-ear: a tone whose pitch tracks MER, so
+  you can rotate an antenna and hear it lock (Bluetooth-headphone safe).
+- **📏 FLATNESS** — in-band ripple meter; a flat band means clean
+  multipath, a rippled one means reflections to aim out.
+- **🌐 ALL TOWERS** — hops every tower and plays a chord so you can find
+  the aim that's fair to all of them at once.
+- **📡 ECHO X-RAY** — the channel's impulse response: the main path plus
+  every reflection, so you can see multipath instead of guessing.
+- **🩺 REPLAY-HEAL (last 30 s)** — snapshots the last ~30 s you just
+  watched from the decoder's own IQ ring and re-decodes it offline
+  several ways, splicing the best of each pass. Offline means no
+  real-time deadline — the one place the heaviest math (e.g.
+  decision-directed equalizer tracking) is allowed to live, because
+  we measured that running it live costs source overflows.
+- **🔬 TUNA SCIENCE** — plain-language cards with your rig's live
+  numbers: the **🕰 Knob of Time** card (24 per-hour bars that GROW
+  with training data and turn green only when that hour reliably
+  decodes — knowledge and verdict are deliberately separate metrics),
+  **TURBO RESCUE** (live count of packets recovered by re-decode),
+  **REALTIME HEALTH** (source-overflow count; anything above zero
+  means the decoder missed its deadline and samples died), and the
+  **🧠 MARKET BRAIN** (market coverage + audited forecast accuracy,
+  with the reset-all-learning control).
 
 - **`ccextractor`** if installed on PATH — handles both CEA-608 and
   CEA-708. `sudo apt install ccextractor` to add. Recommended.
@@ -516,19 +541,32 @@ committing to a watch.
 
 ## Troubleshooting
 
-### `SoapySDRUtil --probe` shows no devices
+| Symptom | Cause / fix |
+|---|---|
+| `--probe` shows no devices | SoapySDR vendor module not installed |
+| Scan fails but probe works | another process holds the SDR — kill stray `tv_live.py` |
+| Carriers found, no decode, **every** channel | plumbing, not RF: run the multi-rate USB probe (`adaptive-tv` docs). Long/passive USB extensions carry 2 MS/s but starve at 8 MS/s. Short direct USB 3.0 only |
+| File grows at full rate but no video | overload garbage — growth ≠ decode. Only MPEG seq-headers count. Recalibrate gain (`mer_gain_cal.py`) |
+| Pilot locks, zero data, gain doesn't help | signal below the 15.2 dB data cliff — antenna/aperture problem, measure with `mer_meter.py` |
+| Active antenna/LNA reads dead | it isn't powered. Bias-tee LNAs: right port (`--biast`, RSPdx = Antenna B), no DC-blocking filter between SDR and LNA, check orientation (IN = antenna side) |
+| Glitchy picture on strong signal | multipath. Try other channels (`ch_scan.py` + `mer_gain_cal.py` per channel), aim with `mer_meter.py --tone`, reposition antenna higher/outside |
+| Steady drizzle of loss on EVERY channel and antenna, MER high, glitch every few seconds | grep the chain log for `OsO` — those are the SDR driver printing **overflow**: the decoder missed its real-time deadline and samples were dropped at the source. Each ~5 ms drop breaks three stages' alignment at once (~300 packets). Cause is CPU load in the chain, not RF and not cables — turn off optional DSP knobs one at a time (a live A/B with the overflow count as the judge). Signature in the raw IQ: pilot *phase* steps with *flat* amplitude |
+| Same drizzle, but zero `OsO` in the log | now suspect the USB path: leaky cables pass volume probes while dropping samples under real load. Short direct USB 3.0, different cable, different rear port. Judge by gap-rate during real decode, never by a throughput test |
+| Tempted by the impulse blanker (`STVT_NB=1`)? | measured verdict: a 13-arm threshold sweep on a real impulse storm was flat — it doesn't help, and **threshold ≤2.0 silently replaces the whole output with null padding** (full-rate file, zero content). It stays off for a reason; turbo decoding is the impulse weapon that actually measures |
+| SDR dead after hours of restarts / hot attic | thermal or firmware wedge: cool it / replug. Never mount the SDR box in a hot attic — run coax up, not USB |
 
-Your SoapySDR driver for that SDR isn't installed. Install the
-vendor module:
+## The science
 
 - **SDRplay**: API v3 from sdrplay.com + SoapySDRPlay3 from source
   (see install step 2 above).
 - **HackRF**: `sudo apt install soapysdr-module-hackrf`
 - **RTL-SDR**: `sudo apt install soapysdr-module-rtlsdr`
 
-After install, replug the SDR and re-run `SoapySDRUtil --probe`.
+[`docs/proven_capture_recipe.md`](docs/proven_capture_recipe.md) has
+the reference capture settings.
 
-### `[scan] phase-1 sweep failed` / "no SDR detected"
+Three field lessons that shaped this project, offered to anyone
+building live SDR pipelines:
 
 Same root cause: SoapySDR can't open the device. Verify with
 `SoapySDRUtil --probe` first; if that works but the scan still
@@ -716,6 +754,34 @@ docs/                         Science explainer, capture recipe, CPU-optimizatio
 bootstrap.sh                  Linux setup + build + install
 ```
 
+## Development history
+
+This decoder was built through months of live-antenna campaigns. The
+experiment scripts, campaign logs, and engineering notes are kept in the
+project's private archives so this tree stays simple — curious how a
+particular piece was built? Open an issue and ask.
+
+## Lineage & credits
+
+The `gr-atscplus` decoder module stands on **GNU Radio's `gr-dtv`**
+ATSC implementation. Its core receive blocks — the deinterleaver,
+Viterbi trellis decoder, RS decoder, FPLL, field-sync checker, and the
+segment/`plinfo` conventions everything else is built around — began as
+`gr-dtv` code (© Free Software Foundation, Inc.), and those files retain
+their original FSF copyright and GPL headers. gr-atscplus adds new blocks
+on top (the adaptive equalizers, soft/erasure decoders, sync variants,
+noise blanker, and the universal-tuning layer) and rewires the chain, but
+none of it would exist without the GNU Radio project's work. Thank you to
+the GNU Radio and gr-dtv authors.
+
+This is not a fork of the GNU Radio repository (gr-dtv lives inside that
+large monorepo; an out-of-tree module is the right shape for this), so
+the lineage is carried the correct way for an OOT module: preserved
+per-file copyright headers, this credit, and the shared GPL license below.
+
 ## License
 
-GPL-3.0-or-later (inherited from gr-dtv).
+**GPL-3.0-or-later**, inherited from gr-dtv — full text in
+[LICENSE](LICENSE). Files derived from gr-dtv keep their
+`© Free Software Foundation` headers; original gr-atscplus files carry
+`SPDX-License-Identifier: GPL-3.0-or-later`.
