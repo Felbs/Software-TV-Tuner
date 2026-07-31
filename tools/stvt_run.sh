@@ -50,6 +50,30 @@ export STVT_RS=stock STVT_VITERBI=hard STVT_EQ=long
 export STVT_SPS="${STVT_SPS:-1.1}" STVT_RRC_SYMS="${STVT_RRC_SYMS:-4}" STVT_TEISCRUB="${STVT_TEISCRUB:-0}"
 export STVT_IFGR="${STVT_IFGR:-40}" STVT_RFGAIN_SEL="${STVT_RFGAIN_SEL:-3}" STVT_ANTENNA="${STVT_ANTENNA:-Antenna B}"
 
+# ── WARM START: per-antenna+channel equalizer tap cache ─────────────────────
+# The single biggest thing a viewer notices is that a fresh tune "starts
+# glitchy and gets strong over time": the adaptive equalizer converges from
+# cold on EVERY tune. The cache that fixes it has shipped in
+# gr-atscplus/lib/atsc_equalizer_long_impl.cc since 2026-07-05, but nothing in
+# the Pi's launch path ever set the directory, so every tune here was cold.
+#
+# tv_live.py turns this directory into <dir>/taps_<ANTENNA>_rf<RF>.bin, so the
+# cache is keyed by antenna AND channel — an Antenna A cache can never seed an
+# Antenna B tune (the taps are a fingerprint of the whole RF path, and the AM
+# loop and the yagi see completely different multipath). tv_live.py also
+# defaults STVT_EQ_LKG=1 when a cache dir is set, without which the equalizer
+# would never fill the snapshot the cache is written from.
+#
+# STVT_EQ_CACHE_EVERY (default 128 field syncs ~= 3.1 s) is load-bearing, not
+# a tuning knob: this supervisor kills the chain on a noise drought and stop()
+# is not guaranteed to run, so "save only on stop()" would bank nothing on
+# exactly the runs that most need a warm restart.
+#
+# The directory is gitignored (`**/tapcache/`) and self-healing: a missing,
+# truncated, stale or foreign file just falls back to a cold start.
+export STVT_EQ_TAP_CACHE="${STVT_EQ_TAP_CACHE:-$HERE/data/tv_live/tapcache}"
+mkdir -p "$STVT_EQ_TAP_CACHE" 2>/dev/null || true
+
 # Pi/ARM real-time trades (docs/PI_ARCHITECTURE.md, measured + bit-identical):
 # GR's stock ~32KB edge buffers run the 4-core Pi 5 in pipeline lockstep
 # (<1x real-time -> OsO garbage bursts -> noise-drought restart storms), and
