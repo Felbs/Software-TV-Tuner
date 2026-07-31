@@ -4,13 +4,13 @@ The Pi runs the same software as Linux — it's Debian-based, so the
 `bootstrap.sh` installer applies. What's different on a Pi is *how you
 run it*, because 8-VSB decoding is CPU-heavy.
 
-The Pi-tuned code lives on the **`pi-port-stvt`** branch (surfer /
+The Pi-tuned code lives on the **`pi-port-radiopi2`** branch (surfer /
 scanner / supervisor experiments tuned for the Pi's core count).
 
 ## Base install
 
 ```bash
-git clone -b pi-port-stvt https://github.com/Felbs/Software-TV-Tuner.git
+git clone -b pi-port-radiopi2 https://github.com/Felbs/Software-TV-Tuner.git
 cd Software-TV-Tuner
 ./bootstrap.sh
 python3 tools/doctor.py     # every dependency checked, fixes printed
