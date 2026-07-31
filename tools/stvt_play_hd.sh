@@ -35,18 +35,30 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
 log(){ echo "$(printf '%(%H:%M:%S)T' -1) $*" >> "$SUPLOG"; }
 
+# Pi/ARM player trade (June Pi lineage): half-res mpeg2 decode (lavc lowres=1)
+# halves mpv decode CPU and memory bandwidth — on a 4-core Pi the player was
+# measurably corrupting the DECODER CHAIN via bandwidth contention (cc-errors
+# in live.ts that vanish with the player off). Default ON for aarch64;
+# export STVT_PLAY_FULLRES=1 for full resolution. x86 unchanged.
+MPV_EXTRA="${STVT_MPV_EXTRA:-}"
+if [ "$(uname -m)" = "aarch64" ] && [ -z "${STVT_PLAY_FULLRES:-}" ]; then
+  MPV_EXTRA="$MPV_EXTRA --vd-lavc-o=lowres=1"
+fi
+
 launch(){
   # last-N-bytes form (tail -c N) — NOT absolute offset (tail -c +OFF), which
   # stalls seeking into a multi-GB growing file.
   local bytes=$(( BACKMB*1000000 ))
   : > "$MPVLOG"
-  setsid bash -c "tail -c $bytes -F '$F' | \
+  # player stack at nice +10 (PI_ARCHITECTURE law): the decoder chain owns the CPU
+  setsid nice -n 10 bash -c "tail -c $bytes -F '$F' | \
     ffmpeg -hide_banner -loglevel warning -fflags nobuffer+flush_packets \
       -flags low_delay -probesize 3M -analyzeduration 3M -err_detect ignore_err \
       -i - -map 0:p:$PROG -c copy -flush_packets 1 -f mpegts - | \
-    mpv - --hwdec=no --cache=yes --cache-secs=30 --demuxer-max-bytes=200MiB \
+    mpv - --hwdec=no $MPV_EXTRA --cache=yes --cache-secs=30 --demuxer-max-bytes=200MiB \
       --demuxer-readahead-secs=20 --cache-pause=no --cache-pause-initial=no \
       --title='STVT Live (prog $PROG)' --force-seekable=no \
+      --input-ipc-server=/tmp/stvt-mpv.sock \
       --msg-level=all=status" >> "$MPVLOG" 2>&1 < /dev/null &
   log "launched player prog=$PROG tail=${BACKMB}MB"
 }

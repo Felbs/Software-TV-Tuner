@@ -18,6 +18,13 @@
 #
 # Stop everything:  pkill -f stvt_run.sh ; pkill -f tv_live.py ; pkill -f stvt_play_hd.sh
 set -u
+
+# ONE SUPERVISOR AT A TIME (docs/PI_ARCHITECTURE.md law): two stvt_run
+# instances fight over the SDR and the player, each restarting the other's
+# children. flock is immune to pgrep argv self-match tricks.
+exec 9>/tmp/stvt_run.lock
+flock -n 9 || { echo "another stvt_run.sh holds /tmp/stvt_run.lock — refusing to double-supervise"; exit 1; }
+
 RF="${1:-34}"
 PROG="${2:-3}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,6 +50,18 @@ export STVT_RS=stock STVT_VITERBI=hard STVT_EQ=long
 export STVT_SPS="${STVT_SPS:-1.1}" STVT_RRC_SYMS="${STVT_RRC_SYMS:-4}" STVT_TEISCRUB="${STVT_TEISCRUB:-0}"
 export STVT_IFGR="${STVT_IFGR:-40}" STVT_RFGAIN_SEL="${STVT_RFGAIN_SEL:-3}" STVT_ANTENNA="${STVT_ANTENNA:-Antenna B}"
 
+# Pi/ARM real-time trades (docs/PI_ARCHITECTURE.md, measured + bit-identical):
+# GR's stock ~32KB edge buffers run the 4-core Pi 5 in pipeline lockstep
+# (<1x real-time -> OsO garbage bursts -> noise-drought restart storms), and
+# the float equalizer is the hottest block. 8MB/edge buffers measured
+# 0.91x -> 1.09x real-time; the NEON int16 kernel wins on ARM. Default ON
+# for aarch64 ONLY (export 0 to opt out); x86 behavior unchanged.
+if [ "$(uname -m)" = "aarch64" ]; then
+  export STVT_EQ_S16="${STVT_EQ_S16:-1}"
+  export STVT_MIN_BUF_BYTES="${STVT_MIN_BUF_BYTES:-8388608}"
+  export STVT_FPLL_FOLD="${STVT_FPLL_FOLD:-1}"
+fi
+
 log(){ echo "$(printf '%(%H:%M:%S)T' -1) $*" | tee -a "$RUNLOG" ; }
 
 chain_up(){ pgrep -f '[t]v_live.py' >/dev/null; }
@@ -51,12 +70,17 @@ player_up(){ pgrep -f '[s]tvt_play_hd.sh' >/dev/null; }
 start_chain(){
   rm -f "$TS"
   [ -f "$CLOG" ] && mv "$CLOG" "$CLOG.$(printf '%(%H%M%S)T' -1)" 2>/dev/null
-  ( cd "$HERE" && setsid python3 tv_live.py --rf "$RF" > "$CLOG" 2>&1 < /dev/null & )
+  ( cd "$HERE" && setsid python3 tv_live.py --rf "$RF" > "$CLOG" 2>&1 < /dev/null 9>&- & )
+  # Pi: chain outranks the nice+10 player stack (passwordless sudo; no-op if absent)
+  if [ "$(uname -m)" = "aarch64" ]; then
+    sleep 1
+    sudo -n renice -n -10 -p "$(pgrep -f "[t]v_live.py" | head -1)" >/dev/null 2>&1 || true
+  fi
   log "started chain (RF$RF, lean config)"
 }
 
 start_player(){
-  ( setsid "$HERE/stvt_play_hd.sh" "$PROG" 25 >/dev/null 2>&1 < /dev/null & )
+  ( setsid "$HERE/stvt_play_hd.sh" "$PROG" 25 >/dev/null 2>&1 < /dev/null 9>&- & )
   log "started player supervisor (prog $PROG)"
 }
 
