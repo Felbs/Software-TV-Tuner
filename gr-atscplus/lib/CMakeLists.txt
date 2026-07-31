@@ -13,6 +13,8 @@ include(GrPlatform) #define LIB_SUFFIX
 
 list(APPEND atscplus_sources
     atsc_equalizer_long_impl.cc
+    atsc_equalizer_wl_impl.cc
+    atsc_wl_frontend_impl.cc
     atsc_equalizer_pilot_impl.cc
     atsc_equalizer_pilot_dd_impl.cc
     atsc_equalizer_pilot_dd_soft_impl.cc

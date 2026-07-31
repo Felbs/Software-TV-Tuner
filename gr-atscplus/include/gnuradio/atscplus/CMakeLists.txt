@@ -8,6 +8,8 @@ install(FILES
     atsc_equalizer_pilot_multifs.h
     atsc_equalizer_pilot_multifs_dd.h
     atsc_equalizer_cma.h
+    atsc_equalizer_wl.h
+    atsc_wl_frontend.h
     atsc_fs_checker_inst.h
     atsc_fpll_tight.h
     atsc_sync_tunable.h

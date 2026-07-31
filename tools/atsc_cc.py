@@ -19,10 +19,17 @@ The CEA-608-E design solves those constraints with three tricks that
 this decoder must respect — getting any of them wrong produces the
 "jumbled stream of letters" symptom we had:
 
-  1. Odd parity per byte. Each 7-bit char has an 8th parity bit; the
-     decoder strips it (`b & 0x7F`) before interpretation. We treat
-     parity as advisory and don't reject pairs with bad parity, since
-     digital ATSC streams already have stronger FEC upstream.
+  1. Odd parity per byte. Each 7-bit char carries an 8th parity bit set
+     so the whole byte has an ODD number of 1s. On marginal reception an
+     RS-uncorrectable frame slips corrupt cc bytes past the upstream FEC;
+     rendering them is the "jumbled letters" glitch. So we VALIDATE odd
+     parity and DROP any pair with a bad byte (a corrupt CONTROL byte is
+     the worst — it can flip mode/channel and scramble everything after).
+     Valid 608 bytes always carry correct parity, so this never drops
+     good captions on a clean signal — it only blanks the corrupt cells,
+     which reads as a brief gap instead of garbage. Parity + the doubled
+     control codes (below) are the two error defenses the standard pairs
+     together; we now honor both.
 
   2. Doubled control codes. Every CONTROL pair (byte 1 in 0x10–0x1F)
      is transmitted TWICE on consecutive fields. The receiver must
@@ -107,6 +114,12 @@ CEA608_BASIC_OVERRIDES = {
 CEA608_SPECIAL = "®°½¿™¢£♪à èâêîôû"
 
 
+def odd_parity_ok(b: int) -> bool:
+    """CEA-608 sets bit 7 so every byte has ODD parity. True if the byte
+    is intact; False means a bit flipped in transit (corrupt cc byte)."""
+    return (bin(b & 0xFF).count("1") & 1) == 1
+
+
 def decode_basic(b: int) -> str:
     """Map a printable CEA-608 byte (parity stripped) to a Unicode glyph.
     Returns "" for non-printable bytes."""
@@ -135,10 +148,24 @@ class CC608Decoder:
         self.row: list[str] = []    # current row (roll-up / paint-on staging)
 
     def feed_pair(self, b1: int, b2: int) -> None:
+        # Idle/padding first: 0x00 or its parity-correct form 0x80 both
+        # strip to 0x00 — an idle field with no caption data this frame.
+        if (b1 & 0x7F) == 0 and (b2 & 0x7F) == 0:
+            return
+
+        # Odd-parity guard (the glitch fix): a corrupt cc byte that
+        # slipped past upstream FEC on a marginal signal has bad parity.
+        # Drop the whole pair rather than paint a garbage glyph or — far
+        # worse — act on a corrupt control code that flips mode/channel.
+        # Clear last_pair so a good repeat of a doubled control (whose
+        # first copy we just dropped) still gets acted on; that is exactly
+        # what the doubling is FOR. Check parity on the RAW bytes.
+        if not (odd_parity_ok(b1) and odd_parity_ok(b2)):
+            self.last_pair = None
+            return
+
         b1 &= 0x7F
         b2 &= 0x7F
-        if b1 == 0 and b2 == 0:
-            return  # null pair: idle field, no caption data this frame
 
         is_control = 0x10 <= b1 <= 0x1F
         if is_control:

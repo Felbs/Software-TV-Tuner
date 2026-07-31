@@ -17,9 +17,13 @@
 #include "atsc_types.h"
 #include <gnuradio/io_signature.h>
 #include <volk/volk.h>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <string>
 
 namespace gr {
 namespace atscplus {
@@ -55,6 +59,71 @@ static void init_field_sync_common(float* p, int mask)
         p[i++] = bin_map(atsc_pn63[j]);
 }
 
+// ── warm-start tap cache helpers (2026-07-29, speed-1 lever 1) ───────────
+// Factored out of the constructor so the SAME vetted load can be re-run at
+// runtime when a persistent chain retunes to another channel. Nothing here
+// runs unless the caller hands over a path, so an install with no cache
+// directory behaves exactly as it did before this existed.
+bool atsc_equalizer_long_impl::cache_load(const char* path)
+{
+    if (!path)
+        return false;
+    std::FILE* f = std::fopen(path, "rb");
+    if (!f)
+        return false;
+    bool adopted = false;
+    uint32_t magic = 0, n = 0;
+    if (std::fread(&magic, 4, 1, f) == 1 && std::fread(&n, 4, 1, f) == 1 &&
+        magic == 0x54415043u /* 'TAPC' */ && n == (uint32_t)NTAPS) {
+        std::vector<float> t(NTAPS);
+        if (std::fread(t.data(), sizeof(float), NTAPS, f) == (size_t)NTAPS) {
+            double e = 0.0;
+            bool fin = true;
+            for (int k = 0; k < NTAPS; k++) {
+                if (!std::isfinite(t[k])) { fin = false; break; }
+                e += (double)t[k] * (double)t[k];
+            }
+            if (fin && e > 0.01 && e < 50.0 * 50.0) {
+                d_taps = t;
+                d_taps_lkg = t;
+                d_lkg_valid = true;
+                d_tap_spec_valid = false;   // FFT path must re-derive
+                std::fprintf(stderr,
+                    "[eq-long] WARM START from %s (|taps|=%.3f)\n",
+                    path, std::sqrt(e));
+                adopted = true;
+            }
+        }
+    }
+    std::fclose(f);
+    return adopted;
+}
+
+bool atsc_equalizer_long_impl::cache_save(const char* path)
+{
+    if (!path || !d_lkg_valid)
+        return false;
+    std::string tmp = std::string(path) + ".tmp";
+    std::FILE* f = std::fopen(tmp.c_str(), "wb");
+    if (!f)
+        return false;
+    const uint32_t magic = 0x54415043u, n = (uint32_t)NTAPS;
+    std::fwrite(&magic, 4, 1, f);
+    std::fwrite(&n, 4, 1, f);
+    std::fwrite(d_taps_lkg.data(), sizeof(float), NTAPS, f);
+    std::fclose(f);
+    std::remove(path);
+    return std::rename(tmp.c_str(), path) == 0;
+}
+
+void atsc_equalizer_long_impl::reset_to_delta()
+{
+    std::fill(d_taps.begin(), d_taps.end(), 0.0f);
+    d_taps[NPRETAPS] = 1.0f;
+    std::fill(d_fb.begin(), d_fb.end(), 0.0f);
+    d_tap_spec_valid = false;
+}
+
 atsc_equalizer_long_impl::atsc_equalizer_long_impl()
     : gr::block("dtv_atsc_equalizer",
                 io_signature::make2(
@@ -71,14 +140,34 @@ atsc_equalizer_long_impl::atsc_equalizer_long_impl()
     d_taps_lkg.resize(NTAPS, 0.0f);
     d_lkg_valid = false;
 
-    d_fb_taps.resize(NFB, 0.0f);   // DFE feedback filter starts at zero (no echo cancel)
-    d_dec_seg.resize(gr::dtv::ATSC_DATA_SEGMENT_LENGTH + NFB, 0.0f);  // DFE decision buffer
+    d_fb.assign(NFB_MAX, 0.0f);        // DFE feedback taps (start silent)
+    d_hist.assign(2 * NFB_MAX, 0.0f);  // decided-symbol ring, double-length
+
+    // 2026-07-05 WARM START (research lever #3): seed the taps from the
+    // previous session's vetted LKG snapshot for this channel+antenna.
+    // The cache holds only quality-gated tap states, so the worst case is
+    // "slightly stale but sane" — LMS adapts from there far faster than
+    // from a delta. STVT_EQ_TAP_CACHE_FILE is composed by tv_live.py
+    // (dir + antenna + rf); absent = exactly the legacy cold start.
+    cache_load(std::getenv("STVT_EQ_TAP_CACHE_FILE"));
 
     const int alignment_multiple = volk_get_alignment() / sizeof(float);
     set_alignment(std::max(1, alignment_multiple));
 }
 
 atsc_equalizer_long_impl::~atsc_equalizer_long_impl() {}
+
+// 2026-07-29 (speed-1, dossier defect D2): a scan visit can be shorter than
+// the periodic persist tick, so a clean shutdown must write too. No-op
+// without a configured cache file or a vetted LKG snapshot.
+bool atsc_equalizer_long_impl::stop()
+{
+    if (const char* p = std::getenv("STVT_EQ_TAP_CACHE_FILE")) {
+        if (cache_save(p))
+            std::fprintf(stderr, "[eq-long] cache persisted on stop: %s\n", p);
+    }
+    return true;
+}
 
 std::vector<float> atsc_equalizer_long_impl::taps() const { return d_taps; }
 
@@ -88,10 +177,70 @@ std::vector<float> atsc_equalizer_long_impl::data() const
     return ret;
 }
 
+void atsc_equalizer_long_impl::dfe_push(float sym, int nfb)
+{
+    // double-length ring: writing each symbol at h and h+nfb keeps the
+    // most recent nfb decisions contiguous at [h+1 .. h+nfb]
+    d_hpos = (d_hpos + 1) % nfb;
+    d_hist[d_hpos] = sym;
+    d_hist[d_hpos + nfb] = sym;
+}
+
 void atsc_equalizer_long_impl::filterN(const float* input_samples,
                                   float* output_samples,
                                   int nsamples)
 {
+    // ── FFT overlap-save path (STVT_EQ_FFT=1, 2026-07-10, PySDR
+    // filters ch.) ── one 2048-pt real FFT round trip replaces
+    // nsamples x NTAPS dot products. Mathematically the same
+    // correlation (conjugated tap spectrum), differing only in float
+    // rounding order. Tap spectrum cached; a 4-value fingerprint
+    // (energy + 3 sentinels) invalidates it on ANY tap change, so no
+    // mutation site (adapt/leak/restore/reseed/DD) can be missed.
+    static const bool FFTC = []() {
+        const char* p = std::getenv("STVT_EQ_FFT");
+        return p && p[0] == '1';
+    }();
+    if (FFTC && nsamples + NTAPS - 1 <= FFT_N) {
+        if (!d_ffwd) {
+            d_ffwd = std::make_unique<gr::fft::fft_real_fwd>(FFT_N);
+            d_frev = std::make_unique<gr::fft::fft_real_rev>(FFT_N);
+            d_tap_spec.resize(FFT_N / 2 + 1);
+        }
+        float energy = 0.0f;
+        volk_32f_x2_dot_prod_32f(&energy, &d_taps[0], &d_taps[0], NTAPS);
+        if (!d_tap_spec_valid || energy != d_tap_fp[0] ||
+            d_taps[0] != d_tap_fp[1] || d_taps[NTAPS / 2] != d_tap_fp[2] ||
+            d_taps[NTAPS - 1] != d_tap_fp[3]) {
+            float* tb = d_ffwd->get_inbuf();
+            std::memset(tb, 0, FFT_N * sizeof(float));
+            std::memcpy(tb, &d_taps[0], NTAPS * sizeof(float));
+            d_ffwd->execute();
+            const gr_complex* ts = d_ffwd->get_outbuf();
+            for (int k = 0; k < FFT_N / 2 + 1; k++)
+                d_tap_spec[k] = std::conj(ts[k]);   // correlation form
+            d_tap_fp[0] = energy;
+            d_tap_fp[1] = d_taps[0];
+            d_tap_fp[2] = d_taps[NTAPS / 2];
+            d_tap_fp[3] = d_taps[NTAPS - 1];
+            d_tap_spec_valid = true;
+        }
+        const int span = nsamples + NTAPS - 1;
+        float* ib = d_ffwd->get_inbuf();
+        std::memcpy(ib, input_samples, span * sizeof(float));
+        std::memset(ib + span, 0, (FFT_N - span) * sizeof(float));
+        d_ffwd->execute();
+        const gr_complex* X = d_ffwd->get_outbuf();
+        gr_complex* Y = d_frev->get_inbuf();
+        for (int k = 0; k < FFT_N / 2 + 1; k++)
+            Y[k] = X[k] * d_tap_spec[k];
+        d_frev->execute();
+        const float* ob = d_frev->get_outbuf();
+        const float inv = 1.0f / (float)FFT_N;      // FFTW unnormalized
+        for (int j = 0; j < nsamples; j++)
+            output_samples[j] = ob[j] * inv;
+        return;
+    }
     for (int j = 0; j < nsamples; j++) {
         output_samples[j] = 0;
         volk_32f_x2_dot_prod_32f(
@@ -153,9 +302,49 @@ void atsc_equalizer_long_impl::filterN_dd(const float* input_samples,
     }();
     static const float DD_EPS = 1.0f;  // NLMS regularizer, ~ noise floor power
 
+    // ── DFE v1 (2026-07-06, docs/DFE_BLUEPRINT.md) ──
+    // STVT_EQ_DFE=1 enables the feedback section: already-decided symbols
+    // are SUBTRACTED (echo cancellation without noise enhancement — the
+    // linear FFE must invert echoes, a DFE just removes them). Data
+    // segments only in v1; general_work refills the decision history with
+    // KNOWN training symbols each field sync (error-propagation flush).
+    static const bool DFE = []() {
+        const char* p = std::getenv("STVT_EQ_DFE");
+        return p && std::atoi(p) != 0;
+    }();
+    static const int NFB = []() -> int {
+        if (const char* p = std::getenv("STVT_EQ_DFE_NFB")) {
+            int v = std::atoi(p);
+            if (v >= 16 && v <= NFB_MAX) return v;
+        }
+        return 192;
+    }();
+    static const float MU_FB = []() -> float {
+        if (const char* p = std::getenv("STVT_EQ_DFE_MU_FB")) {
+            char* e = nullptr; double v = std::strtod(p, &e);
+            if (e != p) return (float)v;
+        }
+        return 2e-3f;
+    }();
+    // decided 8-VSB symbols have fixed power E[d^2]=21 → constant NLMS
+    // normalizer for the feedback update (no per-sample dot needed)
+    const float mu_fb_eff = MU_FB / (1.0f + 21.0f * (float)NFB);
+
     // μ==0 → behave exactly like the legacy passive filter (zero behavior
-    // change when the knob is off).
-    if (DD_MU <= 0.0f) {
+    // change when the knob is off). Sheriff suspension counts as off.
+    const bool dfe_on = DFE && !d_dfe_suspend;
+    if (DD_MU <= 0.0f && !dfe_on) {
+        filterN(input_samples, output_samples, nsamples);
+        return;
+    }
+    // WARM-UP HOLD v2 (2026-07-10, live-debut lesson): stay passive
+    // until the supervised trainer has run on >=3 LIVE field syncs this
+    // session. v1 keyed on d_lkg_valid, but the tap cache pre-sets that
+    // at load — DD then adapted against stale warm taps while the
+    // hardware AGC was still settling and exploded (err_rms 5e14; the
+    // quality-reset safety caught it; isolation A/B convicted the
+    // cache+DD combination, DD alone was clean).
+    if (!d_lkg_valid || d_fs_trained < 3) {
         filterN(input_samples, output_samples, nsamples);
         return;
     }
@@ -164,6 +353,12 @@ void atsc_equalizer_long_impl::filterN_dd(const float* input_samples,
         const float* x = &input_samples[j];
         float y = 0.0f;
         volk_32f_x2_dot_prod_32f(&y, x, &d_taps[0], NTAPS);
+        const float* hist_w = &d_hist[d_hpos + 1];   // last NFB decisions
+        if (dfe_on) {
+            float fb = 0.0f;
+            volk_32f_x2_dot_prod_32f(&fb, hist_w, &d_fb[0], NFB);
+            y -= fb;
+        }
         output_samples[j] = y;
 
         // 8-VSB slicer (levels ±1,±3,±5,±7 — same normalization as the FS
@@ -179,7 +374,20 @@ void atsc_equalizer_long_impl::filterN_dd(const float* input_samples,
         else                 decision = -7.0f;
 
         float e = decision - y;             // target − output
-        if (std::fabs(e) > DD_GATE) continue;   // unconfident — don't adapt
+        const bool confident = std::fabs(e) <= DD_GATE;
+        if (dfe_on && confident && std::isfinite(e)) {
+            // feedback update BEFORE the push — the push mutates the
+            // window's oldest slot (v1 bug: update-after-push fed the
+            // newest decision into the oldest tap's gradient)
+            float tmp_fb[NFB_MAX];
+            volk_32f_s32f_multiply_32f(tmp_fb, hist_w, mu_fb_eff * e, NFB);
+            volk_32f_x2_subtract_32f(&d_fb[0], &d_fb[0], tmp_fb, NFB);
+        }
+        if (dfe_on)
+            dfe_push(decision, NFB);        // history advances every symbol
+        if (!confident) continue;           // unconfident — don't adapt FFE
+
+        if (DD_MU <= 0.0f) continue;        // DFE-only mode: FFE stays FS-anchored
 
         float xnorm2 = 0.0f;
         volk_32f_x2_dot_prod_32f(&xnorm2, x, x, NTAPS);
@@ -190,6 +398,13 @@ void atsc_equalizer_long_impl::filterN_dd(const float* input_samples,
         float tmp_taps[NTAPS];
         volk_32f_s32f_multiply_32f(tmp_taps, x, scale, NTAPS);
         volk_32f_x2_add_32f(&d_taps[0], &d_taps[0], tmp_taps, NTAPS);
+    }
+
+    // DFE per-field-ish leak: bounds FFE/FBF disagreement growth (v1 runs
+    // the FS anchor WITHOUT feedback awareness — see blueprint; the leak
+    // plus the confidence gate keep any double-cancellation self-limiting)
+    if (dfe_on) {
+        for (int k = 0; k < NFB; k++) d_fb[k] *= 0.9995f;
     }
 
     // Optional leak (default 0 — see BUGFIX note above). When enabled, bounds
@@ -224,132 +439,12 @@ void atsc_equalizer_long_impl::filterN_dd(const float* input_samples,
 #if defined(__x86_64__) || defined(__i386__)
 __attribute__((target("avx2,fma")))
 #endif
-void atsc_equalizer_long_impl::filterN_dfe(const float* input_samples,
-                                           float* output_samples,
-                                           int nsamples)
-{
-    // DECISION-FEEDBACK EQUALIZER. y = (feedforward FIR over input) − (feedback
-    // FIR over past hard decisions). The feedback term estimates post-cursor ISI
-    // from already-decided, noise-free symbols, so it cancels multipath echoes
-    // WITHOUT the noise enhancement a purely linear equalizer suffers when it
-    // inverts a deep notch. This is the structural advantage a TV's demod has.
-    // Both filters adapt by confidence-gated NLMS (same guards as filterN_dd);
-    // the supervised FS-LMS anchor (adaptN) still runs each field sync. Cost is
-    // O(NTAPS + NFB) per symbol — real-time, unlike RLS's O(NTAPS^2).
-    static const float DFE_MU = []() -> float {
-        if (const char* p = std::getenv("STVT_EQ_DFE_MU")) {
-            char* e = nullptr; double v = std::strtod(p, &e);
-            if (e != p) return (float)v;
-        }
-        return 5e-3f;   // normalized step
-    }();
-    static const float DFE_GATE = []() -> float {
-        if (const char* p = std::getenv("STVT_EQ_DFE_GATE")) {
-            char* e = nullptr; double v = std::strtod(p, &e);
-            if (e != p) return (float)v;
-        }
-        return 1.5f;    // adapt only on confident decisions
-    }();
-    // Runtime cost knobs (swept to find the real-time sweet spot, then frozen):
-    //   NFB    — feedback taps (post-cursor span). Fewer = cheaper filtering.
-    //   STRIDE — adapt every STRIDE-th symbol (filter still runs every symbol);
-    //            μ is scaled ×STRIDE to keep the average adaptation rate.
-    //   ADAPT_FF — also adapt the feedforward taps here (1), or leave them to the
-    //            FS-LMS anchor and only adapt feedback (0, much cheaper).
-    static const int DFE_NFB = []() -> int {
-        if (const char* p = std::getenv("STVT_EQ_DFE_NFB")) { int v = std::atoi(p); if (v > 0) return v; }
-        return 64;
-    }();
-    static const int DFE_STRIDE = []() -> int {
-        if (const char* p = std::getenv("STVT_EQ_DFE_STRIDE")) { int v = std::atoi(p); if (v > 0) return v; }
-        return 1;
-    }();
-    static const bool DFE_ADAPT_FF = []() -> bool {
-        if (const char* p = std::getenv("STVT_EQ_DFE_FF")) return std::atoi(p) != 0;
-        return true;
-    }();
-    const int nfb = (DFE_NFB < NFB) ? DFE_NFB : NFB;   // clamp to allocated buffer
-    const float DFE_EPS = 1.0f;  // NLMS regularizer
-
-    // Reset the decision-history prefix each data segment (see header note).
-    std::memset(&d_dec_seg[0], 0, nfb * sizeof(float));
-
-    float* __restrict ff = &d_taps[0];
-    float* __restrict fb = &d_fb_taps[0];
-    int actr = 0;
-    for (int j = 0; j < nsamples; j++) {
-        const float* __restrict x  = &input_samples[j];
-        // Feedback window for symbol j = contiguous slice holding d[j-nfb..j-1];
-        // fb[nfb-1] pairs with the most-recent decision d[j-1].
-        const float* __restrict dh = &d_dec_seg[j];
-
-        // Dots via volk (its FP reductions are SIMD; hand loops would not
-        // auto-vectorize a sum without -ffast-math).
-        float y_ff = 0.0f, y_fb = 0.0f;
-        volk_32f_x2_dot_prod_32f(&y_ff, x, ff, NTAPS);
-        volk_32f_x2_dot_prod_32f(&y_fb, dh, fb, nfb);
-        float y = y_ff - y_fb;
-        output_samples[j] = y;
-
-        // 8-VSB slicer (levels ±1,±3,±5,±7).
-        float decision;
-        if      (y >=  6.0f) decision =  7.0f;
-        else if (y >=  4.0f) decision =  5.0f;
-        else if (y >=  2.0f) decision =  3.0f;
-        else if (y >=  0.0f) decision =  1.0f;
-        else if (y >= -2.0f) decision = -1.0f;
-        else if (y >= -4.0f) decision = -3.0f;
-        else if (y >= -6.0f) decision = -5.0f;
-        else                 decision = -7.0f;
-        d_dec_seg[j + nfb] = decision;   // append (no shift)
-
-        // Adapt every STRIDE-th confident symbol.
-        if (++actr < DFE_STRIDE) continue;
-        actr = 0;
-        float e = decision - y;
-        if (std::fabs(e) <= DFE_GATE) {
-            // NLMS power normaliser (volk-vectorised dots).
-            float xn2 = 0.0f, dn2 = 0.0f;
-            volk_32f_x2_dot_prod_32f(&dn2, dh, dh, nfb);
-            if (DFE_ADAPT_FF) volk_32f_x2_dot_prod_32f(&xn2, x, x, NTAPS);
-            float mu_eff = (float)DFE_STRIDE * DFE_MU / (DFE_EPS + xn2 + dn2);
-            float scale = mu_eff * e;
-            if (std::isfinite(scale)) {
-                // Fused in-place FMA updates — one pass each, no temp buffers.
-                // These elementwise maps DO auto-vectorize at -O3, now with
-                // AVX2+FMA (256-bit, single-instruction multiply-add).
-                if (DFE_ADAPT_FF)
-                    for (int k = 0; k < NTAPS; k++) ff[k] += scale * x[k];  // w += μ·e·x
-                for (int k = 0; k < nfb; k++)   fb[k] -= scale * dh[k];     // b -= μ·e·dec
-            }
-        }
-    }
-
-    // Divergence backstop (mirror filterN_dd): if either filter blows up,
-    // restore the last-known-good feedforward taps (or a delta), zero the
-    // feedback filter, and emit pass-through for this segment.
-    double tap_e = 0.0, fb_e = 0.0;
-    for (int k = 0; k < NTAPS; k++) tap_e += (double)d_taps[k] * (double)d_taps[k];
-    for (int k = 0; k < NFB;   k++) fb_e  += (double)d_fb_taps[k] * (double)d_fb_taps[k];
-    if (!std::isfinite(tap_e) || tap_e > 50.0 * 50.0 ||
-        !std::isfinite(fb_e)  || fb_e  > 50.0 * 50.0) {
-        if (d_lkg_valid) {
-            for (int k = 0; k < NTAPS; k++) d_taps[k] = d_taps_lkg[k];
-        } else {
-            for (int k = 0; k < NTAPS; k++) d_taps[k] = 0.0f;
-            d_taps[NPRETAPS] = 1.0f;
-        }
-        std::memset(&d_fb_taps[0], 0, NFB * sizeof(float));
-        for (int j = 0; j < nsamples; j++)
-            output_samples[j] = input_samples[j + NPRETAPS];
-    }
-}
-
 void atsc_equalizer_long_impl::adaptN(const float* input_samples,
                                  const float* training_pattern,
                                  float* output_samples,
                                  int nsamples)
 {
+    d_fs_trained++;   // live supervised trainings this session (DD hold)
     // 2026-05-22 23:42: expose BETA/LEAK/DIVERGENCE_BAIL via env vars
     // so the chain can sweep optimal LMS step / leakage. Defaults match
     // prior hardcoded values. Read once and cached in static locals.
@@ -522,6 +617,99 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
         d_fs_count = 0;
     }
 
+    // 2026-07-05 IMPULSE-GATED ADAPTATION FREEZE (stop-and-go LMS, research
+    // hypothesis H1). Adaptation only happens on field syncs; when an
+    // impulse burst lands ON the training sequence, the LMS eats a garbage
+    // gradient at full step and the taps take several fields to recover —
+    // and in cliff mode the same corrupt batch can fire a spurious QUALITY
+    // reset. Guard: compute the batch's a-priori error BEFORE updating; if
+    // it exceeds IMPULSE_K × the running EWMA of accepted batches, freeze —
+    // no tap update, no leak, no LKG/gear/quality decisions from poisoned
+    // data. Output is still produced (downstream needs the field sync).
+    // Warmup: never freeze during initial convergence (errors are honestly
+    // large there). Default OFF for A/B integrity (STVT_EQ_IMPULSE_GUARD=1).
+    static const bool IMPULSE_GUARD = []() -> bool {
+        const char* p = std::getenv("STVT_EQ_IMPULSE_GUARD");
+        return p && std::atoi(p) != 0;
+    }();
+    static const float IMPULSE_K = []() -> float {
+        if (const char* p = std::getenv("STVT_EQ_IMPULSE_K")) {
+            char* e = nullptr; double v = std::strtod(p, &e);
+            if (e != p && v > 1.0) return (float)v;
+        }
+        return 2.5f;
+    }();
+    static const int IMPULSE_WARMUP = []() -> int {
+        if (const char* p = std::getenv("STVT_EQ_IMPULSE_WARMUP")) {
+            int v = std::atoi(p);
+            if (v >= 1 && v <= 10000) return v;
+        }
+        return 40;   // ~1 s of field syncs before the guard may engage
+    }();
+    static double imp_ewma = -1.0;
+    static int    imp_warm = 0;
+    static uint64_t imp_freezes = 0;
+
+    if (IMPULSE_GUARD && nsamples > 0) {
+        double pre_sq = 0.0;
+        for (int j = 0; j < nsamples; j++) {
+            float y_pre = 0.0f;
+            volk_32f_x2_dot_prod_32f(&y_pre, &lms_input[j], &d_taps[0], NTAPS);
+            const float e_pre = y_pre - training_pattern[j];
+            pre_sq += (double)e_pre * (double)e_pre;
+        }
+        const double pre_rms = std::sqrt(pre_sq / (double)nsamples);
+        const bool frozen = (imp_warm >= IMPULSE_WARMUP && imp_ewma > 0.0
+                             && pre_rms > (double)IMPULSE_K * imp_ewma);
+        if (frozen) {
+            imp_freezes++;
+            if (imp_freezes <= 5 || (imp_freezes & 0x3F) == 0) {
+                std::fprintf(stderr,
+                             "[atsc_equalizer_long] IMPULSE FREEZE #%llu "
+                             "(batch err %.3f > %.1fx ewma %.3f) — taps held\n",
+                             (unsigned long long)imp_freezes, pre_rms,
+                             (double)IMPULSE_K, imp_ewma);
+            }
+            // produce output from the untouched taps, change nothing else
+            for (int j = 0; j < nsamples; j++) {
+                output_samples[j] = 0;
+                volk_32f_x2_dot_prod_32f(
+                    &output_samples[j], &input_samples[j], &d_taps[0], NTAPS);
+            }
+            return;
+        }
+        imp_ewma = (imp_ewma < 0.0) ? pre_rms
+                                    : 0.95 * imp_ewma + 0.05 * pre_rms;
+        imp_warm++;
+    }
+
+    // 2026-07-05 ROBUST (HUBER) CONFIDENCE-WEIGHTED LMS — hypothesis H1
+    // step 3, the knobless successor to the binary impulse freeze. Every
+    // training sample's gradient contribution is weighted by how trustworthy
+    // its error looks: full strength up to HUBER_K × the running robust
+    // scale (EWMA of the batch MEDIAN |e| — medians shrug off impulses),
+    // clamped beyond it. An impulse corrupting 30 of 832 training symbols
+    // costs those 30 samples their influence — the other 802 still teach at
+    // full speed, unlike the batch freeze which discards everything.
+    // HUBER_K is dimensionless (≈ sigma units, default 3.0) so it transfers
+    // across antennas/channels — the scale itself is what self-calibrates.
+    // Default OFF (STVT_EQ_ROBUST=1 to enable) pending live A/B.
+    static const bool ROBUST = []() -> bool {
+        const char* p = std::getenv("STVT_EQ_ROBUST");
+        return p && std::atoi(p) != 0;
+    }();
+    static const float HUBER_K = []() -> float {
+        if (const char* p = std::getenv("STVT_EQ_HUBER_K")) {
+            char* e = nullptr; double v = std::strtod(p, &e);
+            if (e != p && v > 0.5) return (float)v;
+        }
+        return 3.0f;
+    }();
+    static double rob_scale = -1.0;   // EWMA of batch median |e|
+    static uint64_t rob_clamped = 0;  // samples clamped, lifetime
+    float abs_e_buf[1024];
+    const bool rob_active = ROBUST && nsamples > 0 && nsamples <= 1024;
+
     // Accumulate RMS error during this adapt batch for LKG quality assessment.
     double err_sq_sum = 0.0;
 
@@ -532,22 +720,114 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
     static int    gear_state = 0;   // 0=FAST, 1=SLOW
     const double effective_mu = GEAR_ENABLED ? current_mu : BETA;
 
-    for (int j = 0; j < nsamples; j++) {
-        output_samples[j] = 0;
-        // Output uses current-field input (downstream sees this field).
-        volk_32f_x2_dot_prod_32f(
-            &output_samples[j], &input_samples[j], &d_taps[0], NTAPS);
-        // LMS gradient uses lms_input (averaged when FS_AVG_DEPTH>1).
-        float y_avg = output_samples[j];
-        if (lms_input != input_samples) {
-            y_avg = 0.0f;
-            volk_32f_x2_dot_prod_32f(&y_avg, &lms_input[j], &d_taps[0], NTAPS);
+    // ── EQUALIZER DATA RECYCLING (2026-07-29, speed-1 lever 3) ──────────
+    // Oh, Han, Jeon & Rhee, "A fast converging equalizer for the ATSC DTV
+    // receiver", GLOBECOM 2003, pp. 3371-3375, DOI 10.1109/GLOCOM.2003.1258860.
+    // Their observation: the field sync arrives once per 260,416 symbols and
+    // is "not long enough to guarantee equalizer operation" — supervised
+    // training runs at a 704/260416 = 0.27 % duty cycle, which IS the cold-
+    // convergence cost. Their fix: keep the field-sync segment and run the
+    // LMS over it N times per field instead of once.
+    //
+    // Same gradient, same known symbols, same step — just applied more
+    // often, so the divergence bail below already guards the failure mode.
+    // Cost is N x 704 supervised updates per 24.2 ms field: at N=4 about
+    // 2 Mflop per field, i.e. nothing.
+    //
+    // Pass 0 is BIT-IDENTICAL to the un-recycled code (same output write,
+    // same err_sq_sum, same Huber bookkeeping), and every downstream
+    // decision — fs_err_rms telemetry, the LKG quality gate, gear shifting,
+    // the quality reset — keys on pass 0 ONLY. That is deliberate: MER is
+    // reported as 20*log10(5/fs_err_rms) with a calibrated 15.2 dB cliff, so
+    // measuring the error AFTER extra passes would silently inflate every
+    // MER number in the project. Default 1 = off = today's behaviour.
+    //
+    // ★ COLD-START WINDOW — measured, not assumed. Recycling N times is,
+    // on the training set, an N-fold larger effective step, and LMS
+    // steady-state tap misadjustment grows with the step. On the CLEAN
+    // rf34 capture x8 was pure profit (convergence 5.90 s -> 0.62 s, MER
+    // +0.29 dB, frames 403 either way) — but on the FADING rf7 marginal
+    // capture, leaving it on all run long cost 251 -> 213 video frames
+    // (-15 %) and 0.20 dB of MER. That is the same lesson
+    // mer_dial_universal_algorithm learned about the slow-adaptation
+    // family: a convergence trick is not a steady-state setting. So
+    // recycling is confined to the first STVT_EQ_RECYCLE_FIELDS field
+    // syncs (default 40 ~ 1 s, which measurement shows covers the whole
+    // transient) and steady state is left exactly as it is today.
+    // d_fs_trained is reset by the `warm` command, so a retune re-arms the
+    // window for the new channel. 0 = no window (the pure published
+    // algorithm; research only — it regresses fading channels).
+    static const int RECYCLE = []() -> int {
+        if (const char* p = std::getenv("STVT_EQ_RECYCLE")) {
+            int v = std::atoi(p);
+            if (v >= 1 && v <= 32) return v;
         }
-        float e = y_avg - training_pattern[j];
-        err_sq_sum += (double)e * (double)e;
-        float tmp_taps[NTAPS];
-        volk_32f_s32f_multiply_32f(tmp_taps, &lms_input[j], effective_mu * e, NTAPS);
-        volk_32f_x2_subtract_32f(&d_taps[0], &d_taps[0], tmp_taps, NTAPS);
+        return 1;
+    }();
+    static const int RECYCLE_FIELDS = []() -> int {
+        if (const char* p = std::getenv("STVT_EQ_RECYCLE_FIELDS")) {
+            int v = std::atoi(p);
+            if (v >= 0 && v <= 100000) return v;
+        }
+        return 40;
+    }();
+    static bool _recycle_logged = []() {
+        if (RECYCLE > 1)
+            std::fprintf(stderr,
+                "[eq-long] DATA RECYCLING x%d for the first %s field syncs "
+                "(Oh et al., GLOBECOM 2003)\n", RECYCLE,
+                RECYCLE_FIELDS ? std::to_string(RECYCLE_FIELDS).c_str()
+                               : "ALL");
+        return true;
+    }();
+    (void)_recycle_logged;
+    const int passes =
+        (RECYCLE > 1 && (RECYCLE_FIELDS == 0 ||
+                         d_fs_trained <= (uint32_t)RECYCLE_FIELDS))
+        ? RECYCLE : 1;
+
+    for (int pass = 0; pass < passes; pass++) {
+        const bool first = (pass == 0);
+        for (int j = 0; j < nsamples; j++) {
+            // Output uses current-field input (downstream sees this field).
+            float y = 0.0f;
+            volk_32f_x2_dot_prod_32f(
+                &y, &input_samples[j], &d_taps[0], NTAPS);
+            if (first)
+                output_samples[j] = y;
+            // LMS gradient uses lms_input (averaged when FS_AVG_DEPTH>1).
+            float y_avg = y;
+            if (lms_input != input_samples) {
+                y_avg = 0.0f;
+                volk_32f_x2_dot_prod_32f(&y_avg, &lms_input[j], &d_taps[0], NTAPS);
+            }
+            float e = y_avg - training_pattern[j];
+            if (first)
+                err_sq_sum += (double)e * (double)e;  // raw err: telem/quality
+            float e_adapt = e;                     // gradient error: maybe clamped
+            if (rob_active) {
+                if (first)
+                    abs_e_buf[j] = std::fabs(e);
+                if (rob_scale > 0.0) {
+                    const float c = HUBER_K * (float)rob_scale;
+                    if (e_adapt >  c) { e_adapt =  c; if (first) rob_clamped++; }
+                    if (e_adapt < -c) { e_adapt = -c; if (first) rob_clamped++; }
+                }
+            }
+            float tmp_taps[NTAPS];
+            volk_32f_s32f_multiply_32f(tmp_taps, &lms_input[j], effective_mu * e_adapt, NTAPS);
+            volk_32f_x2_subtract_32f(&d_taps[0], &d_taps[0], tmp_taps, NTAPS);
+        }
+    }
+
+    // Robust scale update: batch median of |e| via nth_element, EWMA'd.
+    // The median is what makes this impulse-proof — a burst corrupting a
+    // minority of samples barely moves it, so the clamp level stays honest.
+    if (rob_active) {
+        float* mid = abs_e_buf + nsamples / 2;
+        std::nth_element(abs_e_buf, mid, abs_e_buf + nsamples);
+        const double med = (double)*mid;
+        rob_scale = (rob_scale < 0.0) ? med : 0.95 * rob_scale + 0.05 * med;
     }
 
     float keep = 1.0f - LEAK;
@@ -565,6 +845,33 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
         }
     }
 
+    // WARM-START periodic persist: our chains die by force-kill, so the
+    // cache must be written DURING life, not at exit.
+    //
+    // 2026-07-29 (speed-1, dossier defects D1+D2). TWO fixes here:
+    //  * the path is read at CALL time, NOT latched in a `static` — that
+    //    single word was why a persistent chain could not rebind the cache
+    //    on retune, which is why the fast retune path had to give up the
+    //    fast equalizer (tv_live.py used to disable the cache outright).
+    //  * every 128 field syncs (~3.1 s), not 1024 (~24.8 s). Scan dwells
+    //    are 8-12 s, so with the old interval a first-ever visit to a
+    //    channel usually NEVER wrote the cache and the warm-start loop
+    //    could not prime itself. 1032 bytes every 3 s is free.
+    //    STVT_EQ_CACHE_EVERY restores any interval (0 = only on stop()).
+    static const int CACHE_EVERY = []() -> int {
+        if (const char* p = std::getenv("STVT_EQ_CACHE_EVERY")) {
+            int v = std::atoi(p);
+            if (v >= 0 && v <= 100000) return v;
+        }
+        return 128;
+    }();
+    if (CACHE_EVERY > 0 && d_lkg_valid && nsamples > 0) {
+        static uint64_t save_fs = 0;
+        save_fs++;
+        if ((save_fs % (uint64_t)CACHE_EVERY) == 0)
+            cache_save(std::getenv("STVT_EQ_TAP_CACHE_FILE"));
+    }
+
     // 2026-05-30 DRIFT-LOCALIZATION TELEMETRY. Emit timestamped equalizer
     // quality every 8 field syncs (mirrors the CMA block's cadence) so it can
     // be correlated against [fpll t=...] to pin WHERE a drift starts — carrier
@@ -573,19 +880,127 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
     static const bool TELEM = []() {
         const char* p = std::getenv("STVT_EQ_TELEM"); return p && std::atoi(p) != 0;
     }();
+    // Cadence knob (2026-07-29): two callers want field resolution — the
+    // dual-decode A/B harness (tools/tv_dual.py) needs EVERY field sync from
+    // BOTH equalizers so the two MER series can be paired field-by-field, and
+    // the speed-1 convergence studies need it so an fs_err_rms curve has field
+    // resolution. STVT_EQ_TELEM_EVERY=1 for either; default 8 = the historical
+    // rate, so the LINE and its cadence are unchanged for every existing
+    // parser (the panel's RE_FS, quality_tuner, the MER dial). Telemetry only
+    // — the output stream is unaffected.
+    static const int TELEM_EVERY = []() {
+        const char* p = std::getenv("STVT_EQ_TELEM_EVERY");
+        int n = p ? std::atoi(p) : 8;
+        return n > 0 ? n : 8;
+    }();
     if (TELEM && nsamples > 0) {
         static auto telem_t0 = std::chrono::steady_clock::now();
         static uint64_t telem_fs = 0;
         telem_fs++;
-        if ((telem_fs % 8) == 0) {
+        if ((telem_fs % TELEM_EVERY) == 0) {
             double tap_e = 0.0;
             for (int k = 0; k < NTAPS; k++) tap_e += (double)d_taps[k] * (double)d_taps[k];
             double t = std::chrono::duration<double>(
                            std::chrono::steady_clock::now() - telem_t0).count();
             std::fprintf(stderr,
-                "[eq-long t=%6.2fs] fs=%llu fs_err_rms=%.4f |taps|=%.3f mu=%g\n",
+                "[eq-long t=%6.2fs] fs=%llu fs_err_rms=%.4f |taps|=%.3f mu=%g "
+                "frz=%llu hub=%.3f clmp=%llu\n",
                 t, (unsigned long long)telem_fs, batch_err_rms,
-                std::sqrt(tap_e), effective_mu);
+                std::sqrt(tap_e), effective_mu,
+                (unsigned long long)imp_freezes,
+                rob_scale > 0.0 ? rob_scale : 0.0,
+                (unsigned long long)rob_clamped);
+        }
+    }
+
+    // 2026-07-05 CIR TELEMETRY — the "echo X-ray" (research hypothesis H2).
+    // Correlating the received field sync against the known PN511 training
+    // sequence yields the channel impulse response directly: every echo's
+    // delay and strength, ~5×/s. Powers the panel's echo viewer (aim by
+    // killing reflections instead of chasing a scalar MER) and, later,
+    // analytic tap seeding. One symbol ≈ 92.9 ns ≈ 28 m of path difference.
+    // STVT_EQ_CIR=1 to enable; ~230k MACs per emission — negligible.
+    static const bool CIR_ENABLED = []() {
+        const char* p = std::getenv("STVT_EQ_CIR");
+        return p && std::atoi(p) != 0;
+    }();
+    // Coherent averaging (2026-07-05, v2): the field sync is symbol-locked,
+    // so real echoes correlate with the SAME sign every sync while noise and
+    // data-crosstalk flip randomly — summing signed correlations over
+    // CIR_AVG syncs sinks the noise floor by √N (16 syncs ≈ −12 dB), which
+    // is what lets the −34 dB threshold below stay honest.
+    if (CIR_ENABLED && nsamples == KNOWN_FIELD_SYNC_LENGTH) {
+        static const int CIR_AVG = []() -> int {
+            if (const char* p = std::getenv("STVT_EQ_CIR_AVG")) {
+                int v = std::atoi(p);
+                if (v >= 1 && v <= 128) return v;
+            }
+            return 16;
+        }();
+        const float* pn = training_pattern + 4;      // the PN511 span
+        const int NDELAY = nsamples + NTAPS - 511;
+        static std::vector<double> cir_acc;
+        static int cir_cnt = 0;
+        if ((int)cir_acc.size() != NDELAY) {
+            cir_acc.assign(NDELAY, 0.0);
+            cir_cnt = 0;
+        }
+        for (int d = 0; d < NDELAY; d++) {
+            float r = 0.0f;
+            volk_32f_x2_dot_prod_32f(&r, &input_samples[d], pn, 511);
+            cir_acc[d] += (double)r;                 // signed — coherent
+        }
+        cir_cnt++;
+        if (cir_cnt >= CIR_AVG) {
+            double peak = 0.0;
+            int dpeak = 0;
+            for (int d = 0; d < NDELAY; d++) {
+                const double m = std::fabs(cir_acc[d]);
+                if (m > peak) { peak = m; dpeak = d; }
+            }
+            if (peak > 0.0) {
+                static auto cir_t0 = std::chrono::steady_clock::now();
+                double t = std::chrono::duration<double>(
+                               std::chrono::steady_clock::now() - cir_t0).count();
+                char line[1600];
+                int len = std::snprintf(line, sizeof(line), "[cir t=%.2f] ", t);
+                int emitted = 0;
+                // averaged floor ≈ −27 dB − 20·log10(√CIR_AVG); with the
+                // default 16 that's ≈ −39 dB, so −34 dB bins are real.
+                const double thresh = 0.02 * peak;
+                for (int d = 0; d < NDELAY && emitted < 32; d++) {
+                    const double m = std::fabs(cir_acc[d]);
+                    if (m < thresh) continue;
+                    if (d != dpeak && std::abs(d - dpeak) <= 2) continue;
+                    const double db = 20.0 * std::log10(m / peak);
+                    len += std::snprintf(line + len, sizeof(line) - len,
+                                         "%d:%.1f,", d - dpeak, db);
+                    emitted++;
+                    if (len > (int)sizeof(line) - 32) break;
+                }
+                std::fprintf(stderr, "%s\n", line);
+            }
+            // 2026-07-06 Wiener warm-start: dump the SIGNED averaged CIR
+            // (the stderr line above is magnitude-only peaks; the analytic
+            // tap solve needs signs). STVT_EQ_CIR_DUMP=<path>, overwritten
+            // each emission — latest channel snapshot wins.
+            static const char* CIR_DUMP = std::getenv("STVT_EQ_CIR_DUMP");
+            if (CIR_DUMP) {
+                FILE* fd = std::fopen(CIR_DUMP, "wb");
+                if (fd) {
+                    const uint32_t magic = 0x43495244u; /* 'CIRD' */
+                    const uint32_t n = (uint32_t)NDELAY;
+                    std::fwrite(&magic, 4, 1, fd);
+                    std::fwrite(&n, 4, 1, fd);
+                    std::vector<float> tmpf(NDELAY);
+                    for (int d = 0; d < NDELAY; d++)
+                        tmpf[d] = (float)cir_acc[d];
+                    std::fwrite(tmpf.data(), 4, NDELAY, fd);
+                    std::fclose(fd);
+                }
+            }
+            std::fill(cir_acc.begin(), cir_acc.end(), 0.0);
+            cir_cnt = 0;
         }
     }
 
@@ -659,7 +1074,50 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
             auto _ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                             _now - d_last_quality_reset).count();
             if (_ms >= QUALITY_DEBOUNCE_MS) {
-                for (int k = 0; k < NTAPS; k++) d_taps[k] = d_taps_lkg[k];
+                // 2026-07-07 RESEED-ON-COLLAPSE (STVT_EQ_RESEED=1): re-read
+                // the tap-cache FILE instead of the in-RAM snapshot. The
+                // file can be refreshed mid-run by outside intelligence
+                // (Wiener solve of a fresh CIR, a better session's LKG) —
+                // recovery becomes a jump to current knowledge, not a
+                // crawl back from a stale snapshot.
+                static const bool RESEED = []() {
+                    const char* p = std::getenv("STVT_EQ_RESEED");
+                    return p && std::atoi(p) != 0;
+                }();
+                bool reseeded = false;
+                if (RESEED) {
+                    if (const char* cf =
+                            std::getenv("STVT_EQ_TAP_CACHE_FILE")) {
+                        std::FILE* f = std::fopen(cf, "rb");
+                        if (f) {
+                            uint32_t mg = 0, n = 0;
+                            std::vector<float> t(NTAPS);
+                            if (std::fread(&mg, 4, 1, f) == 1 &&
+                                std::fread(&n, 4, 1, f) == 1 &&
+                                mg == 0x54415043u && n == (uint32_t)NTAPS &&
+                                std::fread(t.data(), 4, NTAPS, f)
+                                    == (size_t)NTAPS) {
+                                double e2 = 0.0;
+                                bool fin = true;
+                                for (int k = 0; k < NTAPS; k++) {
+                                    if (!std::isfinite(t[k])) {
+                                        fin = false;
+                                        break;
+                                    }
+                                    e2 += (double)t[k] * (double)t[k];
+                                }
+                                if (fin && e2 > 0.01 && e2 < 2500.0) {
+                                    for (int k = 0; k < NTAPS; k++)
+                                        d_taps[k] = t[k];
+                                    reseeded = true;
+                                }
+                            }
+                            std::fclose(f);
+                        }
+                    }
+                }
+                if (!reseeded)
+                    for (int k = 0; k < NTAPS; k++) d_taps[k] = d_taps_lkg[k];
                 d_last_quality_reset = _now;
                 static uint64_t quality_resets = 0;
                 quality_resets++;
@@ -843,36 +1301,213 @@ int atsc_equalizer_long_impl::general_work(int noutput_items,
                (NTAPS - NPRETAPS) * sizeof(float));
 
         if (d_segno == -1) {
+            // ── E5 COMMAND PORT (2026-07-06) ── the FEC sheriff's lever.
+            // RS truth lives OUTSIDE this block's influence; when an
+            // external supervisor sees the confidently-wrong signature
+            // (healthy fs_err + massive RS failure), it drops a one-word
+            // command file that we poll once per field sync (~21 Hz,
+            // one stat() — negligible). Commands: lkg | delta | cache |
+            // dfe0 | dfe1 | save | warm.
+            // File is consumed (deleted) on execution.
+            //
+            // 2026-07-29 (speed-1 lever 1) added `save` and `warm` so a
+            // PERSISTENT chain can carry its warm start across a retune:
+            //   save  persist THIS channel's vetted taps now
+            //   warm  (re)load from STVT_EQ_TAP_CACHE_FILE, re-read at
+            //         call time, through the constructor's full quality
+            //         gate — unlike the older `cache` verb, which is left
+            //         untouched for the FEC sheriff and deliberately has
+            //         no gate and does not touch the LKG snapshot.
+            static const char* CMD_FILE = std::getenv("STVT_EQ_CMD_FILE");
+            if (CMD_FILE) {
+                std::FILE* cf = std::fopen(CMD_FILE, "rb");
+                if (cf) {
+                    char cmd[16] = { 0 };
+                    size_t n = std::fread(cmd, 1, sizeof(cmd) - 1, cf);
+                    std::fclose(cf);
+                    std::remove(CMD_FILE);
+                    while (n && (cmd[n - 1] == '\n' || cmd[n - 1] == '\r' ||
+                                 cmd[n - 1] == ' '))
+                        cmd[--n] = 0;
+                    bool ok = true;
+                    if (!std::strcmp(cmd, "lkg") && d_lkg_valid) {
+                        d_taps = d_taps_lkg;
+                        std::fill(d_fb.begin(), d_fb.end(), 0.0f);
+                    } else if (!std::strcmp(cmd, "delta")) {
+                        std::fill(d_taps.begin(), d_taps.end(), 0.0f);
+                        d_taps[NPRETAPS] = 1.0f;
+                        std::fill(d_fb.begin(), d_fb.end(), 0.0f);
+                    } else if (!std::strcmp(cmd, "dfe0")) {
+                        std::fill(d_fb.begin(), d_fb.end(), 0.0f);
+                        d_dfe_suspend = true;
+                    } else if (!std::strcmp(cmd, "dfe1")) {
+                        d_dfe_suspend = false;
+                    } else if (!std::strcmp(cmd, "save")) {
+                        ok = cache_save(
+                            std::getenv("STVT_EQ_TAP_CACHE_FILE"));
+                    } else if (!std::strcmp(cmd, "warm")) {
+                        // Runtime rebind: whatever STVT_EQ_TAP_CACHE_FILE
+                        // says NOW. If that channel has no cache yet, fall
+                        // back to the delta — the state a fresh process on
+                        // that channel would have — rather than carrying
+                        // the previous channel's multipath into it.
+                        if (!cache_load(
+                                std::getenv("STVT_EQ_TAP_CACHE_FILE"))) {
+                            reset_to_delta();
+                            d_lkg_valid = false;
+                            std::fprintf(stderr,
+                                "[eq-long] COLD START (no cache for this "
+                                "channel) — taps reset to delta\n");
+                        }
+                        d_fs_trained = 0;   // re-arm the DD warm-up hold
+                    } else if (!std::strcmp(cmd, "cache")) {
+                        if (const char* p =
+                                std::getenv("STVT_EQ_TAP_CACHE_FILE")) {
+                            std::FILE* f = std::fopen(p, "rb");
+                            if (f) {
+                                uint32_t mg = 0, nn = 0;
+                                std::vector<float> t(NTAPS);
+                                if (std::fread(&mg, 4, 1, f) == 1 &&
+                                    std::fread(&nn, 4, 1, f) == 1 &&
+                                    mg == 0x54415043u &&
+                                    nn == (uint32_t)NTAPS &&
+                                    std::fread(t.data(), 4, NTAPS, f)
+                                        == (size_t)NTAPS)
+                                    d_taps = t;
+                                std::fclose(f);
+                            }
+                        }
+                        std::fill(d_fb.begin(), d_fb.end(), 0.0f);
+                    } else {
+                        ok = false;
+                    }
+                    std::fprintf(stderr, "[eq-long] SHERIFF cmd '%s'%s\n",
+                                 cmd, ok ? "" : " (unknown)");
+                }
+            }
+            // MOD-12 GUARD detection: at every field sync the emitted
+            // data-segment count must be ≡ 0 (mod 12). If not, a stream
+            // discontinuity rotated the viterbi grid — schedule a drop
+            // of the deficit so the next segments realign it.
+            {
+                static const bool MOD12_G = []() {
+                    // default ON since 2026-07-07 (gauntlet-passed)
+                    const char* p = std::getenv("STVT_EQ_MOD12_GUARD");
+                    return !(p && p[0] == '0');
+                }();
+                if (MOD12_G && d_mod12_drop == 0) {
+                    // v2 DEBOUNCE (2026-07-07 gauntlet lesson): a single
+                    // glitched FS detection reads a bogus nonzero phase;
+                    // realigning against it DROPS GOOD SEGMENTS (cliff
+                    // cell ran worse with v1 in storm conditions). Real
+                    // slips persist — same phase, field after field
+                    // (456/456 last night). Fire only on a repeat.
+                    if (d_mod12_count != 0 &&
+                        d_mod12_count == d_mod12_pending) {
+                        // drop k=c: next field start lands at
+                        // (c + 312 - c) ≡ 0 (mod 12). Counter is NOT
+                        // reset — absolute phase tracking, else drops
+                        // oscillate forever.
+                        d_mod12_drop = d_mod12_count;
+                        d_mod12_pending = -1;
+                        std::fprintf(stderr,
+                                     "[eq-long] MOD12 GUARD: phase %d "
+                                     "confirmed x2 — dropping %d segments\n",
+                                     d_mod12_count, d_mod12_drop);
+                    } else {
+                        d_mod12_pending =
+                            (d_mod12_count != 0) ? d_mod12_count : -1;
+                    }
+                }
+            }
             // RLS field-sync adaptation when STVT_EQ_RLS=1, else LMS (default).
             static const bool RLS_ENABLED = []() {
                 const char* p = std::getenv("STVT_EQ_RLS"); return p && std::atoi(p) != 0;
             }();
             const float* trn = (d_flags & 0x0010) ? training_sequence2 : training_sequence1;
+            static const bool DFE_G = []() {
+                const char* p = std::getenv("STVT_EQ_DFE");
+                return p && std::atoi(p) != 0;
+            }();
+            static const int NFB_G = []() -> int {
+                if (const char* p = std::getenv("STVT_EQ_DFE_NFB")) {
+                    int v = std::atoi(p);
+                    if (v >= 16 && v <= NFB_MAX) return v;
+                }
+                return 192;
+            }();
+            // v1.2's fb-aware anchor is OPT-IN after the 5-round gauntlet
+            // caught it co-drifting: training vs the adjusted target made
+            // fs_err SELF-REFERENTIAL (graded its own homework) — MER 19.5
+            // with 100% RS fail, the liveness-law mirage. Needs a ground-
+            // truth constraint (RS-fail feedback, E5) before default.
+            static const bool DFE_ANCHOR = []() {
+                const char* p = std::getenv("STVT_EQ_DFE_ANCHOR");
+                return p && std::atoi(p) != 0;
+            }();
             if (RLS_ENABLED) {
                 adaptN_rls(data_mem, trn, data_mem2, KNOWN_FIELD_SYNC_LENGTH);
+            } else if (DFE_G && !DFE_ANCHOR) {
+                // v1.1 semantics: raw-target anchor + known-symbol flush
+                adaptN(data_mem, trn, data_mem2, KNOWN_FIELD_SYNC_LENGTH);
+                for (int k = 0; k < KNOWN_FIELD_SYNC_LENGTH; k++)
+                    dfe_push(trn[k], NFB_G);
+            } else if (DFE_G) {
+                // DFE v1.2 FB-AWARE ANCHOR: the data path outputs
+                // FFE·x − fb·hist, so training the FFE against raw trn
+                // gives FFE and FBF FIGHTING objectives (v1.1's
+                // intermittent healthy-channel instability). Fix without
+                // touching adaptN: train against the ADJUSTED target
+                // trn' = trn + fb·hist — then (FFE·x − fb·hist ≈ trn)
+                // and both filters descend ONE objective. History
+                // advances with the KNOWN symbols as we go (this also
+                // replaces the separate post-adaptN flush).
+                float trn_adj[KNOWN_FIELD_SYNC_LENGTH];
+                for (int k = 0; k < KNOWN_FIELD_SYNC_LENGTH; k++) {
+                    float fbv = 0.0f;
+                    volk_32f_x2_dot_prod_32f(&fbv, &d_hist[d_hpos + 1],
+                                             &d_fb[0], NFB_G);
+                    trn_adj[k] = trn[k] + fbv;
+                    dfe_push(trn[k], NFB_G);
+                }
+                adaptN(data_mem, trn_adj, data_mem2, KNOWN_FIELD_SYNC_LENGTH);
             } else if (d_flags & 0x0010) {
                 adaptN(data_mem, training_sequence2, data_mem2, KNOWN_FIELD_SYNC_LENGTH);
             } else {
                 adaptN(data_mem, training_sequence1, data_mem2, KNOWN_FIELD_SYNC_LENGTH);
             }
         } else {
-            // Data segment. DFE (STVT_EQ_DFE=1) adds the feedback filter;
+            // Data segment: continuous decision-directed tracking (main's
+// DFE lives inside filterN_dd, gated by STVT_EQ_DFE_MU_FB).
             // otherwise the continuous DD tracker (no-op passive filter when
             // STVT_EQ_DD_MU is unset/0).
-            static const bool DFE_ENABLED = []() {
-                const char* p = std::getenv("STVT_EQ_DFE"); return p && std::atoi(p) != 0;
-            }();
-            if (DFE_ENABLED)
-                filterN_dfe(data_mem, data_mem2, ATSC_DATA_SEGMENT_LENGTH);
-            else
                 filterN_dd(data_mem, data_mem2, ATSC_DATA_SEGMENT_LENGTH);
 
-            memcpy(&out[output_produced * ATSC_DATA_SEGMENT_LENGTH],
-                   data_mem2,
-                   ATSC_DATA_SEGMENT_LENGTH * sizeof(float));
+            // ── MOD-12 GUARD (2026-07-07, the convicted mechanism's true
+            // fix) ── each field = 312 data segments (26x12), so at every
+            // FS the emitted count mod 12 must be 0. A discontinuity
+            // breaks that and rotates the downstream viterbi's rigid
+            // batch mapping (100% garbage, 1-in-12 remissions). Cure:
+            // swallow <=11 segments (~1 ms) and the grid realigns —
+            // self-heal within one field. STVT_EQ_MOD12_GUARD=1.
+            static const bool MOD12_GUARD = []() {
+                // DEFAULT ON since 2026-07-07 (5-round gauntlet: win
+                // somewhere, regress nowhere). STVT_EQ_MOD12_GUARD=0
+                // opts out.
+                const char* p = std::getenv("STVT_EQ_MOD12_GUARD");
+                return !(p && p[0] == '0');
+            }();
+            if (MOD12_GUARD && d_mod12_drop > 0) {
+                d_mod12_drop--;               // consume, don't produce
+            } else {
+                memcpy(&out[output_produced * ATSC_DATA_SEGMENT_LENGTH],
+                       data_mem2,
+                       ATSC_DATA_SEGMENT_LENGTH * sizeof(float));
 
-            plinfo pli_out(d_flags, d_segno);
-            out_pl[output_produced++] = pli_out;
+                plinfo pli_out(d_flags, d_segno);
+                out_pl[output_produced++] = pli_out;
+                d_mod12_count = (d_mod12_count + 1) % 12;
+            }
         }
 
         memcpy(data_mem, &data_mem[ATSC_DATA_SEGMENT_LENGTH], NPRETAPS * sizeof(float));

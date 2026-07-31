@@ -30,9 +30,11 @@ def main() -> int:
     for i, d in enumerate(devs):
         print(f"  device {i}: {dict(d)}")
 
-    print("\n[probe] opening driver=sdrplay (the only one this project decodes)...")
+    print("\n[probe] opening the detected radio (SDRplay preferred, "
+          "any SoapySDR device accepted)...")
     try:
-        sdr = SoapySDR.Device("driver=sdrplay")
+        import sdr_compat
+        sdr = SoapySDR.Device(sdr_compat.resolve_soapy_args())
     except Exception as e:
         print(f"[probe] open failed: {e}")
         print("[probe] is the SDRplay daemon running? "

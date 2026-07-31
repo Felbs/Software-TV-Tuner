@@ -1,0 +1,13 @@
+
+=== tv_dual A/B  [rf34cliff_g10] — sample-aligned, one input stream ===
+leg      frames     TS MB   MER p5     p10     p50
+long        132      36.3    14.48  14.649  15.054
+wl          230      36.3   14.135   14.32  14.885
+WL frame advantage: 74.24%
+paired fields n=620  WL MER advantage -0.197 dB  (WL better 166 / long better 396 / tie 58)
+conj_frac     mean 0.057  p10 0.043  p90 0.067
+imag_frac     mean 0.12  p10 0.09  p90 0.142
+imag_benefit  mean 0.597  p10 0.452  p90 0.704
+imag_benefit_insample mean 0.692  p10 0.568  p90 0.776
+kappa         mean 0.0  p10 0.0  p90 0.0
+

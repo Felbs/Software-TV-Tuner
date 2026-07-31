@@ -14,6 +14,9 @@
 #include "atsc_syminfo_impl.h"
 #include <gnuradio/dtv/atsc_consts.h>
 #include <gnuradio/atscplus/atsc_equalizer_long.h>
+#include <gnuradio/fft/fft.h>
+#include <memory>
+#include <vector>
 
 namespace gr {
 namespace atscplus {
@@ -31,16 +34,44 @@ private:
 #endif
     static constexpr int NPRETAPS = (int)(NTAPS * 0.2);
 
-    // Decision-feedback equalizer: number of feedback taps over past hard
-    // decisions. Cancels post-cursor multipath echoes using already-decided
-    // (noise-free) symbols — the lever a TV's demod has and our linear LMS
-    // lacks. O(NFB) per symbol, so it holds real-time (unlike RLS's O(NTAPS^2)).
-    static constexpr int NFB = 128;
 
     static constexpr int KNOWN_FIELD_SYNC_LENGTH = 4 + 511 + 3 * 63;
 
     float training_sequence1[KNOWN_FIELD_SYNC_LENGTH];
     float training_sequence2[KNOWN_FIELD_SYNC_LENGTH];
+
+    // 2026-07-06 DFE v1 (docs/DFE_BLUEPRINT.md): feedback section state.
+    // d_hist is double-length so the most recent NFB decisions are always
+    // a contiguous slice (write at h and h+NFB). Data segments only in
+    // v1; field syncs refill the history with KNOWN training symbols.
+    static constexpr int NFB_MAX = 384;
+
+    // ── FFT-convolution path (STVT_EQ_FFT=1, 2026-07-10) ──
+    // Overlap-save replaces the 832 x NTAPS dot products per segment on
+    // the passive (lean) path. Tap spectrum cached and invalidated by a
+    // cheap fingerprint (energy + 3 sentinels) so no mutation site can
+    // ever be missed. 2048 >= 832 + NTAPS - 1 for all NTAPS variants
+    // up to 512 (832+511=1343).
+    static constexpr int FFT_N = 2048;
+    std::unique_ptr<gr::fft::fft_real_fwd> d_ffwd;
+    std::unique_ptr<gr::fft::fft_real_rev> d_frev;
+    std::vector<gr_complex> d_tap_spec;
+    float d_tap_fp[4] = {0, 0, 0, 0};   // energy, first, mid, last
+    bool d_tap_spec_valid = false;
+    std::vector<float> d_fb;          // feedback taps (NFB long)
+    std::vector<float> d_hist;        // decided symbols, 2*NFB ring
+    int d_hpos = 0;
+    bool d_dfe_suspend = false;       // E5 sheriff can pull the DFE offline
+    void dfe_push(float sym, int nfb);
+
+    // 2026-07-07 MOD-12 GUARD: each field emits exactly 312 data
+    // segments (26x12), so at every FS the emitted count mod 12 must
+    // be 0. A mid-stream discontinuity breaks that — and rotates the
+    // downstream viterbi's rigid 12-batch mapping (the convicted
+    // corruption/DEAF mechanism). Cure: drop <=11 segments to realign.
+    int d_mod12_count = 0;            // data segments emitted, mod 12
+    int d_mod12_drop = 0;             // segments still to drop
+    int d_mod12_pending = -1;         // v2 debounce: phase must repeat
 
     void filterN(const float* input_samples, float* output_samples, int nsamples);
     void adaptN(const float* input_samples,
@@ -55,15 +86,6 @@ private:
     // field-sync-only design, WITHOUT CMA's wrong-modulus convergence: DD
     // minimizes the same symbol-error objective as the FS-LMS anchor.
     void filterN_dd(const float* input_samples, float* output_samples, int nsamples);
-    // 2026-06-19 Decision-feedback equalizer (STVT_EQ_DFE=1). Adds a feedback
-    // FIR over past hard decisions to the existing feedforward FIR, cancelling
-    // post-cursor ISI without the noise enhancement a linear equalizer suffers.
-    // Both filters adapt by confidence-gated NLMS on data segments (the FS-LMS
-    // anchor in adaptN still pulls the feedforward taps to ground truth). The
-    // decision history resets per data segment so cross-field-sync staleness
-    // can't feed the loop. Targets the +16-23pt headroom that only RLS reached,
-    // at real-time cost. Tunables: STVT_EQ_DFE_MU, STVT_EQ_DFE_GATE.
-    void filterN_dfe(const float* input_samples, float* output_samples, int nsamples);
     // 2026-05-30 RLS (Recursive Least Squares) field-sync adaptation. Optional
     // (STVT_EQ_RLS=1). Converges the equalizer far faster + tracks better than
     // LMS each field sync — the classic fix for "LMS too slow → drift". Runs
@@ -76,12 +98,25 @@ private:
                     float* output_samples,
                     int nsamples);
 
+    // ── warm-start tap cache, runtime-rebindable (2026-07-29, speed-1) ──
+    // The cache is PER-INSTALL LEARNED DATA — it is a fingerprint of this
+    // user's own multipath on this channel with this antenna, is never
+    // shipped, and is never assumed to exist. With no cache file these two
+    // helpers do nothing at all and the equalizer cold-starts from the
+    // delta exactly as it always has.
+    //
+    // cache_load()  applies the constructor's exact vetted load (finite +
+    //               0.01 < sum(t^2) < 2500) and seeds d_taps AND the LKG
+    //               snapshot. Returns true if taps were adopted.
+    // cache_save()  writes d_taps_lkg atomically (tmp + rename).
+    // Both read the path from getenv() at CALL time, never latching it, so
+    // a persistent chain that retunes can rebind to the new channel's file
+    // (tv_live.py TVLive.retune()).
+    bool cache_load(const char* path);
+    bool cache_save(const char* path);
+    void reset_to_delta();
+
     std::vector<float> d_taps;
-    std::vector<float> d_fb_taps;    // DFE feedback taps over past decisions
-    // DFE decision buffer: NFB zeros of history followed by one full segment of
-    // decisions. Symbol j's feedback window is the contiguous slice [j, j+NFB),
-    // so no per-symbol shift is needed (the memmove was the throughput killer).
-    std::vector<float> d_dec_seg;
     std::vector<double> d_rls_P;   // NTAPS*NTAPS inverse-correlation matrix (RLS)
     bool   d_rls_inited = false;
     // Last-known-good snapshot: saved when taps look healthy (low energy,
@@ -111,6 +146,11 @@ private:
     static constexpr int FS_ACC_LEN = gr::dtv::ATSC_DATA_SEGMENT_LENGTH + NTAPS;
     float d_fs_acc[FS_ACC_LEN];
     int   d_fs_count = 0;
+    // monotonic supervised-trainings-THIS-SESSION counter (never reset):
+    // the DD warm-up hold keys on this, not d_lkg_valid, because the tap
+    // cache pre-sets lkg_valid at load — before the AGC has settled or a
+    // single live field sync has been seen (2026-07-10 explosion lesson)
+    uint32_t d_fs_trained = 0;
 
 public:
     atsc_equalizer_long_impl();
@@ -120,6 +160,10 @@ public:
 
     std::vector<float> taps() const override;
     std::vector<float> data() const override;
+
+    // Persist the warm-start cache on a clean shutdown too, not only on the
+    // periodic tick — a short scan visit can end before the first tick.
+    bool stop() override;
 
     int general_work(int noutput_items,
                      gr_vector_int& ninput_items,

@@ -1,0 +1,30 @@
+id: atscplus_atsc_fs_checker_inst
+label: ATSC+ FS Checker (flywheel)
+category: '[ATSC+]'
+flags: [ python ]
+
+documentation: |-
+    Field-sync checker with the sync flywheel: coasts synthetic field
+    syncs through short PN511 misses once warmed up (ATSCPLUS_FS_COAST,
+    warmup gate). PN correlation thresholds via ATSCPLUS_PN511_LIMIT /
+    ATSCPLUS_PN63_LIMIT environment variables.
+
+inputs:
+-   domain: stream
+    dtype: float
+    vlen: 832
+
+outputs:
+-   domain: stream
+    dtype: float
+    vlen: 832
+-   domain: stream
+    label: plinfo
+    dtype: short
+    vlen: 2
+
+templates:
+    imports: from gnuradio import atscplus
+    make: atscplus.atsc_fs_checker_inst()
+
+file_format: 1

@@ -1,0 +1,58 @@
+[
+  {
+    "cap": "rf34_ctrl",
+    "desc": "strong control",
+    "rc": 0,
+    "long": 403,
+    "wl": 403,
+    "long_p50": 19.969,
+    "wl_p50": 22.501,
+    "conj_fr": 0.106,
+    "imag_ben": 0.932,
+    "d_fr": 0,
+    "pred": "tie expected (strong: no room)",
+    "outcome": "tie"
+  },
+  {
+    "cap": "rf35_marg",
+    "desc": "real marginal UHF",
+    "rc": 0,
+    "long": 396,
+    "wl": 396,
+    "long_p50": 20.038,
+    "wl_p50": 21.208,
+    "conj_fr": 0.062,
+    "imag_ben": 0.902,
+    "d_fr": 0,
+    "pred": "tie expected (strong: no room)",
+    "outcome": "tie"
+  },
+  {
+    "cap": "rf7_marg",
+    "desc": "real marginal VHF-lo",
+    "rc": 0,
+    "long": 251,
+    "wl": 256,
+    "long_p50": 16.3,
+    "wl_p50": 15.959,
+    "conj_fr": 0.067,
+    "imag_ben": 0.589,
+    "d_fr": 5,
+    "pred": "WL should WIN",
+    "outcome": "tie"
+  },
+  {
+    "cap": "rf9_marg",
+    "desc": "real marginal VHF-lo",
+    "rc": 0,
+    "long": 113,
+    "wl": 349,
+    "long_p50": 17.095,
+    "wl_p50": 17.003,
+    "conj_fr": 0.096,
+    "imag_ben": 0.634,
+    "d_fr": 236,
+    "pred": "WL should WIN",
+    "outcome": "WL WON"
+  }
+]

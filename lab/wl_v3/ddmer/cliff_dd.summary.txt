@@ -1,0 +1,16 @@
+
+=== tv_dual A/B  [cliff_dd] — sample-aligned, one input stream ===
+leg      frames     TS MB   MER p5     p10     p50
+long        132      36.3   14.481   14.65  15.053
+wl          228      36.3   14.136   14.32  14.885
+  slicer (decision-directed) MER — identical definition both legs:
+    long  n=193267  p5  16.955 p10  17.062 p50  17.413 p90  17.734
+    wl    n=193274  p5   16.84 p10   16.95 p50  17.314 p90  17.644
+WL frame advantage: 72.73%
+paired fields n=620  WL MER advantage -0.197 dB  (WL better 166 / long better 397 / tie 57)
+conj_frac     mean 0.057  p10 0.043  p90 0.067
+imag_frac     mean 0.12  p10 0.09  p90 0.143
+imag_benefit  mean 0.597  p10 0.452  p90 0.704
+imag_benefit_insample mean 0.692  p10 0.568  p90 0.776
+kappa         mean 0.0  p10 0.0  p90 0.0
+
