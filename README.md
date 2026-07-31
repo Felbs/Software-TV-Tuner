@@ -7,8 +7,34 @@ module (`gr-atscplus`) decodes 8-VSB into a live MPEG-TS; a CLI
 tunes, plays, records to MP4, re-streams to RTMP, and overlays closed
 captions.
 
+📺 **Watch the full Windows install, from clone to live TV, in one take:**
+https://youtu.be/jhsTTnoqGTs
+
+📐 **[System architecture](ARCHITECTURE.md)** — the full signal chain from RF to MPEG-TS, rendered as a diagram.
+
+## Quickstart (Windows, ~10 min)
+
+```powershell
+git clone https://github.com/Felbs/Software-TV-Tuner.git
+cd Software-TV-Tuner
+powershell -ExecutionPolicy Bypass -File bootstrap.ps1 -AutoInstall
+python tools\doctor.py        # prints "ALL CHECKS PASS" when you're ready
+python tools\tv_tuner.py      # scans, builds a guide, plays live TV
+```
+
+Linux, WSL, and Raspberry Pi run the same tuner — see the [install guides](#install)
+for the one-time setup. **Stuck at any step? `python tools/doctor.py` checks every
+dependency and prints the exact fix.** That's the whole recovery path: install →
+doctor → watch.
+
 New in this release: **`adaptive-tv/` — a universal tuning layer that
-calibrates itself to any antenna.** It measures the live MER
+calibrates itself to whatever antenna you plug in.** It will *try*
+any antenna — our lab rig has pulled watchable TV from a discone
+scanner antenna, $10 rabbit ears, and (yes, really) an **AM loop
+antenna** — but **dedicated TV antennas work best**: broadcast TV is horizontally polarized, and TV antennas
+are built to match (a vertical whip gives away real dB to
+cross-polarization before the software ever gets a vote). Whatever
+you have, the tuner measures it honestly. It measures the live MER
 (Modulation Error Ratio) straight out of the decoder's own equalizer,
 grid-searches the gain settings, surveys channels, A/Bs the recovery
 options, and tells you honestly — in dB — whether an antenna can
@@ -75,89 +101,36 @@ hardware after every decoder improvement — the cliff moves.**
 
 ---
 
-## Install — Windows (~10 minutes)
+## Install
 
-**You need:**
+Pick your platform — each guide is a short, copy-paste walkthrough:
 
-1. **GNU Radio 3.10+** — easiest via
-   [`radioconda`](https://github.com/ryanvolz/radioconda) (free).
-2. **A SoapySDR-supported SDR** — reference setup is an SDRplay RSPdx
-   (install the SDRplay API v3 driver from sdrplay.com). RTL-SDR,
-   HackRF, Airspy, BladeRF also work (see table below).
-3. **ffmpeg** — [full build](https://www.gyan.dev/ffmpeg/builds/)
-   extracted to `C:\ffmpeg\`.
-4. **Any antenna.** Amplified/directional TV antennas work best, but
-   the software adapts to whatever you have — that's the point.
+| Platform | Guide |
+|---|---|
+| 🪟 **Windows** | [docs/install/windows.md](docs/install/windows.md) |
+| 🐧 **Linux** | [docs/install/linux.md](docs/install/linux.md) |
+| 🪟🐧 **WSL** | [docs/install/wsl.md](docs/install/wsl.md) |
+| 🍓 **Raspberry Pi** | [docs/install/raspberry-pi.md](docs/install/raspberry-pi.md) |
 
-**Steps:**
+All three run the same tuner — the only difference is how you install the
+dependencies and build the decoder module.
 
-```powershell
-# 1. Clone
-git clone https://github.com/Felbs/Software-TV-Tuner.git
-cd Software-TV-Tuner
-
-# 2. Build the C++ decoder module (VS 2022 BuildTools + NMake)
-gr-atscplus\_build.bat
-
-# 3. Verify the blocks load
-python -c "from gnuradio import atscplus; print(dir(atscplus))"
-
-# 4. Player runtime deps
-python -m pip install opencv-python sounddevice
-
-# 5. Run
-python tools\tv_tuner.py
-```
-
-> Building after editing `gr-atscplus` C++? `_rebuild.bat` compiles but
-> does **not** install — follow it with `cmake --install` or Python
-> imports the stale module.
-
-## Install — Linux (~5 minutes)
-
-Tested on Ubuntu 22.04/24.04 bare metal. `bootstrap.sh` does the whole
-setup: apt-installs GNU Radio + ffmpeg + SoapySDR, builds and installs
-gr-atscplus, pip-installs player extras.
-
-```bash
-git clone https://github.com/Felbs/Software-TV-Tuner.git
-cd Software-TV-Tuner
-chmod +x bootstrap.sh && ./bootstrap.sh
-python3 tools/tv_tuner.py
-```
-
-**SDRplay on Linux** needs the vendor API + SoapySDRPlay3 built from
-source:
-
-```bash
-wget https://www.sdrplay.com/software/SDRplay_RSP_API-Linux-3.15.2.run
-chmod +x SDRplay_RSP_API-Linux-3.15.2.run && sudo ./SDRplay_RSP_API-Linux-3.15.2.run
-sudo systemctl enable --now sdrplay
-sudo apt-get install -y libsoapysdr-dev
-git clone https://github.com/pothosware/SoapySDRPlay3.git
-cd SoapySDRPlay3 && mkdir build && cd build
-cmake .. && make -j"$(nproc)" && sudo make install && sudo ldconfig
-SoapySDRUtil --probe   # should list your RSP device
-```
-
-**WSL2 is build-only**: the chain builds and locks, but WSL2's USB/NAT
-passthrough loses ~1.8% of samples, which Reed-Solomon can't survive.
-Run natively.
 
 ## Run
 
-```powershell
+```sh
+# Linux / Mint / Pi shown; on Windows use:  python tools\tv_tuner.py
 # Interactive: guide, channel picker, live channel-changer
-python tools\tv_tuner.py
+python3 tools/tv_tuner.py
 
 # Direct tune + play
-python tools\tv_tuner.py --rf 36
+python3 tools/tv_tuner.py --rf 36
 
 # Subchannel select / record / stream / captions
-python tools\tv_tuner.py --rf 34 --program 1
-python tools\tv_tuner.py --rf 36 --no-play --record news.mp4
-python tools\tv_tuner.py --rf 36 --stream twitch
-python tools\tv_tuner.py --rf 36 --cc
+python3 tools/tv_tuner.py --rf 34 --program 1
+python3 tools/tv_tuner.py --rf 36 --no-play --record news.mp4
+python3 tools/tv_tuner.py --rf 36 --stream twitch
+python3 tools/tv_tuner.py --rf 36 --cc
 ```
 
 At the interactive prompt: row number or `5.1` tunes, `g` refreshes
@@ -169,8 +142,8 @@ the guide, `i 7` inspects a row, `c` cycles captions
 Prefer clicking to typing? There's a browser dashboard that wraps the
 whole tuner. Start it and open the page:
 
-```powershell
-python adaptive-tv\tv_tuna_panel.py
+```sh
+python3 adaptive-tv/tv_tuna_panel.py     # Windows: python adaptive-tv\tv_tuna_panel.py
 # then open http://localhost:8642 in any browser
 ```
 
@@ -226,6 +199,22 @@ Everything the panel reports is measured on *your* signal, at *your*
 location — nothing is hardcoded to a market.
 
 ## Tune ANY antenna — the universal layer (`adaptive-tv/`)
+
+> **Field-tested absurdity (2026-07-30):** we watched a VHF ATSC station —
+> RF 9, 189 MHz — for an evening on a **K-180WLA amplified AM loop**, an
+> antenna designed for 0.5–1.7 MHz medium-wave. That is more than **100×
+> its design frequency**. Measured MER off the decoder's own equalizer:
+> **~16.7 dB, sitting right on the ~16 dB watchability cliff** — a stable
+> picture with occasional glitches, exactly what that number predicts.
+> Funnier still: on that channel the loop out-performed our actual TV
+> yagi, which is UHF-only and deaf at VHF. This is not a recommendation —
+> a real TV antenna is better on every channel it can hear (horizontal
+> polarization matters, gain matters). It is a *demonstration*: strong
+> local broadcast has enormous link margin, any conductor is an antenna
+> at some SNR, and the equalizer + per-antenna calibration eat the
+> mismatch and tell you honestly what you're getting. If the software
+> can make watchable TV out of an AM loop, it will make the most of
+> whatever is in your attic.
 
 The core problem with SDR TV is that every antenna + amp + cable
 combination needs different settings, and the difference between
@@ -398,10 +387,38 @@ adaptive-tv/            universal antenna calibration + diagnostics
                         shootout, quality_judge, auto_tv, ...) plus
                         tv_tuna_panel.py (web UI) and time_knob.py
                         (learned per-channel hour curves)
-docs/                   science explainer + capture recipe
+docs/                   install guides, science explainer, capture recipe
 bootstrap.sh            Linux one-shot setup
 ```
 
+## Development history
+
+This decoder was built through months of live-antenna campaigns. The
+experiment scripts, campaign logs, and engineering notes are kept in the
+project's private archives so this tree stays simple — curious how a
+particular piece was built? Open an issue and ask.
+
+## Lineage & credits
+
+The `gr-atscplus` decoder module stands on **GNU Radio's `gr-dtv`**
+ATSC implementation. Its core receive blocks — the deinterleaver,
+Viterbi trellis decoder, RS decoder, FPLL, field-sync checker, and the
+segment/`plinfo` conventions everything else is built around — began as
+`gr-dtv` code (© Free Software Foundation, Inc.), and those files retain
+their original FSF copyright and GPL headers. gr-atscplus adds new blocks
+on top (the adaptive equalizers, soft/erasure decoders, sync variants,
+noise blanker, and the universal-tuning layer) and rewires the chain, but
+none of it would exist without the GNU Radio project's work. Thank you to
+the GNU Radio and gr-dtv authors.
+
+This is not a fork of the GNU Radio repository (gr-dtv lives inside that
+large monorepo; an out-of-tree module is the right shape for this), so
+the lineage is carried the correct way for an OOT module: preserved
+per-file copyright headers, this credit, and the shared GPL license below.
+
 ## License
 
-GPL-3.0-or-later (inherited from gr-dtv).
+**GPL-3.0-or-later**, inherited from gr-dtv — full text in
+[LICENSE](LICENSE). Files derived from gr-dtv keep their
+`© Free Software Foundation` headers; original gr-atscplus files carry
+`SPDX-License-Identifier: GPL-3.0-or-later`.

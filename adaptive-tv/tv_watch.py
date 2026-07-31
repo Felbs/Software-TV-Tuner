@@ -20,15 +20,20 @@ from pathlib import Path
 IS_WIN = sys.platform == "win32"
 HERE = Path(__file__).resolve().parent
 if IS_WIN:
-    MPV = r"C:\Program Files\MPV Player\mpv.exe"
-    FFMPEG = r"C:\ffmpeg\bin\ffmpeg.exe"
-    _LIVE_DIR = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live")
+    MPV = (os.environ.get("MPV_EXE") or shutil.which("mpv")
+           or r"C:\Program Files\MPV Player\mpv.exe")
+    FFMPEG = (os.environ.get("FFMPEG_EXE") or shutil.which("ffmpeg")
+              or r"C:\ffmpeg\bin\ffmpeg.exe")
     IPC = r"\\.\pipe\mpv-tvtuna-super"
-else:   # platform layer: PATH binaries, in-repo live dir, unix IPC socket
+else:   # platform layer: PATH binaries, unix IPC socket
     MPV = shutil.which("mpv") or "mpv"
     FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
-    _LIVE_DIR = HERE.parent / "tools" / "data" / "tv_live"
     IPC = "/tmp/mpv-tvtuna-super"
+# live dir: the repo's own tools/data/tv_live (chain and watcher in the
+# same tree). Split deployments (chain in one tree, watcher in another)
+# point STVT_LIVE_DIR at the chain's output dir.
+_LIVE_DIR = Path(os.environ.get("STVT_LIVE_DIR")
+                 or (HERE.parent / "tools" / "data" / "tv_live"))
 LIVE = _LIVE_DIR / "live.ts"
 SOLO = _LIVE_DIR / "live_solo.ts"
 MUXBPS = 19_392_658 / 8
@@ -163,6 +168,33 @@ def drop_ghost_streams(vids, others, label):
         log(f"{label}: dropping ghost stream PIDs {ghosts} "
             "(declared in PMT, zero packets on air)")
     return kept
+
+
+def first_av_program(exclude=None):
+    """Lowest program_id in live.ts carrying BOTH video and audio — the
+    graceful single-program target when the REQUESTED program is absent
+    or data-only. ATSC program numbers are rarely 1..N (a blind or
+    guessed number lands on no PMT), and dumping the whole multi-program
+    mux at the player gives every program's audio + one CC track each:
+    the 'wall of audio tracks / scrambled captions' glitch. Extracting
+    one real program instead keeps the player clean."""
+    try:
+        pr = subprocess.run(
+            ["ffprobe", "-v", "error", "-print_format", "json",
+             "-probesize", "20000000", "-analyzeduration", "10000000",
+             "-show_programs", str(LIVE)],
+            capture_output=True, text=True, timeout=30)
+        cands = []
+        for p in json.loads(pr.stdout or "{}").get("programs", []):
+            pidn = p.get("program_id")
+            if pidn is None or pidn == exclude:
+                continue
+            types = {s.get("codec_type") for s in p.get("streams", [])}
+            if "video" in types and "audio" in types:
+                cands.append(pidn)
+        return min(cands) if cands else None
+    except Exception:
+        return None
 
 
 class Extractor:
@@ -386,12 +418,22 @@ def main():
                     time.sleep(2)
             ex = Extractor(prog, mode=mode,
                            pids=cached_pids if mode == "cached" else None)
+            # Proof must measure GROWTH, not absolute size. Found in real use
+            # 2026-07-30: a 59.6 MB live_solo.ts left over from an earlier
+            # session passed `size > need` instantly, so a cached-PID
+            # extractor that wrote NOTHING was declared proven, mpv was pointed
+            # at a file whose tail never advanced, and the watch loop resynced
+            # every 10 s forever — a frozen picture with glitchy captions.
+            # Baseline AFTER start(): start() unlinks/recreates SOLO, so a
+            # pre-start baseline still counts the stale file and dooms the
+            # rung (needs base+need from a file that restarts at 0 bytes).
             ex.start()
+            base = SOLO.stat().st_size if SOLO.exists() else 0
             t0 = time.time()
             ok = False
             while time.time() - t0 < patience:
                 time.sleep(0.5)
-                if SOLO.exists() and SOLO.stat().st_size > need:
+                if SOLO.exists() and SOLO.stat().st_size > base + need:
                     ok = True
                     break
                 if not ex.alive() and time.time() - t0 > 2:
@@ -421,6 +463,31 @@ def main():
                 cache.pop(key, None)
                 save_pid_cache(cache)
             ex.kill(); ex = None
+        if ex is None:
+            # The requested program yielded nothing — most often it does
+            # not exist in this mux (a blind/guessed number lands on no
+            # PMT). Before dumping the ENTIRE multi-program mux at the
+            # player (every program's audio + a CC track each = the "9
+            # audios / scrambled captions" glitch), extract the first
+            # REAL video+audio program instead.
+            alt = first_av_program(exclude=prog)
+            if alt is not None:
+                log(f"program {prog} has no extractable A/V — extracting "
+                    f"the first real program {alt} instead of the whole mux")
+                for mode in ("full", "video"):
+                    cand = Extractor(alt, mode=mode)
+                    cand.start()
+                    t0 = time.time()
+                    while time.time() - t0 < 45:
+                        time.sleep(0.5)
+                        if SOLO.exists() and SOLO.stat().st_size > 3_000_000:
+                            ex, prog, video_only = cand, alt, (mode == "video")
+                            break
+                        if not cand.alive() and time.time() - t0 > 2:
+                            break
+                    if ex is not None:
+                        break
+                    cand.kill()
         if ex is None:
             log("all extraction modes failed — falling back to mux mode")
             muxmode = True
@@ -655,17 +722,86 @@ def main():
     seek_live_solo()
 
     last_pos, stall = None, 0
+    ex_deaths, resyncs = 0, 0
+
+    def rebuild_extractor(reason):
+        """Tear the extractor down and re-run FULL discovery, then reload mpv.
+
+        The in-loop respawn used to restart the extractor in the SAME mode with
+        the SAME pids, forever. With a stale PID cache that is an unbounded
+        respawn loop with no success condition (the exact shape the mpv-loop
+        law forbids): cached-mode ffmpeg extracts PIDs the mux no longer
+        carries, writes nothing, dies, respawns identically. Seen live
+        2026-07-30 on RF36 — 'extractor died (mode=cached)' every ~63 s while
+        the picture sat frozen. De-escalate instead: invalidate the cached
+        layout, pay the full-discovery cost once, and reload the player the
+        same way the hourly solo-rotation does.
+        """
+        nonlocal ex, last_pos, ex_deaths, resyncs, last_cc
+        log(f"REBUILD extractor via full discovery ({reason})")
+        try:
+            cache.pop(key, None)
+            save_pid_cache(cache)
+        except Exception:
+            pass
+        if ex is not None:
+            ex.kill()
+        ex = Extractor(prog, mode="full", pids=None)
+        ex.start()
+        base = SOLO.stat().st_size if SOLO.exists() else 0
+        grew = False
+        for _ in range(90):                  # up to 45 s for real discovery
+            time.sleep(0.5)
+            if SOLO.exists() and SOLO.stat().st_size > base + 3_000_000:
+                grew = True
+                break
+        if grew and ex.pids and RF != "?":
+            # proven re-discovery -> remember the fresh layout, same as the
+            # ladder's full-mode success (otherwise the next tune goes cold)
+            ns = getattr(ex, "n_subs", 0)
+            cut = len(ex.pids) - ns
+            cache[key] = {"vpid": ex.pids[0],
+                          "apids": ex.pids[1:cut],
+                          "spids": ex.pids[cut:],
+                          "ts": time.strftime("%Y-%m-%dT%H:%M:%S")}
+            save_pid_cache(cache)
+        ipc(["loadfile", str(SOLO), "replace"])
+        time.sleep(2)
+        seek_live_solo()
+        last_pos = None
+        # EIA-608 captions carry no keyframe state: any seek/reload can garble
+        # the caption decoder, and the periodic flush is 8 MINUTES away. Seen
+        # live 2026-07-30 ("CC was fine, then glitched after flipping around").
+        # Pull the next flush to ~6 s from now instead of waiting out the timer.
+        last_cc = time.time() - 474
+        ex_deaths = resyncs = 0
+    # CAPTION KEEPER (2026-07-21): captions ON by default now; keep the
+    # eia_608 CC track selected + visible once the stream settles. The old
+    # one-shot sid=1 broke whenever the CC track appeared late, sat at an id
+    # other than 1, or got deselected on a channel change — so re-assert BY
+    # CODEC every pass (idempotent). STVT_CC=off opts out; STVT_CC_DELAY sets
+    # the settle wait that avoids mpv's brief startup-caption glitch.
+    _cc_want = os.environ.get("STVT_CC", "on").lower() not in (
+        "off", "0", "no", "false")
+    _cc_delay = float(os.environ.get("STVT_CC_DELAY", "8"))
+    t_start = time.time()
     # first CC cycle ~20 s in (flushes any startup caption garbage that
     # slipped through), then every 8 min as before
     last_cc = time.time() - 460
     while mpv_h["p"].poll() is None:
         time.sleep(5)
         if ex is not None and not ex.alive():
-            log(f"extractor died — restarting it (mode={ex.mode})")
-            mode, pids = ex.mode, ex.pids
-            ex.kill()
-            ex = Extractor(prog, mode=mode, pids=pids); ex.start()
-            time.sleep(3)
+            ex_deaths += 1
+            if ex_deaths >= 2:
+                # twice in a row = this mode/layout is wrong, stop repeating it
+                rebuild_extractor(f"{ex_deaths} consecutive deaths in "
+                                  f"mode={ex.mode}")
+            else:
+                log(f"extractor died — restarting it (mode={ex.mode})")
+                mode, pids = ex.mode, ex.pids
+                ex.kill()
+                ex = Extractor(prog, mode=mode, pids=pids); ex.start()
+                time.sleep(3)
         # SOLO ROTATION (2026-07-13): live_solo.ts grows ~0.6 MB/s and never
         # truncated — 3.5 GB after 6 h uptime, which would eventually fill
         # the disk. Recycle it past a cap. The seek-live-edge fix means
@@ -687,6 +823,7 @@ def main():
                 time.sleep(2)
                 seek_live_solo()
                 last_pos = None
+                last_cc = time.time() - 474   # reload garbles 608 — flush soon
                 continue
         except OSError:
             pass
@@ -698,10 +835,37 @@ def main():
         stalled = last_pos is not None and pos <= last_pos + 0.5
         last_pos = pos
         stall = stall + 1 if (eof or paused or stalled) else 0
+        if stall == 0:
+            ex_deaths = resyncs = 0          # playback advancing = healthy
         if stall >= 2:
-            log(f"RESYNC (stall={stall} eof={eof})")
-            seek_live_solo()
-            stall = 0
+            resyncs += 1
+            # A resync is a nudge for a hiccup. Four in a row is not a hiccup:
+            # the feed itself is dead (2026-07-30: an extractor writing nothing
+            # kept mpv pinned at the same position through 17 straight resyncs
+            # while the log said everything was being handled). Escalate — but
+            # ONLY when an extractor exists. In mux fallback ex is None and mpv
+            # is playing live.ts directly; firing the breaker there (seen live
+            # 19:16:42 same night) spawns an extractor nobody asked for and
+            # loadfile-yanks mpv off the mux onto a possibly-empty SOLO. A
+            # dead mux feed has no player-side rebuild — keep nudging.
+            if resyncs >= 4 and ex is not None:
+                rebuild_extractor(f"{resyncs} consecutive resyncs — feed dead")
+            else:
+                log(f"RESYNC (stall={stall} eof={eof})")
+                seek_live_solo()
+                stall = 0
+                last_cc = time.time() - 474   # seek garbles 608 — flush soon
+        if _cc_want and time.time() - t_start > _cc_delay:
+            tl = ipc(["get_property", "track-list"], req=6) or []
+            cc = next((t for t in tl if t.get("type") == "sub"
+                       and str(t.get("codec", "")).startswith("eia_608")),
+                      None)
+            if cc is not None:                    # broadcaster IS captioning
+                if not cc.get("selected"):
+                    ipc(["set_property", "sid", cc["id"]])
+                if ipc(["get_property", "sub-visibility"],
+                       req=6) not in (True, "yes"):
+                    ipc(["set_property", "sub-visibility", "yes"])
         if time.time() - last_cc > 480:
             cur = ipc(["get_property", "sid"], req=5)
             vis = ipc(["get_property", "sub-visibility"], req=5)

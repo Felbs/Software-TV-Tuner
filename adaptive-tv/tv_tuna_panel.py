@@ -338,7 +338,12 @@ def run_scan():
                     id_note = " · 🪪 antenna %s" % v.lower()
             except Exception:
                 pass
-            stash_scan(id_name)
+            # The user's explicit antenna pick wins over the fingerprint's guess
+            # for WHICH grid this scan fills (2026-07-25 bugfix): a pinned
+            # "Antenna B" scan belongs in Antenna B's grid, not the enrolled name
+            # the auto-ID recognized ("Old fateful") — filing by fingerprint left
+            # the selected port's grid empty. Auto mode still uses the fp name.
+            stash_scan(STATE.get("ant_override") or id_name)
             SCAN.update({"pct": 100, "t0": None,
                          "line": f"scan complete in {dur}s — guide "
                                  f"refreshed{id_note}"})
@@ -959,6 +964,21 @@ def base_env(rf):
                                                             env["STVT_EQ"]))
         except (OSError, ValueError):
             pass
+    # WIDELY-LINEAR opt-in (STVT 2.0): STVT_PANEL_EQ=wl -> widely-linear
+    # equalizer on every tune (needs fold mode). Default keeps v1 long.
+    if os.environ.get("STVT_PANEL_EQ") == "wl":
+        env["STVT_EQ"] = "wl"
+        env["STVT_FPLL_FOLD"] = "1"
+    # SPLIT-BRAIN GUARD (2026-07-30): the chain this panel spawns ALWAYS
+    # writes TOOLS/data/tv_live (tv_live.py --out default, repo-relative) —
+    # but tv_watch honors a global STVT_LIVE_DIR when one is set. A stale
+    # user-level var from the old split deployment pointed the watcher at
+    # ANOTHER clone's dead live.ts: chain healthy + growing here, player
+    # extracting nothing from last night's file there ("frozen picture,
+    # every discovery mode produced nothing"). The panel knows exactly
+    # where its own chain writes, so pin the watcher to the same dir —
+    # inherited overrides must never split the pair.
+    env["STVT_LIVE_DIR"] = str(TOOLS / "data" / "tv_live")
     return env
 
 def kill_watch():
@@ -1295,8 +1315,19 @@ def tune(rf, prog, virtual, name, force_respawn=False):
         chain_fresh = (time.time() - CHAIN_LOG.stat().st_mtime) < 6
     except OSError:
         chain_fresh = False
+    # DELIVERY GATE (2026-07-30): a fresh chain LOG is not a working chain.
+    # A chain that opened the radio on the wrong antenna spams fpll telemetry
+    # forever (log mtime always fresh) while never reaching field sync —
+    # live.ts sits at 0 bytes. The hop guard trusted the log alone and hopped
+    # onto that dead chain (seen live 19:37: "same-tower hop" onto a 0-byte
+    # mux, player never appeared). Hop only when the mux file is being FED.
+    try:
+        chain_delivering = (chain_fresh
+                            and (time.time() - LIVE.stat().st_mtime) < 6)
+    except OSError:
+        chain_delivering = False
     if (not force_respawn and rf == STATE["rf"] and not STATE["tuning"]
-            and STATE["rf"] is not None and chain_fresh):
+            and STATE["rf"] is not None and chain_delivering):
         with LOCK:
             GEN[0] += 1
             my_gen = GEN[0]
@@ -1325,13 +1356,23 @@ def tune(rf, prog, virtual, name, force_respawn=False):
             subprocess.Popen(watch_args, env=env,
                              stdout=watch_log, stderr=subprocess.STDOUT)
             t0 = time.time()
+            hop_up = False
             while time.time() - t0 < 120:
                 if GEN[0] != my_gen:
                     return
                 if mpv_up():
+                    hop_up = True
                     break
                 time.sleep(1)
-            set_stage(100, "")
+            # HONESTY (2026-07-30): this used to declare stage 100 even when
+            # the 120 s wait TIMED OUT — the panel said "playing" with no
+            # player on screen. Same rule as the classic path: only a live
+            # mpv earns the green bar.
+            if hop_up:
+                set_stage(100, "")
+            else:
+                set_stage(0, "PLAYER never appeared on the program hop — "
+                             "click the station again for a full re-tune")
             STATE.update({"tuning": False})
         threading.Thread(target=hop, daemon=True).start()
         return
@@ -1683,8 +1724,10 @@ def tune(rf, prog, virtual, name, force_respawn=False):
             # only) is bench-proven on FINISHED files but its LIVE splice stream
             # confuses mpv's prober AND harvest_player hardcodes a wrong MPV path
             # -> it fails to start video on exactly the marginal channels it
-            # targets. FORCE the glitchy stream to PLAY (ugly motion beats a
-            # dead black screen); harvest stays opt-in via STVT_HARVEST=1.
+            # targets. User's ask: FORCE the glitchy stream to PLAY (the old
+            # behavior — ugly motion beats a dead black screen) instead of
+            # refusing. So marginal -> tv_watch forced-video by default; harvest
+            # stays opt-in for when its live demuxer is finished (STVT_HARVEST=1).
             if mers and mer_now < 15.0 and os.environ.get("STVT_HARVEST") == "1":
                 watch_args = [PY, "-u", str(HERE / "harvest_player.py"),
                               str(TOOLS / "data" / "tv_live" / "live.ts"),
@@ -2292,8 +2335,22 @@ let h='<table><tr><th>station</th>';g.slots.forEach(s=>h+='<th>'+s+'</th>');h+='
 let lastRf=null;
 g.rows.forEach(r=>{
 if(r.rf!==lastRf){lastRf=r.rf;
-const s=r.snr||0,pct=Math.max(0,Math.min(100,Math.round((s-20)/35*100)));
-const col=pct>=70?'#67d18a':(pct>=45?'#e7c96a':'#e77');
+const s=r.snr||0,spct=Math.max(0,Math.min(100,Math.round((s-20)/35*100)));
+// the BAR is WATCHABILITY when the scan measured MER (survival logistic vs the
+// ~16 dB cliff) — the strength-only bar read a middling % on flawless channels
+// (RF35 "amazing"@80%, RF21 "great"@74%). Loss/burstiness demote it (RF9/RF31
+// laws: fast faders read flawless while packets die). No MER yet -> strength.
+const hasMer=(r.mer!=null);
+// LOSS CALIBRATION (2026-07-26): a FLAWLESS live channel still measures ~1-1.4%
+// loss in the brief scan window (Fox 1.35%/NBC 1.14% both play perfectly at 19 dB).
+// The old 0.3% demote trigger made GREEN unreachable — every real channel read
+// yellow. Trigger demotion only above 2%; red above 8% (RF7/RF9 VHF = 16-21%).
+const lossyB=hasMer&&(r.loss!=null&&r.loss>=2.0);
+const burstyB=hasMer&&(r.mer_p10!=null&&r.mer>=16&&(r.mer-r.mer_p10)>=1.2&&r.mer_p10<16.2);
+const wpct=hasMer?Math.round(100/(1+Math.exp(-(r.mer-15.25)/0.55))):0;
+const pct=hasMer?(lossyB?Math.min(wpct,r.loss>=8?35:70):(burstyB?Math.min(wpct,70):wpct)):spct;
+const col=hasMer?(pct>=80?'#67d18a':(pct>=45?'#e7c96a':'#e77'))
+                :(spct>=70?'#67d18a':(spct>=45?'#e7c96a':'#e77'));
 const blocks='█'.repeat(Math.round(pct/10))+'░'.repeat(10-Math.round(pct/10));
 // decode QUALITY from measured MER — the honest "will it look good?",
 // separate from raw signal strength (the % bar). Only shown when the
@@ -2305,8 +2362,6 @@ if(r.mer!=null){const m=r.mer,p10=r.mer_p10;
 const bursty=(p10!=null&&m>=16&&(m-p10)>=1.2&&p10<16.2);
 // measured loss at scan time outranks any MER label: fast faders (RF9)
 // alias the MER sampling and read "flawless" while packets die (7/10)
-// LOSS CALIBRATION (2026-07-26): a FLAWLESS channel still measures ~1-1.4%
-// scan-window loss — the 0.3% trigger made green unreachable. Demote >=2%, red >=8%.
 const lossy=(r.loss!=null&&r.loss>=2.0);
 const mc=lossy?(r.loss>=8?'#e77':'#e7c96a'):bursty?'#e7c96a':(m>=16.5?'#67d18a':(m>=15.2?'#e7c96a':'#e77'));
 const mw=lossy?(r.loss>=8?'📉 glitchy — '+r.loss+'% packets lost at scan':'⚡ some glitches — '+r.loss+'% lost at scan')
@@ -2315,7 +2370,7 @@ mtag=`&nbsp;<span style="color:${mc};font-weight:700">◉ ${mw}</span>`+
 `<span style="color:#5f7591;font-size:11px"> (MER ${m.toFixed(1)}${p10!=null?' / dips '+p10.toFixed(1):''} dB)</span>`;}
 h+=`<tr><td colspan="${g.slots.length+2}" style="background:#0d1626;border-top:2px solid #26436b;padding:7px 6px">`+
 `📡 <b>tower RF${r.rf}</b> &nbsp;<span style="color:${col};font-family:monospace">${blocks}</span> `+
-`<span style="color:${col};font-weight:700">${pct}%</span>`+mtag+
+`<span style="color:${col};font-weight:700">${pct}%&nbsp;${hasMer?'watchable':'signal'}</span>`+mtag+
 `<span style="color:#5f7591;font-size:11px"> · pilot ${s?s.toFixed(0):'—'} dB over the noise floor`+
 (s?` = <b>${Math.round(Math.pow(10,s/10)).toLocaleString()}×</b> the static`:'')+
 (r.rms!=null&&g.floor!=null?` · level ${r.rms.toFixed(1)} dBFS / floor ${g.floor.toFixed(1)} dBFS`:'')+

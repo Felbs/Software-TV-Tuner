@@ -110,6 +110,24 @@ private:
                     float* output_samples,
                     int nsamples);
 
+    // ── warm-start tap cache, runtime-rebindable (2026-07-29, speed-1) ──
+    // The cache is PER-INSTALL LEARNED DATA — it is a fingerprint of this
+    // user's own multipath on this channel with this antenna, is never
+    // shipped, and is never assumed to exist. With no cache file these two
+    // helpers do nothing at all and the equalizer cold-starts from the
+    // delta exactly as it always has.
+    //
+    // cache_load()  applies the constructor's exact vetted load (finite +
+    //               0.01 < sum(t^2) < 2500) and seeds d_taps AND the LKG
+    //               snapshot. Returns true if taps were adopted.
+    // cache_save()  writes d_taps_lkg atomically (tmp + rename).
+    // Both read the path from getenv() at CALL time, never latching it, so
+    // a persistent chain that retunes can rebind to the new channel's file
+    // (tv_live.py TVLive.retune()).
+    bool cache_load(const char* path);
+    bool cache_save(const char* path);
+    void reset_to_delta();
+
     std::vector<float> d_taps;
     std::vector<double> d_rls_P;   // NTAPS*NTAPS inverse-correlation matrix (RLS)
     bool   d_rls_inited = false;
@@ -158,6 +176,10 @@ public:
 
     std::vector<float> taps() const override;
     std::vector<float> data() const override;
+
+    // Persist the warm-start cache on a clean shutdown too, not only on the
+    // periodic tick — a short scan visit can end before the first tick.
+    bool stop() override;
 
     int general_work(int noutput_items,
                      gr_vector_int& ninput_items,

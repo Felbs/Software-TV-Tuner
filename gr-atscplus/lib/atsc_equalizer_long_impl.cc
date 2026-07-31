@@ -20,7 +20,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <string>
 
 namespace gr {
 namespace atscplus {
@@ -56,6 +59,71 @@ static void init_field_sync_common(float* p, int mask)
         p[i++] = bin_map(atsc_pn63[j]);
 }
 
+// ── warm-start tap cache helpers (2026-07-29, speed-1 lever 1) ───────────
+// Factored out of the constructor so the SAME vetted load can be re-run at
+// runtime when a persistent chain retunes to another channel. Nothing here
+// runs unless the caller hands over a path, so an install with no cache
+// directory behaves exactly as it did before this existed.
+bool atsc_equalizer_long_impl::cache_load(const char* path)
+{
+    if (!path)
+        return false;
+    std::FILE* f = std::fopen(path, "rb");
+    if (!f)
+        return false;
+    bool adopted = false;
+    uint32_t magic = 0, n = 0;
+    if (std::fread(&magic, 4, 1, f) == 1 && std::fread(&n, 4, 1, f) == 1 &&
+        magic == 0x54415043u /* 'TAPC' */ && n == (uint32_t)NTAPS) {
+        std::vector<float> t(NTAPS);
+        if (std::fread(t.data(), sizeof(float), NTAPS, f) == (size_t)NTAPS) {
+            double e = 0.0;
+            bool fin = true;
+            for (int k = 0; k < NTAPS; k++) {
+                if (!std::isfinite(t[k])) { fin = false; break; }
+                e += (double)t[k] * (double)t[k];
+            }
+            if (fin && e > 0.01 && e < 50.0 * 50.0) {
+                d_taps = t;
+                d_taps_lkg = t;
+                d_lkg_valid = true;
+                d_tap_spec_valid = false;   // FFT path must re-derive
+                std::fprintf(stderr,
+                    "[eq-long] WARM START from %s (|taps|=%.3f)\n",
+                    path, std::sqrt(e));
+                adopted = true;
+            }
+        }
+    }
+    std::fclose(f);
+    return adopted;
+}
+
+bool atsc_equalizer_long_impl::cache_save(const char* path)
+{
+    if (!path || !d_lkg_valid)
+        return false;
+    std::string tmp = std::string(path) + ".tmp";
+    std::FILE* f = std::fopen(tmp.c_str(), "wb");
+    if (!f)
+        return false;
+    const uint32_t magic = 0x54415043u, n = (uint32_t)NTAPS;
+    std::fwrite(&magic, 4, 1, f);
+    std::fwrite(&n, 4, 1, f);
+    std::fwrite(d_taps_lkg.data(), sizeof(float), NTAPS, f);
+    std::fclose(f);
+    std::remove(path);
+    return std::rename(tmp.c_str(), path) == 0;
+}
+
+void atsc_equalizer_long_impl::reset_to_delta()
+{
+    std::fill(d_taps.begin(), d_taps.end(), 0.0f);
+    d_taps[NPRETAPS] = 1.0f;
+    std::fill(d_fb.begin(), d_fb.end(), 0.0f);
+    d_tap_spec_valid = false;
+}
+
 atsc_equalizer_long_impl::atsc_equalizer_long_impl()
     : gr::block("dtv_atsc_equalizer",
                 io_signature::make2(
@@ -81,41 +149,25 @@ atsc_equalizer_long_impl::atsc_equalizer_long_impl()
     // "slightly stale but sane" — LMS adapts from there far faster than
     // from a delta. STVT_EQ_TAP_CACHE_FILE is composed by tv_live.py
     // (dir + antenna + rf); absent = exactly the legacy cold start.
-    if (const char* p = std::getenv("STVT_EQ_TAP_CACHE_FILE")) {
-        std::FILE* f = std::fopen(p, "rb");
-        if (f) {
-            uint32_t magic = 0, n = 0;
-            if (std::fread(&magic, 4, 1, f) == 1 &&
-                std::fread(&n, 4, 1, f) == 1 &&
-                magic == 0x54415043u /* 'TAPC' */ && n == (uint32_t)NTAPS) {
-                std::vector<float> t(NTAPS);
-                if (std::fread(t.data(), sizeof(float), NTAPS, f)
-                        == (size_t)NTAPS) {
-                    double e = 0.0;
-                    bool fin = true;
-                    for (int k = 0; k < NTAPS; k++) {
-                        if (!std::isfinite(t[k])) { fin = false; break; }
-                        e += (double)t[k] * (double)t[k];
-                    }
-                    if (fin && e > 0.01 && e < 50.0 * 50.0) {
-                        d_taps = t;
-                        d_taps_lkg = t;
-                        d_lkg_valid = true;
-                        std::fprintf(stderr,
-                            "[eq-long] WARM START from %s (|taps|=%.3f)\n",
-                            p, std::sqrt(e));
-                    }
-                }
-            }
-            std::fclose(f);
-        }
-    }
+    cache_load(std::getenv("STVT_EQ_TAP_CACHE_FILE"));
 
     const int alignment_multiple = volk_get_alignment() / sizeof(float);
     set_alignment(std::max(1, alignment_multiple));
 }
 
 atsc_equalizer_long_impl::~atsc_equalizer_long_impl() {}
+
+// 2026-07-29 (speed-1, dossier defect D2): a scan visit can be shorter than
+// the periodic persist tick, so a clean shutdown must write too. No-op
+// without a configured cache file or a vetted LKG snapshot.
+bool atsc_equalizer_long_impl::stop()
+{
+    if (const char* p = std::getenv("STVT_EQ_TAP_CACHE_FILE")) {
+        if (cache_save(p))
+            std::fprintf(stderr, "[eq-long] cache persisted on stop: %s\n", p);
+    }
+    return true;
+}
 
 std::vector<float> atsc_equalizer_long_impl::taps() const { return d_taps; }
 
@@ -752,31 +804,104 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
     static int    gear_state = 0;   // 0=FAST, 1=SLOW
     const double effective_mu = GEAR_ENABLED ? current_mu : BETA;
 
-    for (int j = 0; j < nsamples; j++) {
-        output_samples[j] = 0;
-        // Output uses current-field input (downstream sees this field).
-        volk_32f_x2_dot_prod_32f(
-            &output_samples[j], &input_samples[j], &d_taps[0], NTAPS);
-        // LMS gradient uses lms_input (averaged when FS_AVG_DEPTH>1).
-        float y_avg = output_samples[j];
-        if (lms_input != input_samples) {
-            y_avg = 0.0f;
-            volk_32f_x2_dot_prod_32f(&y_avg, &lms_input[j], &d_taps[0], NTAPS);
+    // ── EQUALIZER DATA RECYCLING (2026-07-29, speed-1 lever 3) ──────────
+    // Oh, Han, Jeon & Rhee, "A fast converging equalizer for the ATSC DTV
+    // receiver", GLOBECOM 2003, pp. 3371-3375, DOI 10.1109/GLOCOM.2003.1258860.
+    // Their observation: the field sync arrives once per 260,416 symbols and
+    // is "not long enough to guarantee equalizer operation" — supervised
+    // training runs at a 704/260416 = 0.27 % duty cycle, which IS the cold-
+    // convergence cost. Their fix: keep the field-sync segment and run the
+    // LMS over it N times per field instead of once.
+    //
+    // Same gradient, same known symbols, same step — just applied more
+    // often, so the divergence bail below already guards the failure mode.
+    // Cost is N x 704 supervised updates per 24.2 ms field: at N=4 about
+    // 2 Mflop per field, i.e. nothing.
+    //
+    // Pass 0 is BIT-IDENTICAL to the un-recycled code (same output write,
+    // same err_sq_sum, same Huber bookkeeping), and every downstream
+    // decision — fs_err_rms telemetry, the LKG quality gate, gear shifting,
+    // the quality reset — keys on pass 0 ONLY. That is deliberate: MER is
+    // reported as 20*log10(5/fs_err_rms) with a calibrated 15.2 dB cliff, so
+    // measuring the error AFTER extra passes would silently inflate every
+    // MER number in the project. Default 1 = off = today's behaviour.
+    //
+    // ★ COLD-START WINDOW — measured, not assumed. Recycling N times is,
+    // on the training set, an N-fold larger effective step, and LMS
+    // steady-state tap misadjustment grows with the step. On the CLEAN
+    // rf34 capture x8 was pure profit (convergence 5.90 s -> 0.62 s, MER
+    // +0.29 dB, frames 403 either way) — but on the FADING rf7 marginal
+    // capture, leaving it on all run long cost 251 -> 213 video frames
+    // (-15 %) and 0.20 dB of MER. That is the same lesson
+    // mer_dial_universal_algorithm learned about the slow-adaptation
+    // family: a convergence trick is not a steady-state setting. So
+    // recycling is confined to the first STVT_EQ_RECYCLE_FIELDS field
+    // syncs (default 40 ~ 1 s, which measurement shows covers the whole
+    // transient) and steady state is left exactly as it is today.
+    // d_fs_trained is reset by the `warm` command, so a retune re-arms the
+    // window for the new channel. 0 = no window (the pure published
+    // algorithm; research only — it regresses fading channels).
+    static const int RECYCLE = []() -> int {
+        if (const char* p = std::getenv("STVT_EQ_RECYCLE")) {
+            int v = std::atoi(p);
+            if (v >= 1 && v <= 32) return v;
         }
-        float e = y_avg - training_pattern[j];
-        err_sq_sum += (double)e * (double)e;   // raw error: telemetry/quality
-        float e_adapt = e;                     // gradient error: maybe clamped
-        if (rob_active) {
-            abs_e_buf[j] = std::fabs(e);
-            if (rob_scale > 0.0) {
-                const float c = HUBER_K * (float)rob_scale;
-                if (e_adapt >  c) { e_adapt =  c; rob_clamped++; }
-                if (e_adapt < -c) { e_adapt = -c; rob_clamped++; }
+        return 1;
+    }();
+    static const int RECYCLE_FIELDS = []() -> int {
+        if (const char* p = std::getenv("STVT_EQ_RECYCLE_FIELDS")) {
+            int v = std::atoi(p);
+            if (v >= 0 && v <= 100000) return v;
+        }
+        return 40;
+    }();
+    static bool _recycle_logged = []() {
+        if (RECYCLE > 1)
+            std::fprintf(stderr,
+                "[eq-long] DATA RECYCLING x%d for the first %s field syncs "
+                "(Oh et al., GLOBECOM 2003)\n", RECYCLE,
+                RECYCLE_FIELDS ? std::to_string(RECYCLE_FIELDS).c_str()
+                               : "ALL");
+        return true;
+    }();
+    (void)_recycle_logged;
+    const int passes =
+        (RECYCLE > 1 && (RECYCLE_FIELDS == 0 ||
+                         d_fs_trained <= (uint32_t)RECYCLE_FIELDS))
+        ? RECYCLE : 1;
+
+    for (int pass = 0; pass < passes; pass++) {
+        const bool first = (pass == 0);
+        for (int j = 0; j < nsamples; j++) {
+            // Output uses current-field input (downstream sees this field).
+            float y = 0.0f;
+            volk_32f_x2_dot_prod_32f(
+                &y, &input_samples[j], &d_taps[0], NTAPS);
+            if (first)
+                output_samples[j] = y;
+            // LMS gradient uses lms_input (averaged when FS_AVG_DEPTH>1).
+            float y_avg = y;
+            if (lms_input != input_samples) {
+                y_avg = 0.0f;
+                volk_32f_x2_dot_prod_32f(&y_avg, &lms_input[j], &d_taps[0], NTAPS);
             }
+            float e = y_avg - training_pattern[j];
+            if (first)
+                err_sq_sum += (double)e * (double)e;  // raw err: telem/quality
+            float e_adapt = e;                     // gradient error: maybe clamped
+            if (rob_active) {
+                if (first)
+                    abs_e_buf[j] = std::fabs(e);
+                if (rob_scale > 0.0) {
+                    const float c = HUBER_K * (float)rob_scale;
+                    if (e_adapt >  c) { e_adapt =  c; if (first) rob_clamped++; }
+                    if (e_adapt < -c) { e_adapt = -c; if (first) rob_clamped++; }
+                }
+            }
+            float tmp_taps[NTAPS];
+            volk_32f_s32f_multiply_32f(tmp_taps, &lms_input[j], effective_mu * e_adapt, NTAPS);
+            volk_32f_x2_subtract_32f(&d_taps[0], &d_taps[0], tmp_taps, NTAPS);
         }
-        float tmp_taps[NTAPS];
-        volk_32f_s32f_multiply_32f(tmp_taps, &lms_input[j], effective_mu * e_adapt, NTAPS);
-        volk_32f_x2_subtract_32f(&d_taps[0], &d_taps[0], tmp_taps, NTAPS);
     }
 
     // Robust scale update: batch median of |e| via nth_element, EWMA'd.
@@ -805,25 +930,30 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
     }
 
     // WARM-START periodic persist: our chains die by force-kill, so the
-    // cache must be written DURING life, not at exit. Every ~1024 field
-    // syncs (~25 s) with a valid LKG, write it atomically (tmp+rename).
-    static const char* TAP_CACHE_FILE = std::getenv("STVT_EQ_TAP_CACHE_FILE");
-    if (TAP_CACHE_FILE && d_lkg_valid && nsamples > 0) {
+    // cache must be written DURING life, not at exit.
+    //
+    // 2026-07-29 (speed-1, dossier defects D1+D2). TWO fixes here:
+    //  * the path is read at CALL time, NOT latched in a `static` — that
+    //    single word was why a persistent chain could not rebind the cache
+    //    on retune, which is why the fast retune path had to give up the
+    //    fast equalizer (tv_live.py used to disable the cache outright).
+    //  * every 128 field syncs (~3.1 s), not 1024 (~24.8 s). Scan dwells
+    //    are 8-12 s, so with the old interval a first-ever visit to a
+    //    channel usually NEVER wrote the cache and the warm-start loop
+    //    could not prime itself. 1032 bytes every 3 s is free.
+    //    STVT_EQ_CACHE_EVERY restores any interval (0 = only on stop()).
+    static const int CACHE_EVERY = []() -> int {
+        if (const char* p = std::getenv("STVT_EQ_CACHE_EVERY")) {
+            int v = std::atoi(p);
+            if (v >= 0 && v <= 100000) return v;
+        }
+        return 128;
+    }();
+    if (CACHE_EVERY > 0 && d_lkg_valid && nsamples > 0) {
         static uint64_t save_fs = 0;
         save_fs++;
-        if ((save_fs & 0x3FF) == 0) {
-            std::string tmp = std::string(TAP_CACHE_FILE) + ".tmp";
-            std::FILE* f = std::fopen(tmp.c_str(), "wb");
-            if (f) {
-                const uint32_t magic = 0x54415043u, n = (uint32_t)NTAPS;
-                std::fwrite(&magic, 4, 1, f);
-                std::fwrite(&n, 4, 1, f);
-                std::fwrite(d_taps_lkg.data(), sizeof(float), NTAPS, f);
-                std::fclose(f);
-                std::remove(TAP_CACHE_FILE);
-                std::rename(tmp.c_str(), TAP_CACHE_FILE);
-            }
-        }
+        if ((save_fs % (uint64_t)CACHE_EVERY) == 0)
+            cache_save(std::getenv("STVT_EQ_TAP_CACHE_FILE"));
     }
 
     // 2026-05-30 DRIFT-LOCALIZATION TELEMETRY. Emit timestamped equalizer
@@ -834,11 +964,24 @@ void atsc_equalizer_long_impl::adaptN(const float* input_samples,
     static const bool TELEM = []() {
         const char* p = std::getenv("STVT_EQ_TELEM"); return p && std::atoi(p) != 0;
     }();
+    // Cadence knob (2026-07-29): two callers want field resolution — the
+    // dual-decode A/B harness (tools/tv_dual.py) needs EVERY field sync from
+    // BOTH equalizers so the two MER series can be paired field-by-field, and
+    // the speed-1 convergence studies need it so an fs_err_rms curve has field
+    // resolution. STVT_EQ_TELEM_EVERY=1 for either; default 8 = the historical
+    // rate, so the LINE and its cadence are unchanged for every existing
+    // parser (the panel's RE_FS, quality_tuner, the MER dial). Telemetry only
+    // — the output stream is unaffected.
+    static const int TELEM_EVERY = []() {
+        const char* p = std::getenv("STVT_EQ_TELEM_EVERY");
+        int n = p ? std::atoi(p) : 8;
+        return n > 0 ? n : 8;
+    }();
     if (TELEM && nsamples > 0) {
         static auto telem_t0 = std::chrono::steady_clock::now();
         static uint64_t telem_fs = 0;
         telem_fs++;
-        if ((telem_fs % 8) == 0) {
+        if ((telem_fs % TELEM_EVERY) == 0) {
             double tap_e = 0.0;
             for (int k = 0; k < NTAPS; k++) tap_e += (double)d_taps[k] * (double)d_taps[k];
             double t = std::chrono::duration<double>(
@@ -1248,7 +1391,17 @@ int atsc_equalizer_long_impl::general_work(int noutput_items,
             // (healthy fs_err + massive RS failure), it drops a one-word
             // command file that we poll once per field sync (~21 Hz,
             // one stat() — negligible). Commands: lkg | delta | cache |
-            // dfe0 | dfe1. File is consumed (deleted) on execution.
+            // dfe0 | dfe1 | save | warm.
+            // File is consumed (deleted) on execution.
+            //
+            // 2026-07-29 (speed-1 lever 1) added `save` and `warm` so a
+            // PERSISTENT chain can carry its warm start across a retune:
+            //   save  persist THIS channel's vetted taps now
+            //   warm  (re)load from STVT_EQ_TAP_CACHE_FILE, re-read at
+            //         call time, through the constructor's full quality
+            //         gate — unlike the older `cache` verb, which is left
+            //         untouched for the FEC sheriff and deliberately has
+            //         no gate and does not touch the LKG snapshot.
             static const char* CMD_FILE = std::getenv("STVT_EQ_CMD_FILE");
             if (CMD_FILE) {
                 std::FILE* cf = std::fopen(CMD_FILE, "rb");
@@ -1273,6 +1426,24 @@ int atsc_equalizer_long_impl::general_work(int noutput_items,
                         d_dfe_suspend = true;
                     } else if (!std::strcmp(cmd, "dfe1")) {
                         d_dfe_suspend = false;
+                    } else if (!std::strcmp(cmd, "save")) {
+                        ok = cache_save(
+                            std::getenv("STVT_EQ_TAP_CACHE_FILE"));
+                    } else if (!std::strcmp(cmd, "warm")) {
+                        // Runtime rebind: whatever STVT_EQ_TAP_CACHE_FILE
+                        // says NOW. If that channel has no cache yet, fall
+                        // back to the delta — the state a fresh process on
+                        // that channel would have — rather than carrying
+                        // the previous channel's multipath into it.
+                        if (!cache_load(
+                                std::getenv("STVT_EQ_TAP_CACHE_FILE"))) {
+                            reset_to_delta();
+                            d_lkg_valid = false;
+                            std::fprintf(stderr,
+                                "[eq-long] COLD START (no cache for this "
+                                "channel) — taps reset to delta\n");
+                        }
+                        d_fs_trained = 0;   // re-arm the DD warm-up hold
                     } else if (!std::strcmp(cmd, "cache")) {
                         if (const char* p =
                                 std::getenv("STVT_EQ_TAP_CACHE_FILE")) {

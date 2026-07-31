@@ -128,6 +128,18 @@ class ReplayTopBlock(gr.top_block):
 
         scaler = blocks.multiply_const_cc(32768.0)
 
+        # STVT_ADD_NOISE=<amp>: inject complex AWGN after scaling to push the
+        # decode toward the cliff, for marginal-signal config testing. 0 = off
+        # (byte-faithful). Signal RMS post-scale ~1500-2000, so amp ~500-1600
+        # spans clean -> cliff -> dead.
+        _noise_amp = float(os.environ.get("STVT_ADD_NOISE", "0"))
+        noise_src = noise_add = None
+        if _noise_amp > 0:
+            noise_src = analog.noise_source_c(
+                analog.GR_GAUSSIAN, _noise_amp,
+                int(os.environ.get("STVT_NOISE_SEED", "42")))
+            noise_add = blocks.add_cc()
+
         nb = None
         if int(os.environ.get("STVT_NB", "0")):
             nb = atscplus.atsc_noise_blanker(
@@ -185,6 +197,7 @@ class ReplayTopBlock(gr.top_block):
             "multifs": atscplus.atsc_equalizer_pilot_multifs,
             "multifs_dd": atscplus.atsc_equalizer_pilot_multifs_dd,
             "stock": dtv.atsc_equalizer,
+            "wl": atscplus.atsc_equalizer_wl,   # widely-linear (complex-fed)
         }
         equalizer = eqmap[_eq]()
 
@@ -210,14 +223,31 @@ class ReplayTopBlock(gr.top_block):
         ts_file.set_unbuffered(True)
 
         chain_blocks = [src, scaler]
+        if noise_add is not None: chain_blocks.append(noise_add)
         if nb is not None:       chain_blocks.append(nb)
         if resamp is not None:   chain_blocks.append(resamp)
         if notch is not None:    chain_blocks.append(notch)
         if smoother is not None: chain_blocks.append(smoother)
+        # STVT_WL_FUSED=1 (default when STVT_EQ=wl): replace the three-block
+        # companion chain (sync dual-interp + fs_check passthrough) with the
+        # fused atsc_wl_frontend — ONE inlined dual-plane interpolation per
+        # symbol. This is the real-time fix (2026-07-27): the second
+        # mmse interpolate() call in sync cost +10.3 s per 15 s of air.
+        # STVT_WL_FUSED=0 keeps the legacy 3-block companion path for A/B.
+        _wl_fused = (_eq == "wl" and
+                     int(os.environ.get("STVT_WL_FUSED", "1")) != 0)
+        wl_front = None
+
         # STVT_FPLL_FOLD=1: atsc_fpll_tight runs the dc_blocker+agc arithmetic
         # in its own output loop (bit-identical replica), so the separate
         # blocks are omitted — two fewer threads + buffer crossings.
-        if int(os.environ.get("STVT_FPLL_FOLD", "0")):
+        if _wl_fused:
+            if not int(os.environ.get("STVT_FPLL_FOLD", "0")):
+                raise ValueError("STVT_EQ=wl requires STVT_FPLL_FOLD=1 "
+                                 "(complex companion must match the folded real path)")
+            wl_front = atscplus.atsc_wl_frontend(output_rate)
+            chain_blocks += [rxf, fpll]
+        elif int(os.environ.get("STVT_FPLL_FOLD", "0")):
             chain_blocks += [rxf, fpll, sync, fs_check]
         else:
             chain_blocks += [rxf, fpll, dcr, agc, sync, fs_check]
@@ -243,11 +273,42 @@ class ReplayTopBlock(gr.top_block):
             LOG.info(f"min_output_buffer: items={_min_buf} bytes={_min_buf_bytes}")
 
         self.connect(*chain_blocks)
+        if noise_add is not None:
+            self.connect(noise_src, (noise_add, 1))
 
-        for a, b in [(fs_check, equalizer), (equalizer, viterbi),
-                     (viterbi, deinterleaver), (deinterleaver, rs), (rs, derand)]:
-            self.connect((a, 0), (b, 0))
-            self.connect((a, 1), (b, 1))
+        if _wl_fused:
+            # WIDELY-LINEAR FUSED path (2026-07-27): fpll real+imag feed the
+            # fused front end (inline dual-plane interp + framing in ONE
+            # block); its (real seg, plinfo, imag seg) drive the WL equalizer.
+            self.connect((fpll, 0), (wl_front, 0))        # real (folded dcr+agc)
+            self.connect((fpll, 1), (wl_front, 1))        # imag float companion
+            self.connect((wl_front, 0), (equalizer, 0))   # REAL 8-VSB segments
+            self.connect((wl_front, 1), (equalizer, 1))   # plinfo
+            self.connect((wl_front, 2), (equalizer, 2))   # IMAG segments
+            for a, b in [(equalizer, viterbi), (viterbi, deinterleaver),
+                         (deinterleaver, rs), (rs, derand)]:
+                self.connect((a, 0), (b, 0))
+                self.connect((a, 1), (b, 1))
+            LOG.info("WIDELY-LINEAR equalizer wired (FUSED front end)")
+        elif _eq == "wl":
+            # WIDELY-LINEAR legacy path (v2 2026-07-26, STVT_WL_FUSED=0): route
+            # the IMAGINARY float companion fpll(1)->sync(1)->fs_check(1). The
+            # equalizer takes the REAL segments (fs_check out0), plinfo (out1)
+            # and IMAG segments (out2).
+            self.connect((fpll, 1), (sync, 1))            # imag float companion
+            self.connect((sync, 1), (fs_check, 1))
+            self.connect((fs_check, 0), (equalizer, 0))   # REAL 8-VSB segments
+            self.connect((fs_check, 1), (equalizer, 1))   # plinfo
+            self.connect((fs_check, 2), (equalizer, 2))   # IMAG segments
+            for a, b in [(equalizer, viterbi), (viterbi, deinterleaver),
+                         (deinterleaver, rs), (rs, derand)]:
+                self.connect((a, 0), (b, 0))
+                self.connect((a, 1), (b, 1))
+        else:
+            for a, b in [(fs_check, equalizer), (equalizer, viterbi),
+                         (viterbi, deinterleaver), (deinterleaver, rs), (rs, derand)]:
+                self.connect((a, 0), (b, 0))
+                self.connect((a, 1), (b, 1))
         # ── SOVA reliability plane (2026-07-07) — mirror of tv_live.py ──
         if (int(os.environ.get("STVT_SOVA", "0"))
                 and os.environ.get("STVT_VITERBI") == "soft"
@@ -295,6 +356,24 @@ class ReplayTopBlock(gr.top_block):
             self._eq_sink = blocks.file_sink(gr.sizeof_float, f"{diag_dir}/eq_out.f32")
             self._eq_sink.set_unbuffered(True)
             self.connect((equalizer, 0), self._eq_v2s, self._eq_sink)
+            # EQ INPUT (fs_check out = the real 8-VSB symbols the equalizer
+            # receives, same 832-float segment framing). Paired to eq_out so an
+            # offline testbench can run CANDIDATE equalizers on the EXACT live
+            # input and score them against the C++ baseline (2026-07-26).
+            self._eqin_v2s  = blocks.vector_to_stream(gr.sizeof_float, 832)
+            self._eqin_sink = blocks.file_sink(gr.sizeof_float, f"{diag_dir}/eq_in.f32")
+            self._eqin_sink.set_unbuffered(True)
+            _eqin_src = wl_front if _wl_fused else fs_check
+            self.connect((_eqin_src, 0), self._eqin_v2s, self._eqin_sink)
+            # COMPLEX matched-filter output (pre-FPLL, pre-VSB->real). This is the
+            # ONLY complex point in the chain — the FPLL discards the imaginary
+            # part. Needed to test the WIDELY-LINEAR equalizer on real captures:
+            # carrier-correct + symbol-time it offline (align to eq_in), keep the
+            # imaginary part = the vestigial-sideband info WL exploits (2026-07-26).
+            self._mf_sink = blocks.file_sink(gr.sizeof_gr_complex,
+                                             f"{diag_dir}/mf_complex.cf32")
+            self._mf_sink.set_unbuffered(False)
+            self.connect((rxf, 0), self._mf_sink)
             # Post-deinterleaver (RS input, 207-byte blocks)
             self._dei_v2s  = blocks.vector_to_stream(gr.sizeof_char, 207)
             self._dei_sink = blocks.file_sink(gr.sizeof_char, f"{diag_dir}/dei_out.bin")
