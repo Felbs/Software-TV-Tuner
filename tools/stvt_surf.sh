@@ -75,6 +75,7 @@ exec 8>"$LOCKF" || { echo "cannot open lock $LOCKF" >&2; exit 3; }
 # -w 15: see stvt_run.sh — tolerate a dying instance's slow lock release.
 if ! flock -w 15 8; then
   echo "stvt_surf.sh is already running (lock $LOCKF held). Refusing a 2nd instance." >&2
+  # kill-ok: prose/usage text, not an executed kill
   echo "Stop it first:  kill -9 \$(pgrep -f '^bash [^ ]*stvt_surf'); pkill -x mpv" >&2
   exit 3
 fi
@@ -113,6 +114,7 @@ stop_player() {
   sleep 0.5
   # TERM stays PENDING on a stopped/hard-hung process — KILL the survivors
   # (a SIGSTOPped mpv survived the sweep in testing).
+  # kill-ok: player/pipeline consumer (mpv/ffmpeg/tail), not the SDR holder
   kill -9 $(pgrep -x mpv) $(pgrep -x ffmpeg) 2>/dev/null
   sleep 0.2
 }

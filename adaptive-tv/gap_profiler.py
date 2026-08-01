@@ -105,6 +105,7 @@ def main():
                     "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
                     "Where-Object { $_.CommandLine -match "
                     "'tv_tuna_panel|tv_live|tv_watch' } | "
+                    # kill-ok: panel stop for radio handoff - pre-warden TV family; graceful stop arrives with warden citizenship (bare-open campaign)
                     "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
                     "-ErrorAction SilentlyContinue }"], capture_output=True)
     time.sleep(3)
@@ -193,7 +194,8 @@ def main():
     subprocess.run(["powershell", "-NoProfile", "-Command",
                     "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
                     "Where-Object { $_.CommandLine -match 'tv_live' } | "
-                    "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
+                    # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign)
+                    "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "  # kill-ok (see above)
                     "-ErrorAction SilentlyContinue }"], capture_output=True)
     subprocess.Popen(
         ["powershell", "-NoProfile", "-Command",

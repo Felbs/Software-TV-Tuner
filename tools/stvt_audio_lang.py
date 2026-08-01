@@ -7,6 +7,7 @@ a single-track stream VLC can't second-guess.
 
 This tool does the switch by:
   1. Finding the currently-running tv_tuner streaming subprocess
+  # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign)
   2. Killing it cleanly (taskkill /T)
   3. Re-spawning with the new STVT_AUDIO_LANGUAGE value
 
@@ -119,6 +120,7 @@ def kill_running():
     for pid in pids:
         if sys.platform == "win32":
             subprocess.run(
+                # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign)
                 ["taskkill", "/F", "/T", "/PID", str(pid)],
                 capture_output=True,
             )
@@ -127,6 +129,7 @@ def kill_running():
     # Backstop: kill any leftover ffmpeg/vlc
     if sys.platform == "win32":
         for img in ("ffmpeg.exe", "vlc.exe"):
+            # kill-ok: player/pipeline consumer (mpv/ffmpeg/tail), not the SDR holder
             subprocess.run(["taskkill", "/F", "/IM", img], capture_output=True)
     else:
         subprocess.run(["pkill", "-f", "ffmpeg"], capture_output=True)

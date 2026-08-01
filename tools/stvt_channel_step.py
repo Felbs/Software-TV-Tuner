@@ -28,6 +28,7 @@ TV_TUNER_PY = REPO / "tools" / "tv_tuner.py"
 PY = sys.executable
 SCAN_PATH = Path(os.path.expanduser("~")) / ".tv_tuner" / "scan.json"
 
+# kill-ok: prose/usage text, not an executed kill
 # Hide console windows from subprocess.run calls (wmic, taskkill etc.)
 # on Windows so the hotkey doesn't make black boxes flash on the screen.
 SUBPROC_KW = {}
@@ -178,6 +179,7 @@ def find_neighbor(channels: list[dict], rf: int | None,
 def kill_running():
     if sys.platform == "win32":
         for img in ("ffmpeg.exe", "vlc.exe", "ffplay.exe"):
+            # kill-ok: player/pipeline consumer (mpv/ffmpeg/tail), not the SDR holder
             subprocess.run(["taskkill", "/F", "/IM", img],
                                 capture_output=True, **SUBPROC_KW)
         out = subprocess.run(
@@ -189,6 +191,7 @@ def kill_running():
             if "tv_tuner.py" in line or "tv_live.py" in line:
                 try:
                     pid = int(line.strip().rsplit(",", 1)[-1])
+                    # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign)
                     subprocess.run(["taskkill", "/F", "/PID", str(pid)],
                                    capture_output=True, **SUBPROC_KW)
                 except (ValueError, IndexError):

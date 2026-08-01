@@ -78,6 +78,7 @@ while true; do
                 log "  too soon since last kill, waiting"
             else
                 log "  KILLING mpv $MPV (tv_tuner will respawn)"
+                # kill-ok: player/pipeline consumer (mpv/ffmpeg/tail), not the SDR holder
                 kill -9 $MPV
                 last_kill=$NOW
                 streak=0

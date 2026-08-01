@@ -24,9 +24,13 @@ STVT="$HOME/Software-TV-Tuner"
 LOG="$HOME/stvt_winner_${EQ}.log"
 
 restore() {
+    # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign)
     pkill -9 -f 'tools/tv_tuner.py' 2>/dev/null
+    # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign)
     pkill -9 -f 'tv_live.py'        2>/dev/null
+    # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign)
     pkill -9 -f 'ffplay.*tv_live'   2>/dev/null
+    # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign)
     pkill -9 -f 'mpv.*tv_live'      2>/dev/null
 }
 trap restore EXIT INT TERM

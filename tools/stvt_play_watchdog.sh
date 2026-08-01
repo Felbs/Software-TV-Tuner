@@ -33,7 +33,9 @@ while true; do
     done
     if [ -z "$FF" ]; then
         log "ffmpeg didn't start within 30s; killing wrapper"
+        # kill-ok: player/pipeline consumer (mpv/ffmpeg/tail), not the SDR holder
         kill -9 $PLAY_PID 2>/dev/null
+        # kill-ok: player/pipeline consumer (mpv/ffmpeg/tail), not the SDR holder
         pkill -9 -f 'STVT Player' 2>/dev/null
         sleep 5
         continue
@@ -65,10 +67,15 @@ while true; do
 
     # Kill the pipeline (everything in its process tree)
     log "tearing down pipeline"
+    # kill-ok: player/pipeline consumer (mpv/ffmpeg/tail), not the SDR holder
     pkill -9 -f 'STVT Player' 2>/dev/null
+    # kill-ok: player/pipeline consumer (mpv/ffmpeg/tail), not the SDR holder
     pkill -9 -f 'ffmpeg.*libx264.*pipe:1$' 2>/dev/null
+    # kill-ok: player/pipeline consumer (mpv/ffmpeg/tail), not the SDR holder
     pkill -9 -f 'python3 /home/user/pipe_buffer.py' 2>/dev/null
+    # kill-ok: player/pipeline consumer (mpv/ffmpeg/tail), not the SDR holder
     pkill -9 -f 'tail -c \+0.*live.ts' 2>/dev/null
+    # kill-ok: player/pipeline consumer (mpv/ffmpeg/tail), not the SDR holder
     kill -9 $PLAY_PID 2>/dev/null
     sleep 5
     log "restarting in 2s"

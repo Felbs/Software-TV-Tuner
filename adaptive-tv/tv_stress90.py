@@ -56,7 +56,7 @@ def snap(st, extra=None):
 def restart_sdr_service():
     subprocess.run(["powershell", "-NoProfile", "-Command",
                     "Restart-Service SDRplayAPIService -Force"],
-                   capture_output=True, timeout=60)
+                   capture_output=True, timeout=60)  # pipe-ok: control cmd - nothing is read from the pipe
     time.sleep(4)
 
 

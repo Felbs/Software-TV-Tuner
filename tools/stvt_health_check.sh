@@ -86,6 +86,7 @@ fi
 MPV=$(pgrep -c mpv)
 if [ "$MPV" -gt 1 ]; then
     warn "MULTIPLE mpv ($MPV) — orphans from prior runs"
+    # kill-ok: prose/usage text, not an executed kill
     fix "kill orphans: keep newest, kill older: pgrep mpv | sort -n | head -n -1 | xargs -r kill -9"
 fi
 

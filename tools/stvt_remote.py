@@ -201,7 +201,8 @@ def running_chain_rf() -> int | None:
 def kill_chain_and_player():
     if sys.platform == "win32":
         for img in ("ffmpeg.exe", "vlc.exe", "ffplay.exe"):
-            subprocess.run(["taskkill", "/F", "/IM", img],
+            # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign); loop also sweeps mpv/ffmpeg players
+            subprocess.run(["taskkill", "/F", "/IM", img],  # kill-ok (see above)
                            capture_output=True, **NO_WIN)
         out = subprocess.run(
             ["wmic", "process", "where", "name='python.exe'",
@@ -212,7 +213,8 @@ def kill_chain_and_player():
             if "tv_tuner.py" in line or "tv_live.py" in line:
                 try:
                     pid = int(line.strip().rsplit(",", 1)[-1])
-                    subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                    # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign)
+                    subprocess.run(["taskkill", "/F", "/PID", str(pid)],  # kill-ok (see above)
                                    capture_output=True, **NO_WIN)
                 except (ValueError, IndexError):
                     pass

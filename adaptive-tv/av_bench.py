@@ -39,11 +39,14 @@ def ipc_get(prop):
     return None
 
 def kill_players():
+    # kill-ok: player/pipeline consumer (mpv/ffmpeg/tail), not the SDR holder
     subprocess.run(["taskkill", "/F", "/IM", "mpv.exe"], capture_output=True)
+    # kill-ok: player/pipeline consumer (mpv/ffmpeg/tail), not the SDR holder
     subprocess.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True)
     subprocess.run(["powershell", "-NoProfile", "-Command",
                     "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
                     "Where-Object { $_.CommandLine -match 'play_marginal|tv_watch' } | "
+                    # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign); loop also sweeps mpv/ffmpeg players
                     "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
                     "-ErrorAction SilentlyContinue }"], capture_output=True)
 

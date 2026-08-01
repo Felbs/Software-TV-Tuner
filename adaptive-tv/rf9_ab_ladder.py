@@ -57,7 +57,8 @@ def kill_chain():
     subprocess.run(["powershell", "-NoProfile", "-Command",
                     "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
                     "Where-Object { $_.CommandLine -match 'tv_live' } | "
-                    "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
+                    # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign)
+                    "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "  # kill-ok (see above)
                     "-ErrorAction SilentlyContinue }"], capture_output=True)
     time.sleep(2)
 

@@ -30,6 +30,7 @@ for p in psutil.process_iter(["name", "cmdline"]):
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         pass
 for name in ("mpv.exe", "vlc.exe"):
+    # kill-ok: player/pipeline consumer (mpv/ffmpeg/tail), not the SDR holder
     subprocess.run(["taskkill", "/IM", name, "/F"],
                    capture_output=True)
 time.sleep(3)

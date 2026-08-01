@@ -111,7 +111,8 @@ def kill_chain():
     """Kill any running tv_live + ffmpeg + vlc so we have the SDR."""
     if sys.platform == "win32":
         for img in ("ffmpeg.exe", "vlc.exe", "ffplay.exe"):
-            subprocess.run(["taskkill", "/F", "/IM", img],
+            # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign); loop also sweeps mpv/ffmpeg players
+            subprocess.run(["taskkill", "/F", "/IM", img],  # kill-ok (see above)
                            capture_output=True)
         # find tv_live.py pythons
         out = subprocess.run(
@@ -123,7 +124,8 @@ def kill_chain():
             if "tv_live.py" in line:
                 try:
                     pid = int(line.strip().rsplit(",", 1)[-1])
-                    subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                    # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign)
+                    subprocess.run(["taskkill", "/F", "/PID", str(pid)],  # kill-ok (see above)
                                    capture_output=True)
                 except (ValueError, IndexError):
                     pass

@@ -64,9 +64,12 @@ def kill_chain():
     subprocess.run(["powershell", "-NoProfile", "-Command",
                     "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
                     "Where-Object { $_.CommandLine -match 'tv_live|tv_watch' } | "
+                    # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign)
                     "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
                     "-ErrorAction SilentlyContinue }"], capture_output=True)
+    # kill-ok: player/pipeline consumer (mpv/ffmpeg/tail), not the SDR holder
     subprocess.run(["taskkill", "/F", "/IM", "mpv.exe"], capture_output=True)
+    # kill-ok: player/pipeline consumer (mpv/ffmpeg/tail), not the SDR holder
     subprocess.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True)
 
 
@@ -77,6 +80,7 @@ def kill_panel():
     subprocess.run(["powershell", "-NoProfile", "-Command",
                     "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
                     "Where-Object { $_.CommandLine -match 'tv_tuna_panel' } | "
+                    # kill-ok: panel stop for radio handoff - pre-warden TV family; graceful stop arrives with warden citizenship (bare-open campaign)
                     "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
                     "-ErrorAction SilentlyContinue }"], capture_output=True)
 
@@ -94,7 +98,7 @@ def start_panel():
 def restart_sdr_service():
     subprocess.run(["powershell", "-NoProfile", "-Command",
                     "Restart-Service SDRplayAPIService -Force"],
-                   capture_output=True, timeout=90)
+                   capture_output=True, timeout=90)  # pipe-ok: control cmd - nothing is read from the pipe
     time.sleep(5)
 
 

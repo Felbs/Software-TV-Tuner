@@ -135,7 +135,9 @@ def kill_radio():
         ["powershell", "-NoProfile", "-Command",
          "Get-WmiObject Win32_Process -Filter \"Name='python.exe'\" | "
          "Where-Object {$_.CommandLine -match 'tv_live|tv_watch'} | "
+         # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign); loop also sweeps mpv/ffmpeg players
          "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }; "
+         # kill-ok: player/pipeline consumer (mpv/ffmpeg/tail), not the SDR holder
          "Get-Process mpv -ErrorAction SilentlyContinue | Stop-Process -Force"],
         capture_output=True, timeout=30)
 
@@ -319,6 +321,7 @@ def phase_quality_sweep():
     subprocess.run(["powershell", "-NoProfile", "-Command",
                     "Get-WmiObject Win32_Process -Filter \"Name='python.exe'\""
                     " | Where-Object {$_.CommandLine -match 'tv_tuna_panel'} |"
+                    # kill-ok: panel stop for radio handoff - pre-warden TV family; graceful stop arrives with warden citizenship (bare-open campaign)
                     " ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"],
                    capture_output=True, timeout=30)
     time.sleep(3)

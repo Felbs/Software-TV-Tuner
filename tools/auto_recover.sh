@@ -65,6 +65,7 @@ while true; do
                 MPV=$($PP mpv | head -1)
                 if [ -n "$MPV" ]; then
                     log "$LOG_TAG FROZEN×${streak_frozen} → killing mpv (PID $MPV), tv_tuner will respawn"
+                    # kill-ok: player/pipeline consumer (mpv/ffmpeg/tail), not the SDR holder
                     kill -9 "$MPV" 2>/dev/null
                     last_reaction=$now
                     streak_frozen=0
@@ -76,7 +77,8 @@ while true; do
             streak_frozen=0; streak_bad_bits=0
             if [ $streak_dead -ge 2 ]; then
                 log "$LOG_TAG DEAD×${streak_dead} → killing chain (auto_play_forever will resurrect)"
-                for p in $($PP chain); do kill -9 $p 2>/dev/null; done
+                # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign)
+                for p in $($PP chain); do kill -9 $p 2>/dev/null; done  # kill-ok (see above)
                 last_reaction=$now
                 streak_dead=0
             fi

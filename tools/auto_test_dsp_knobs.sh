@@ -37,7 +37,9 @@ BASE_ENV="STVT_SDR_AGC=1 STVT_RS=erasure STVT_EQ=long STVT_VITERBI=soft STVT_EQ_
 log() { echo "[$(date '+%H:%M:%S')] $*" | tee -a "$LOG"; }
 
 kill_chain() {
+    # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign)
     pkill -9 -f 'tv_live\.py.*--rf' 2>/dev/null
+    # kill-ok: player/pipeline consumer (mpv/ffmpeg/tail), not the SDR holder
     pkill -9 -f 'stvt_play\.sh\|pipe_buffer\|ffmpeg.*libx264.*pipe:1\|mpv.*STVT Player\|tail.*live.ts' 2>/dev/null
     sleep 5
 }

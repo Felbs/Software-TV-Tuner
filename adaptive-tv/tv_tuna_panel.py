@@ -988,9 +988,12 @@ def kill_watch():
         subprocess.run(["powershell", "-NoProfile", "-Command",
                         "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
                         "Where-Object { $_.CommandLine -match 'tv_watch' } | "
+                        # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign)
                         "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
                         "-ErrorAction SilentlyContinue }"], capture_output=True)
+        # kill-ok: player/pipeline consumer (mpv/ffmpeg/tail), not the SDR holder
         subprocess.run(["taskkill", "/F", "/IM", "mpv.exe"], capture_output=True)
+        # kill-ok: player/pipeline consumer (mpv/ffmpeg/tail), not the SDR holder
         subprocess.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True)
         return
     subprocess.run(["pkill", "-f", r"tv_watch\.py"], capture_output=True)
@@ -1002,9 +1005,12 @@ def kill_tv():
         subprocess.run(["powershell", "-NoProfile", "-Command",
                         "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
                         "Where-Object { $_.CommandLine -match 'tv_live|tv_watch' } | "
+                        # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign)
                         "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
                         "-ErrorAction SilentlyContinue }"], capture_output=True)
+        # kill-ok: player/pipeline consumer (mpv/ffmpeg/tail), not the SDR holder
         subprocess.run(["taskkill", "/F", "/IM", "mpv.exe"], capture_output=True)
+        # kill-ok: player/pipeline consumer (mpv/ffmpeg/tail), not the SDR holder
         subprocess.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True)
         return
     subprocess.run(["pkill", "-f", r"tv_live\.py|tv_watch\.py"], capture_output=True)
@@ -1078,14 +1084,29 @@ def e7_run(secs=30):
             tapc = HERE / "lab" / "tapcache" / f"taps_{ant}_rf{rf}.bin"
             if tapc.exists():
                 vote_cmd += ["--tapc", str(tapc)]
-            r = subprocess.run(vote_cmd, capture_output=True, text=True,
-                               env=env, timeout=1200)
-            tail = [ln for ln in (r.stdout or "").splitlines()
+            # STREAM stdout to a file, never a pipe (law 7/31): the vote can
+            # run 20 min and its verdict lines ARE the product - a pipe
+            # discards them on timeout, the file survives either way.
+            vote_log = HERE / "lab" / "e7_vote.log"
+            vote_log.parent.mkdir(exist_ok=True)
+            rc = None
+            try:
+                with open(vote_log, "w", encoding="utf-8",
+                          errors="replace") as sink:
+                    rc = subprocess.run(vote_cmd, stdout=sink,
+                                        stderr=subprocess.STDOUT, text=True,
+                                        env=env, timeout=1200).returncode
+            except subprocess.TimeoutExpired:
+                pass
+            vote_out = (vote_log.read_text(encoding="utf-8", errors="replace")
+                        if vote_log.exists() else "")
+            tail = [ln for ln in vote_out.splitlines()
                     if "frames:" in ln or "union:" in ln]
             E7["status"] = ("done: " + " · ".join(tail)[-160:]) if tail \
-                else f"error: vote failed rc={r.returncode}"
+                else (f"error: vote failed rc={rc}" if rc is not None
+                      else "error: vote timed out (log kept: e7_vote.log)")
             hm = re.search(r"(\d+)/(\d+) damaged GOPs healed",
-                           r.stdout or "")
+                           vote_out)
             n_healed = int(hm.group(1)) if hm else 0
             # NEVER auto-open a window (three user-confusions on 7/07:
             # a surprise twin next to live TV reads as a broken tuner).

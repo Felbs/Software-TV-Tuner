@@ -3873,6 +3873,7 @@ def _spawn_cc_window(channel: int = 1) -> subprocess.Popen | None:
 def _kill_streaming(proc: subprocess.Popen | None):
     """Best-effort terminate of a streaming subprocess + its whole tree.
 
+    # kill-ok: prose/usage text, not an executed kill
     Windows: taskkill /T walks the tree.
     Linux:   we spawned with start_new_session=True so the child got
              its own process group; sending SIGTERM/SIGKILL to the
@@ -3883,6 +3884,7 @@ def _kill_streaming(proc: subprocess.Popen | None):
     try:
         if sys.platform == "win32":
             subprocess.run(
+                # kill-ok: tearing down our OWN spawned player tree (ffmpeg/ffplay/console child), not another holder
                 ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
                 capture_output=True, timeout=10,
             )
@@ -4041,6 +4043,7 @@ def _nuke_streaming_orphans():
     for pid in target_pids:
         try:
             subprocess.run(
+                # kill-ok: tearing down our OWN spawned player tree (ffmpeg/ffplay/console child), not another holder
                 ["taskkill", "/F", "/T", "/PID", str(pid)],
                 capture_output=True, timeout=5,
             )

@@ -57,11 +57,12 @@ def hygiene():
     subprocess.run(["powershell", "-NoProfile", "-Command",
                     "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\""
                     " | Where-Object {$_.CommandLine -match 'tv_live'} |"
-                    " ForEach-Object { Stop-Process -Id $_.ProcessId -Force"
-                    " -Confirm:$false }"], capture_output=True, timeout=60)
+                    # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign)
+                    " ForEach-Object { Stop-Process -Id $_.ProcessId -Force"  # kill-ok (see above)
+                    " -Confirm:$false }"], capture_output=True, timeout=60)  # pipe-ok: control cmd - nothing is read from the pipe
     subprocess.run(["powershell", "-NoProfile", "-Command",
                     "Restart-Service -Name SDRplayAPIService -Force "
-                    "-Confirm:$false"], capture_output=True, timeout=120)
+                    "-Confirm:$false"], capture_output=True, timeout=120)  # pipe-ok: control cmd - nothing is read from the pipe
     time.sleep(12)
 
 

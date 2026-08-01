@@ -123,7 +123,8 @@ def run(cmd, timeout=60, env=None):
 def kill_chain():
     if sys.platform == "win32":
         for img in ("ffmpeg.exe", "vlc.exe", "ffplay.exe"):
-            subprocess.run(["taskkill", "/F", "/IM", img], capture_output=True)
+            # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign); loop also sweeps mpv/ffmpeg players
+            subprocess.run(["taskkill", "/F", "/IM", img], capture_output=True)  # kill-ok (see above)
         out = subprocess.run(
             ["wmic", "process", "where", "name='python.exe'",
              "get", "ProcessId,CommandLine", "/format:csv"],
@@ -133,7 +134,8 @@ def kill_chain():
             if "tv_tuner.py" in line or "tv_live.py" in line:
                 try:
                     pid = int(line.strip().rsplit(",", 1)[-1])
-                    subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                    # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign)
+                    subprocess.run(["taskkill", "/F", "/PID", str(pid)],  # kill-ok (see above)
                                    capture_output=True)
                 except (ValueError, IndexError):
                     pass
@@ -263,7 +265,9 @@ def english_recognition(wav: Path) -> tuple[int, float, str]:
     p = subprocess.run(
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
          "-Command", ps],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True, text=True, timeout=120,  # pipe-ok: the child
+        # emits ONE summary line ("words|conf|txt"); an expiry loses a
+        # single probe, and the caller already scores that as 0 words
     )
     out = (p.stdout or "").strip().split("|", 2)
     if len(out) != 3:

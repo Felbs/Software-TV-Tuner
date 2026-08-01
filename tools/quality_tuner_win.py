@@ -142,9 +142,11 @@ def ram_free_gb() -> float:
 
 def kill_orphans():
     """Kill any leftover ffplay / ffmpeg / tv_live processes from prior runs.
+    # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign); loop also sweeps mpv/ffmpeg players
     Only kills processes started by us based on cmdline; uses taskkill /F."""
     for img in ("ffmpeg.exe", "ffplay.exe"):
-        subprocess.run(["taskkill", "/F", "/IM", img],
+        # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign); loop also sweeps mpv/ffmpeg players
+        subprocess.run(["taskkill", "/F", "/IM", img],  # kill-ok (see above)
                        capture_output=True, text=True)
     # Find lingering python tv_live processes
     out = subprocess.run(["wmic", "process", "where", "name='python.exe'",
@@ -154,6 +156,7 @@ def kill_orphans():
         if "tv_live.py" in line:
             try:
                 pid = int(line.strip().split(",")[-1])
+                # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign)
                 subprocess.run(["taskkill", "/F", "/PID", str(pid)],
                                capture_output=True)
             except (ValueError, IndexError):

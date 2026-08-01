@@ -244,7 +244,10 @@ class LiveTVTopBlock(gr.top_block):
                              "-Force -Confirm:$false"]
                 else:
                     _cure = ["sudo", "-n", "systemctl", "restart", "sdrplay"]
-                _r = subprocess.run(_cure, capture_output=True, timeout=60)
+                _r = subprocess.run(_cure, capture_output=True,
+                                    timeout=60)  # pipe-ok: service restart -
+                # output is an rc + one stderr line (logged below); an
+                # expiry falls into the surrounding open-retry loop
                 if _r.returncode != 0:
                     LOG.info("service-restart cure failed rc=%s: %s",
                              _r.returncode,

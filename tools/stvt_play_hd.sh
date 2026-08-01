@@ -202,6 +202,7 @@ kill_player(){
   for p in $(pgrep -x ffmpeg); do kill "$p" 2>/dev/null; done
   for p in $(pgrep -f "tail -c .*live.ts"); do kill "$p" 2>/dev/null; done
   sleep 1
+  # kill-ok: player/pipeline consumer (mpv/ffmpeg/tail), not the SDR holder
   for p in $(pgrep -x mpv) $(pgrep -x ffmpeg); do kill -9 "$p" 2>/dev/null; done
 }
 

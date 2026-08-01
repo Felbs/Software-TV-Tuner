@@ -49,7 +49,8 @@ def kill_stragglers():
     subprocess.run(["powershell", "-NoProfile", "-Command",
                     "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
                     "Where-Object { $_.CommandLine -match 'tv_live' -and $_.ProcessId -ne "
-                    f"{os.getpid()}" + " } | ForEach-Object { Stop-Process -Id $_.ProcessId "
+                    # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign)
+                    f"{os.getpid()}" + " } | ForEach-Object { Stop-Process -Id $_.ProcessId "  # kill-ok (see above)
                     "-Force -ErrorAction SilentlyContinue }"],
                    capture_output=True, timeout=30)
 

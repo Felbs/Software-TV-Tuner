@@ -19,6 +19,7 @@
 # Output: one PID per line, or empty if none. Empty exit = no process.
 #
 # Use directly:
+# kill-ok: prose/usage text, not an executed kill
 #   for p in $(~/pp.sh chain); do kill -9 $p; done
 #
 # Or just check:
@@ -93,6 +94,7 @@ Emits PIDs (one per line) matching the category, excluding shell
 subshells running pgrep/grep/awk that would false-positive with -f.
 
 Examples:
+  # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign)
   for p in \$(~/pp.sh chain); do kill -9 \$p; done
   if [ -z "\$(~/pp.sh watchdog)" ]; then ~/mpv_watchdog.sh >/dev/null 2>&1 & disown; fi
 EOF

@@ -108,7 +108,8 @@ def run(cmd, timeout=60, env=None):
 def kill_chain():
     if sys.platform == "win32":
         for img in ("ffmpeg.exe", "vlc.exe", "ffplay.exe"):
-            subprocess.run(["taskkill", "/F", "/IM", img], capture_output=True)
+            # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign); loop also sweeps mpv/ffmpeg players
+            subprocess.run(["taskkill", "/F", "/IM", img], capture_output=True)  # kill-ok (see above)
         out = subprocess.run(
             ["wmic", "process", "where", "name='python.exe'",
              "get", "ProcessId,CommandLine", "/format:csv"],
@@ -118,7 +119,8 @@ def kill_chain():
             if "tv_live.py" in line:
                 try:
                     pid = int(line.strip().rsplit(",", 1)[-1])
-                    subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                    # kill-ok (reviewed 8/01): TV-chain stop - pre-warden family, no stop-file exists; this IS its documented stop. Revisit with warden citizenship (bare-open campaign)
+                    subprocess.run(["taskkill", "/F", "/PID", str(pid)],  # kill-ok (see above)
                                    capture_output=True)
                 except (ValueError, IndexError):
                     pass

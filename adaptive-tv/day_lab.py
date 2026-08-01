@@ -72,7 +72,7 @@ def capture_specimen(rf, port, rfg, ifgr, out, secs=45):
                 subprocess.run(
                     ["powershell", "-NoProfile", "-Command",
                      "Restart-Service SDRplayAPIService -Force"],
-                    capture_output=True, timeout=60)
+                    capture_output=True, timeout=60)  # pipe-ok: control cmd - nothing is read from the pipe
                 time.sleep(6)
             except Exception:
                 pass

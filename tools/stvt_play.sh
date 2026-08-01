@@ -81,8 +81,11 @@ while true; do
         fi
     done
 
+    # kill-ok: player/pipeline consumer (mpv/ffmpeg/tail), not the SDR holder
     kill -9 $FP 2>/dev/null
+    # kill-ok: player/pipeline consumer (mpv/ffmpeg/tail), not the SDR holder
     pkill -9 -P $PIPELINE_PID 2>/dev/null
+    # kill-ok: player/pipeline consumer (mpv/ffmpeg/tail), not the SDR holder
     kill -9 $PIPELINE_PID 2>/dev/null
     sleep 2
 done
