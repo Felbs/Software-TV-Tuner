@@ -24,6 +24,22 @@ SoapySDR.SoapySDR_setLogLevel(SoapySDR.SOAPY_SDR_FATAL)
 HERE = Path(__file__).resolve().parent
 LAB = HERE / "lab"
 
+# Fleet citizenship (8/05): this tool USED to grab the RSPdx bare — it seized
+# the device the instant an all-day FT8 lab released it and made another job
+# wait, the same non-lock-aware class as the TV panel's sweeper. A capture is
+# a standing radio consumer like any other; it takes the warden or it does not
+# run. Import is optional so the tool still works on a machine without the
+# fleet (radio_lock absent -> plain open, and we SAY so).
+try:
+    import sys as _sys
+    _sys.path.insert(0, r"Z:\src\gr-radiotuna\tools")
+    import radio_lock
+except Exception:
+    radio_lock = None
+
+LOCK_OWNER = "iq_capture"
+LOCK_PRI = 50           # lab capture tier: below human/window-hold, above idle
+
 
 def center_hz(rf):
     lo = (174 + (rf - 7) * 6) if rf < 14 else (470 + (rf - 14) * 6)
@@ -47,6 +63,25 @@ def main():
     tag = f"rf{args.rf}" if args.rf else f"{freq/1e6:.0f}MHz"
     out = Path(args.out) if args.out else LAB / f"iq_{tag}_{stamp}.ciq"
 
+    held = False
+    if radio_lock is not None:
+        purpose = f"IQ capture {tag} {args.secs:.0f}s @ {args.rate/1e6:.1f}Msps"
+        if not radio_lock.acquire(LOCK_OWNER, purpose, LOCK_PRI, wait_s=90):
+            h = radio_lock.status() or {}
+            print(f"radio BUSY: held by {h.get('owner')} "
+                  f"(prio {h.get('priority')}) — not seizing it. Try later.")
+            return 2
+        held = True
+    else:
+        print("NOTE: radio_lock unavailable — opening the SDR unarbitrated.")
+    try:
+        return _capture(args, freq, tag, out, held)
+    finally:
+        if held:
+            radio_lock.release(LOCK_OWNER)
+
+
+def _capture(args, freq, tag, out, held):
     sdr = SoapySDR.Device("driver=sdrplay")
     sdr.setSampleRate(SOAPY_SDR_RX, 0, args.rate)
     sdr.setFrequency(SOAPY_SDR_RX, 0, freq)
@@ -69,6 +104,7 @@ def main():
     buf = np.empty(2 * 65536, np.int16)          # interleaved I,Q
     got = timeouts = shorts = 0
     t0 = time.time()
+    hb_t = [t0]         # warden heartbeat clock (list = writable in-loop)
     t_first = None      # clock starts at FIRST sample — stream-activation
                         # latency is not a drop (metric fix 2026-07-05)
     # RAM capture (2026-07-07): the old write-per-read loop let any disk
@@ -79,6 +115,9 @@ def main():
         ram = np.empty(2 * n_want, np.int16)
         while got < n_want and time.time() - t0 < args.secs * 3 + 10:
             r = sdr.readStream(st, [buf], 65536, timeoutUs=500000)
+            if held and time.time() - hb_t[0] >= 5.0:
+                hb_t[0] = time.time()   # ON A TIMER, never per-read: per-read
+                radio_lock.heartbeat()  # file I/O chops the stream (8/03 law)
             if r.ret > 0:
                 if t_first is None:
                     t_first = time.time()
@@ -97,6 +136,9 @@ def main():
         with open(out, "wb") as f:
             while got < n_want and time.time() - t0 < args.secs * 3 + 10:
                 r = sdr.readStream(st, [buf], 65536, timeoutUs=500000)
+                if held and time.time() - hb_t[0] >= 5.0:
+                    hb_t[0] = time.time()   # timer, not per-read (8/03 law)
+                    radio_lock.heartbeat()
                 if r.ret > 0:
                     if t_first is None:
                         t_first = time.time()
