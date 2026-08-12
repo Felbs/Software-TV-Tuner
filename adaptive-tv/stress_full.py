@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-PY = r"C:\Users\user\radioconda\python.exe"
+PY = os.path.join(os.environ.get("USERPROFILE", ""), "radioconda", "python.exe")
 TV_LIVE = r"Z:\src\magic-tv-decoder\tools\tv_live.py"
 LIVE = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live\live.ts")
 LAB = HERE / "lab"
@@ -37,7 +37,7 @@ def env_for(rf):
     rfsel, ifgr = GAINS.get(rf, DEFAULT_GAIN)
     e = os.environ.copy()
     e["PATH"] = (r"C:\Program Files\SDRplay\API\x64;C:\ffmpeg\bin;"
-                 + r"C:\Users\user\radioconda\Library\bin;" + e.get("PATH", ""))
+                 + os.path.join(os.environ.get("USERPROFILE", ""), "radioconda", "Library", "bin") + ";" + e.get("PATH", ""))
     e.update({"STVT_ANTENNA": ANT, "STVT_RFGAIN_SEL": str(rfsel), "STVT_IFGR": str(ifgr),
               "STVT_EQ": "long", "STVT_RS": "stock", "STVT_VITERBI": "soft",
               "STVT_DABNOTCH": "0", "STVT_EQ_TELEM": "1"})

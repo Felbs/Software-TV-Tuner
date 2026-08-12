@@ -4,7 +4,7 @@ Over-the-air **ATSC 8-VSB** television, decoded entirely in software on any Soap
 
 **Solid arrows** = signal / data flow · **dashed** = control / telemetry / file I/O · **thick** = front-end spawns.
 
-> A rendered, zoomable version also lives in the [stvt-how-it-works](https://felbs.github.io/stvt-how-it-works/) explainer.
+> More on how STVT works — including a rendered, zoomable version of this diagram — is on the project site: [felbs.software](https://felbs.software).
 
 ```mermaid
 flowchart TB

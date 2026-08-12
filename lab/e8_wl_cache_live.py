@@ -28,7 +28,7 @@ import sys
 import time
 from pathlib import Path
 
-PY = r"C:\Users\user\radioconda\python.exe"
+PY = os.path.join(os.environ.get("USERPROFILE", ""), "radioconda", "python.exe")
 REPO = Path(r"Z:\src\magic-tv-decoder")
 OUT = REPO / "lab" / "night3" / "wl_cache_live"
 TC = OUT / "tapcache"

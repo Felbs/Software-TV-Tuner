@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-PY = os.environ.get("STVT_PY", r"C:\Users\user\radioconda\python.exe")
+PY = os.environ.get("STVT_PY", os.path.join(os.environ.get("USERPROFILE", ""), "radioconda", "python.exe"))
 OUT = REPO / "lab" / "speed_build" / "runs"
 LEDGER = REPO / "lab" / "speed_build" / "bench.jsonl"
 

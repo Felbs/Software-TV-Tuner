@@ -8,6 +8,7 @@ the command, then restarts exactly the ones it stopped.
 
     python lab/exclusive_tv.py <cmd...>
 """
+import os
 import subprocess
 import sys
 import time
@@ -18,7 +19,7 @@ DAEMONS = {
                    r"Z:\src\gr-radiotuna\tools\atlas_start.ps1"],
     "storm_watch": ["powershell", "-ExecutionPolicy", "Bypass", "-File",
                     r"Z:\src\gr-radiotuna\tools\storm_start.ps1"],
-    "radio_panel": [r"C:\Users\user\radioconda\python.exe",
+    "radio_panel": [os.path.join(os.environ.get("USERPROFILE", ""), "radioconda", "python.exe"),
                     r"Z:\src\gr-radiotuna\tools\radio_panel.py"],
 }
 

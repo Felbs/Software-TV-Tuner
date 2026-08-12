@@ -440,6 +440,27 @@ def mpv_up():
     r = subprocess.run(["pgrep", "-x", "mpv"], capture_output=True, text=True)
     return bool(r.stdout.strip())
 
+def fleet_radio_busy():
+    """The one-radio fleet reservation (radio_lock.py convention): if
+    another process holds the RSPdx - fresh heartbeat, not our pid - the
+    waterfall must PARK. Caught live 8/02: the sweeper retuned a running
+    ADS-B stream to TV channels mid-read (freq readback 1090 -> 557 MHz,
+    delivery halved, then a driver wedge). The panel knew its own chains
+    (live.ts, SCAN, METER) but not the fleet's."""
+    import json as _json
+    from datetime import datetime, timezone
+    try:
+        lockf = os.environ.get("RADIO_LOCK_FILE",
+                               r"Z:\SDR_Agent_v2\radio.lock.json")
+        st = _json.loads(Path(lockf).read_text())
+        if int(st.get("pid", -1)) == os.getpid():
+            return False
+        hb = datetime.fromisoformat(st["heartbeat"])
+        return (datetime.now(timezone.utc) - hb).total_seconds() < 90.0
+    except Exception:
+        return False
+
+
 def sweeper():
     import numpy as np
     try:
@@ -471,6 +492,10 @@ def sweeper():
                                  ("📏 flatness aiming in progress — sweep paused"
                                   if FLAT["on"] else
                                   "🌐 all-towers aiming in progress — sweep paused")))
+            time.sleep(5); continue
+        if fleet_radio_busy():
+            with WF_LOCK:
+                WF["status"] = "🔒 fleet radio in use — sweep parked"
             time.sleep(5); continue
         if STATE["rf"] is not None or STATE["tuning"] or METER["rf"] is not None \
                 or chain_running():
@@ -505,7 +530,7 @@ def sweeper():
             while not (STATE["rf"] is not None or STATE["tuning"]
                        or METER["rf"] is not None or BAL["on"] or FLAT["on"]
                        or SCAN["running"] or IDENT["on"]
-                       or external_wants_sdr()):
+                       or external_wants_sdr() or fleet_radio_busy()):
                 row = []
                 t_row = time.strftime("%H:%M:%S")
                 for h in hops:

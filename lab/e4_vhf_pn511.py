@@ -20,7 +20,7 @@ import re
 import subprocess
 from pathlib import Path
 
-PY = r"C:\Users\user\radioconda\python.exe"
+PY = os.path.join(os.environ.get("USERPROFILE", ""), "radioconda", "python.exe")
 REPO = Path(r"Z:\src\magic-tv-decoder")
 N3 = REPO / "lab" / "night3"
 IQ = N3 / "rf9_probe.cs16"

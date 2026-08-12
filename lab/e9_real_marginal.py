@@ -16,11 +16,12 @@ REFUTED if the sign of the frame difference is unrelated to imag_benefit.
 This is out-of-sample in the strict sense: the thresholds were fixed from the
 synthetic sweeps BEFORE these four runs were scored.
 """
+import os
 import json
 import subprocess
 from pathlib import Path
 
-PY = r"C:\Users\user\radioconda\python.exe"
+PY = os.path.join(os.environ.get("USERPROFILE", ""), "radioconda", "python.exe")
 REPO = Path(r"Z:\src\magic-tv-decoder")
 IQD = REPO / "lab" / "marginal_iq"
 OUT = REPO / "lab" / "night3" / "wl_real_marginal"

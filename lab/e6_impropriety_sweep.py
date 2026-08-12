@@ -22,11 +22,12 @@ Held fixed: same control capture, same seed, no AWGN — alpha is the ONLY varia
 Run at a mild AWGN floor too (17 dB, where E5 showed WL's cliff-edge win) to see
 whether impropriety and noise interact.
 """
+import os
 import json
 import subprocess
 from pathlib import Path
 
-PY = r"C:\Users\user\radioconda\python.exe"
+PY = os.path.join(os.environ.get("USERPROFILE", ""), "radioconda", "python.exe")
 REPO = Path(r"Z:\src\magic-tv-decoder")
 IQ = REPO / "lab" / "marginal_iq" / "rf34_ctrl.cs16"
 OUT = REPO / "lab" / "night3" / "wl_improper"

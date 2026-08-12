@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import textwrap
 import os
 import sys
 import time
@@ -193,6 +194,61 @@ BOLD = "\033[1m"; CYAN = "\033[36m"; YELLOW = "\033[33m"
 DIM  = "\033[2m"; RESET = "\033[0m"; GREEN = "\033[32m"
 
 
+def render_listings(channels: list[dict], rf_filter: int | None,
+                    hours: float, color: bool) -> str:
+    """The grid's cells are ~12 characters wide, which is nowhere near enough
+    for a synopsis, so the ETT text gets its own section.
+
+    The descriptions were being decoded and thrown away: `extract_psip`
+    attaches Extended Text Table entries as `description`, load_epg carries
+    them through as `desc`, and nothing ever printed them. On a typical
+    capture 88 of 92 events carry one.
+    """
+    now = int(time.time())
+    grid_start = (now // 1800) * 1800
+    window_end = grid_start + int(hours * 3600)
+    if rf_filter is not None:
+        channels = [c for c in channels if c["rf"] == rf_filter]
+
+    c = lambda s, code: f"{code}{s}{RESET}" if color else s
+    lines = [c("LISTINGS", BOLD)]
+    shown = with_desc = 0
+
+    for ch in channels:
+        evs = [e for e in ch["events"]
+               if e["start_unix"] < window_end
+               and e["start_unix"] + e.get("length", 0) > grid_start]
+        evs.sort(key=lambda e: e["start_unix"])
+        if not evs:
+            continue
+        lines.append("")
+        lines.append(c(f"  {ch['virtual']}  {ch['callsign']}"
+                       + (f"  ({ch['network']})" if ch.get("network") else ""),
+                       CYAN))
+        for e in evs:
+            shown += 1
+            live = e["start_unix"] <= now < e["start_unix"] + e.get("length", 0)
+            mins = int(e.get("length", 0) / 60)
+            # fmt_time strips the leading zero, so 9:59 AM is one char
+            # narrower than 11:59 AM; pad or the column zig-zags.
+            head = (f"    {fmt_time(e['start_unix']):>8}  {mins:>3}m  "
+                    f"{e['title']}")
+            if e.get("rating"):
+                head += f"   [{e['rating']}]"
+            lines.append(c(head, BOLD + GREEN) if live else head)
+            if e.get("desc"):
+                with_desc += 1
+                for w in textwrap.wrap(e["desc"], 84):
+                    lines.append(c(f"        {w}", DIM))
+
+    if not shown:
+        return ""
+    lines.append("")
+    lines.append(c(f"  {with_desc} of {shown} events in this window carry an "
+                   f"ETT description", DIM))
+    return "\n".join(lines) + "\n"
+
+
 def render_grid(channels: list[dict], rf_filter: int | None,
                 hours: float, color: bool, scan_unix: int | None) -> str:
     now = int(time.time())
@@ -270,6 +326,10 @@ def render_grid(channels: list[dict], rf_filter: int | None,
     lines.append(c("  green = on now    » = show continues from prior slot", DIM))
     lines.append(c("  + = tuneable on this antenna    ~ = weak carrier (may not decode)"
                    "    x = guide data only, out of reach", DIM))
+    n_desc = sum(1 for ch in channels for e in ch["events"] if e.get("desc"))
+    if n_desc:
+        lines.append(c(f"  {n_desc} events carry a synopsis — run with --desc "
+                       f"to read them", DIM))
     return "\n".join(lines) + "\n"
 
 
@@ -286,6 +346,9 @@ def main() -> int:
                     help="Plain ASCII output")
     ap.add_argument("--watch", action="store_true",
                     help="Auto-refresh every 60s until Ctrl+C")
+    ap.add_argument("--desc", action="store_true",
+                    help="Also print full listings with ETT synopses "
+                         "(the grid's cells are too narrow to hold them)")
     args = ap.parse_args()
 
     color = (not args.no_color) and color_supported()
@@ -311,6 +374,9 @@ def main() -> int:
             if args.watch:
                 os.system("clear")
         out = render_grid(channels, args.rf, args.hours, color, scan_unix)
+        if args.desc:
+            out += os.linesep + render_listings(
+                channels, args.rf, args.hours, color)
         # Belt-and-suspenders for any chars the reconfigure couldn't handle.
         try:
             sys.stdout.write(out)

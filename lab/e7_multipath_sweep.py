@@ -28,11 +28,12 @@ Falsified if the advantage is flat in g, or if phi makes no difference — that
 would mean WL is merely acting as a longer effective filter rather than
 exploiting the conjugate structure.
 """
+import os
 import json
 import subprocess
 from pathlib import Path
 
-PY = r"C:\Users\user\radioconda\python.exe"
+PY = os.path.join(os.environ.get("USERPROFILE", ""), "radioconda", "python.exe")
 REPO = Path(r"Z:\src\magic-tv-decoder")
 IQ = REPO / "lab" / "marginal_iq" / "rf34_ctrl.cs16"
 OUT = REPO / "lab" / "night3" / "wl_multipath"

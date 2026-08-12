@@ -59,7 +59,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
 REPO = Path(__file__).resolve().parents[1]
-PY = os.environ.get("STVT_PY", r"C:\Users\user\radioconda\python.exe")
+PY = os.environ.get("STVT_PY", os.path.join(os.environ.get("USERPROFILE", ""), "radioconda", "python.exe"))
 
 #: the minimum run count that makes a hash claim meaningful (see THE LAW)
 MIN_RUNS = 3

@@ -14,7 +14,7 @@ import argparse, json, os, subprocess, sys, time
 from pathlib import Path
 
 REPO = Path(r"Z:\src\magic-tv-decoder")
-PY = r"C:\Users\user\radioconda\python.exe"
+PY = os.path.join(os.environ.get("USERPROFILE", ""), "radioconda", "python.exe")
 OUT = REPO / "lab" / "wl_v3" / "runs"
 
 CAPTURES = {

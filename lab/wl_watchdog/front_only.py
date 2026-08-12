@@ -26,7 +26,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
-PY = os.environ.get("STVT_PY", r"C:\Users\user\radioconda\python.exe")
+PY = os.environ.get("STVT_PY", os.path.join(os.environ.get("USERPROFILE", ""), "radioconda", "python.exe"))
 
 RE_FINAL = re.compile(
     r"\[wl_front FINAL\] segs_emitted=(\d+) segs_held=(\d+) "

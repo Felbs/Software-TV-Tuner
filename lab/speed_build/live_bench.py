@@ -36,7 +36,7 @@ import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-PY = r"C:\Users\user\radioconda\python.exe"
+PY = os.path.join(os.environ.get("USERPROFILE", ""), "radioconda", "python.exe")
 WORK = REPO / "lab" / "speed_build" / "live"
 LEDGER = REPO / "lab" / "speed_build" / "live.jsonl"
 sys.path.insert(0, r"Z:\src\gr-radiotuna\tools")

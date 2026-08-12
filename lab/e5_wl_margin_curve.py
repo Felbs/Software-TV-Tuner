@@ -24,12 +24,13 @@ but WL holds +2.454 dB MER, better in 612 of 620 paired fields. So WL's headroom
 is real even when frames can't show it; this sweep finds where headroom becomes
 frames.
 """
+import os
 import json
 import subprocess
 import sys
 from pathlib import Path
 
-PY = r"C:\Users\user\radioconda\python.exe"
+PY = os.path.join(os.environ.get("USERPROFILE", ""), "radioconda", "python.exe")
 REPO = Path(r"Z:\src\magic-tv-decoder")
 IQ = REPO / "lab" / "marginal_iq" / "rf34_ctrl.cs16"
 OUT = REPO / "lab" / "night3" / "wl_margin"

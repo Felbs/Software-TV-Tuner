@@ -6,6 +6,8 @@ unattended for hours on marginal indoor antennas — the watchdogs and
 the equalizer's tracking margin keep a watchable picture up where
 off-the-shelf tuners give up.
 
+**Project site:** [felbs.software](https://felbs.software) · **Contact:** [E@felbs.software](mailto:E@felbs.software)
+
 📺 **Watch the full Windows install, from clone to live TV, in one take:**
 https://youtu.be/jhsTTnoqGTs
 
