@@ -93,6 +93,40 @@ started_ok(){
 
 [ -f "$F" ] || { echo "live.ts not found at $F — start the chain first (tools/tv_live.py)"; exit 1; }
 
+# ---- resolve PROG ------------------------------------------------------
+# The word "program" means two different things in this repo, and they met
+# here. tv_tuner.py --program is a 1-based SUB-CHANNEL index (1 = the main
+# channel). This script historically took the raw PMT program_id, defaulting
+# to 3 -- which only ever worked because the station we developed against
+# happens to number its programs from 3. Point it at a station whose ids
+# start anywhere else and ffmpeg says "No program with ID 1 exists" and mpv
+# gets an empty stream: a black window on a PERFECT decode.
+# Accept either spelling, and say which one we understood.
+resolve_prog(){
+  local ids n real
+  ids=$(timeout 60 ffprobe -hide_banner -v error -show_entries program=program_id         -of csv=p=0 -i <(tail -c 20000000 "$F") 2>/dev/null         | tr -d " ," | grep -E "^[0-9]+$" | sort -un)
+  if [ -z "$ids" ]; then
+    log "could not read the program list from live.ts -- using $PROG as given"
+    return 0
+  fi
+  n=$(echo "$ids" | wc -l)
+  if echo "$ids" | grep -qx "$PROG"; then
+    log "program $PROG is a PMT program_id present in this multiplex"
+    return 0
+  fi
+  if [ "$PROG" -ge 1 ] 2>/dev/null && [ "$PROG" -le "$n" ]; then
+    real=$(echo "$ids" | sed -n "${PROG}p")
+    log "program $PROG read as a sub-channel index -> PMT program_id $real"
+    PROG="$real"
+    return 0
+  fi
+  real=$(echo "$ids" | head -1)
+  log "no program $PROG here (available: $(echo $ids | tr "
+" " ")) -- using $real"
+  PROG="$real"
+}
+resolve_prog
+
 # Kill + relaunch + verify start, retrying rough-patch hangs up to the cap.
 # Returns non-zero only when the restart cap is exhausted.
 relaunch(){
@@ -105,6 +139,25 @@ relaunch(){
     log "  start hung (rough patch) — retrying"
   done
 }
+
+# ---- one supervisor at a time -----------------------------------------
+# kill_player() pkills mpv/ffmpeg by NAME, with no notion of whose player it
+# is. Two supervisors therefore murder each other's player on sight: every
+# start looks like a "rough patch hang", both burn through MAX_RESTARTS, and
+# the screen stays black while the decode underneath is perfect. Observed on
+# the Pi 8/12 -- 40 relaunches in 90 seconds, none of them the real fault.
+#
+# Enforced with a LOCK, not by matching process names: one logical instance
+# shows up as several matching command lines (the setsid/nohup wrapper AND the
+# script), so a pgrep-based guard refuses its own first launch. The lock is
+# held by an fd for the life of the process and released automatically on exit.
+LOCK="/tmp/stvt_play_hd.lock"
+exec 9>"$LOCK" || { echo "cannot open $LOCK"; exit 1; }
+if ! flock -n 9; then
+  echo "another stvt_play_hd.sh already holds $LOCK."
+  echo "Stop it first -- two supervisors kill each other's player and neither wins."
+  exit 1
+fi
 
 restarts=0
 relaunch "initial" || exit 1
