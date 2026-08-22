@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Software TV Tuner — GRCon26 lightning talk</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{--bg:#0b0f14;--fg:#e8edf2;--dim:#8b98a5;--acc:#ffb454;--acc2:#5ad1ff;--ok:#5ee09a;--box:#141b24;--line:#26303c}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:var(--bg);color:var(--fg);font:clamp(15px,1.55vw,22px)/1.35 "Segoe UI",Inter,system-ui,sans-serif}
+.deck{height:100%;overflow:hidden}
+.slide{display:none;height:100%;padding:4vh 5vw;flex-direction:column;gap:22px}
+.slide.on{display:flex}
+h1{font-size:clamp(34px,4.6vw,64px);line-height:1.05;letter-spacing:-.5px;max-width:1100px}
+h2{font-size:clamp(26px,3.2vw,44px);line-height:1.1;color:var(--acc)}
+.sub{font-size:clamp(18px,2vw,28px);color:var(--dim)}
+.kicker{font-size:18px;letter-spacing:.18em;text-transform:uppercase;color:var(--acc2)}
+ul{list-style:none;font-size:clamp(17px,2vw,28px);display:grid;gap:14px}
+li::before{content:"▸ ";color:var(--acc)}
+li b{color:#fff}
+.row{display:flex;gap:28px;align-items:stretch;flex:1;min-height:0}
+.col{flex:1;min-width:0}
+.big{font-size:96px;font-weight:700;line-height:1;color:var(--ok)}
+.stat{background:var(--box);border:1px solid var(--line);border-radius:14px;padding:22px 26px;display:flex;flex-direction:column;gap:6px}
+.stat .v{font-size:clamp(30px,4vw,56px);font-weight:700;color:#fff;line-height:1}
+.stat .k{font-size:19px;color:var(--dim)}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+.chain{display:flex;flex-wrap:wrap;gap:10px;align-items:center;font-size:clamp(14px,1.5vw,21px)}
+.chain .st{background:var(--box);border:1px solid var(--line);border-radius:10px;padding:12px 16px;white-space:nowrap}
+.chain .st small{display:block;color:var(--dim);font-size:15px;white-space:normal}
+.chain .ar{color:var(--acc);font-size:26px}
+.chain .ours{border-color:var(--acc)}
+img.frame{width:100%;height:100%;object-fit:contain;border-radius:12px;border:1px solid var(--line);background:#000}
+.foot{margin-top:auto;display:flex;justify-content:space-between;font-size:17px;color:var(--dim)}
+.foot a{color:var(--acc2);text-decoration:none}
+.url{font-family:Consolas,monospace;color:var(--acc2)}
+.notes{display:none;position:fixed;right:0;bottom:0;width:38%;max-height:45%;overflow:auto;background:#1b2430;color:#d7e0ea;border-top-left-radius:14px;padding:16px 20px;font-size:16px;line-height:1.4;border:1px solid var(--line);box-shadow:0 0 30px #000a}
+body.show-notes .slide.on .notes{display:block}
+.pg{position:fixed;left:24px;bottom:16px;color:var(--dim);font-size:15px}
+@media print{
+  html,body{background:#fff;color:#111;height:auto}
+  :root{--fg:#111;--dim:#555;--box:#f3f5f7;--line:#ccd;--acc:#b35a00;--acc2:#0b63b8;--ok:#117a46}
+  .deck{overflow:visible}
+  .slide{display:flex!important;height:100vh;page-break-after:always;break-after:page}
+  .notes,.pg{display:none!important}
+  h1,h2,.big,.stat .v{color:inherit}
+}
+</style></head><body>
+<div class="deck">
+
+<!-- 1 -->
+<section class="slide on">
+  <div class="kicker">GRCon26 · lightning talk · 5 minutes</div>
+  <h1>Software TV Tuner<br>— an instrumented gr-dtv fork that tells you the truth in dB</h1>
+  <p class="sub">ATSC 1.0 (8-VSB) on any SoapySDR radio: scan, guide, watch, record, captions — and a live MER meter read straight off the equalizer.</p>
+  <div class="chain" style="margin-top:8px">
+    <span class="st">any antenna</span><span class="ar">→</span>
+    <span class="st">any SoapySDR radio</span><span class="ar">→</span>
+    <span class="st ours">gr-atscplus <small>gr-dtv fork: 256-tap equalizer, instrumented field-sync checker, tunable FPLL, soft Viterbi</small></span><span class="ar">→</span>
+    <span class="st">live MPEG-TS → player / MP4 / RTMP</span>
+  </div>
+  <div class="foot"><span>Felbs · independent · Baltimore</span><span class="url">github.com/Felbs/Software-TV-Tuner · felbs.github.io/stvt-how-it-works</span></div>
+  <div class="notes"><b>Say (30 s):</b> This one IS GNU Radio: a fork of gr-dtv's ATSC receiver with the equalizer opened up and instrumented, wrapped in a tuner that scans, builds a guide from the air, watches, records and captions. The point of the fork isn't more features — it's that the decoder reports, in dB, how close it is to the cliff.</div>
+</section>
+
+<!-- 2 -->
+<section class="slide">
+  <div class="kicker">The one idea</div>
+  <h2>The equalizer's field-sync error is a free MER meter.</h2>
+  <ul>
+    <li><b>MER = 20·log10(5 / fs_err_rms)</b>, ~41 Hz, read off the decoder's own equalizer — no extra block, no extra CPU.</li>
+    <li>8-VSB has a <b>~15.2 dB cliff</b> between perfect TV and nothing. Everything interesting lives within 2 dB of it.</li>
+    <li>So every decision is made <b>against that dial</b>: antenna pick, gain calibration (grid search on MER), guide badges, a tone whose pitch tracks MER so you can aim an antenna by ear.</li>
+    <li>Per-antenna, per-hour history: recency-weighted median, trusted only with n ≥ 8 over ≥ 2 days — <b>single-day bins lie</b>.</li>
+  </ul>
+  <div class="foot"><span>2 / 6</span><span>docs/knob_of_time.md has the derivations</span></div>
+  <div class="notes"><b>Say (50 s):</b> The whole project turns on one measurement. The field-sync is a known sequence, so the equalizer's residual on it is a modulation-error ratio for free, forty times a second. ATSC 1.0 has a brutal cliff around 15 dB, and once you have the dial, every other feature is just a policy on the dial — which antenna, what gain, whether the guide should call a channel watchable.</div>
+</section>
+
+<!-- 3 -->
+<section class="slide">
+  <div class="kicker">What the dial taught us</div>
+  <h2>Three measured laws that generalise past television.</h2>
+  <ul>
+    <li><b>FEC buys 0 dB at the margin.</b> Re-running a full-traceback Viterbi on soft symbols looked like the lever; measured, the equalizer was — the cliff is an equalizer cliff.</li>
+    <li><b>Widely-linear equalization wins at the cliff edge and loses in clean AWGN</b> (below ~17 dB), so it has to be auto-selected per channel, not switched on.</li>
+    <li><b>Fold the FPLL into the filter:</b> −42 % CPU, bit-identical output — the kind of saving that only shows up when you can prove identity.</li>
+    <li>Bonus: an <b>AM-band loop antenna</b> (0.5–1.7 MHz design) decoded VHF-hi TV at 189 MHz — 100× its design frequency — at 16.7 dB, right on the cliff. The meter said so before the picture did.</li>
+  </ul>
+  <div class="foot"><span>3 / 6</span><span>every law has a gate script in the repo; N ≥ 3, medians</span></div>
+  <div class="notes"><b>Say (55 s):</b> Three things I'd have bet the other way. Forward error correction doesn't move the cliff — the equalizer does. Widely-linear equalization, which exploits the impropriety of VSB, helps exactly where you need it and hurts where you don't, so it's a per-channel decision. And an optimisation only counts if you can prove the output is bit-identical — that's how the FPLL fold shipped. The AM loop story is the fun one: the meter found a decode the antenna's datasheet forbids.</div>
+</section>
+
+<!-- 4 -->
+<section class="slide">
+  <div class="kicker">Measured, not claimed</div>
+  <h2>A tuner strangers can install, on three platforms.</h2>
+  <div class="grid">
+    <div class="stat"><span class="v">~10 min</span><span class="k">clone → live TV on Windows (one bootstrap script, one-take video)</span></div>
+    <div class="stat"><span class="v">Pi 5</span><span class="k">runs the whole stack from the published clone</span></div>
+    <div class="stat"><span class="v">15.2 dB</span><span class="k">the 8-VSB cliff, located by measurement</span></div>
+    <div class="stat"><span class="v">−42 %</span><span class="k">CPU from the FPLL fold, bit-identical</span></div>
+    <div class="stat"><span class="v">8★ · 3 forks</span><span class="k">incl. an issue from a Pluto/Debian user — fixed</span></div>
+    <div class="stat"><span class="v">2 h</span><span class="k">stress run: decoder healthy; quality = delivery × (1 − errors)</span></div>
+  </div>
+  <ul style="font-size:23px">
+    <li><b>Portability was the barrier</b>, not DSP: a doctor script checks every dependency and says exactly what to fix; a "fresh-install test" is run as a stranger before each release.</li>
+  </ul>
+  <div class="foot"><span>4 / 6</span><span>tools/doctor.py · bootstrap.ps1 · docs/install/*</span></div>
+  <div class="notes"><b>Say (40 s):</b> Numbers. Ten minutes from clone to a picture on Windows, with a video showing it in one take. The same tuner runs on a Raspberry Pi 5. The hard part was never the DSP — it was making it install for someone who isn't me, so there's a doctor that names the missing piece, and I re-install as a stranger before every release.</div>
+</section>
+
+<!-- 5 -->
+<section class="slide">
+  <div class="kicker">What it looks like</div>
+  <ul>
+    <li><b>Scan → guide from PSIP/EIT → watch</b>, channel-changer, subchannel select, captions (<b>c</b> cycles), record to MP4, restream RTMP.</li>
+    <li><b>Live MER dashboard</b> at ~1 Hz with FPLL lock and equalizer state; antenna picker with measured-loss badges.</li>
+    <li><b>Signal finder</b>: pitch = MER, 880 Hz = decodable — aim the antenna with your ears.</li>
+    <li><b>Honest verdicts</b>: "this antenna is 5 dB short here, no setting fixes that" is a valid output.</li>
+    <li>Lesson from the UI: <b>melting video was our own flag</b>, not the signal — the user's eyes beat the instruments. Instrument the output people consume, not a proxy.</li>
+  </ul>
+  <p class="sub" style="font-size:20px">Live demo if the room allows: indoor antenna → RSPdx → laptop → a Raleigh ATSC 1.0 station.</p>
+  <div class="foot"><span>5 / 6</span><span><span class="url">python tools/tv_tuner.py</span> — scans, builds a guide, plays</span></div>
+  <div class="notes"><b>Say (40 s):</b> In use it's a TV. Scan, guide from the air, watch, record, captions — and the MER dial on screen the whole time. The signal-finder is my favourite: a tone whose pitch follows MER, so you point the antenna by ear. And it will tell you honestly when an antenna can't do it, in dB.</div>
+</section>
+
+<!-- 6 -->
+<section class="slide">
+  <div class="kicker">Take it from here</div>
+  <h2>What I'd like from the gr-dtv people — and what I can give back.</h2>
+  <ul>
+    <li><b>Upstream candidates</b>: the instrumented field-sync checker (MER for free), the widely-linear equalizer with per-channel auto-select, the FPLL fold (bit-identical), the soft-Viterbi rescue path.</li>
+    <li><b>One possible upstream bug</b>: a 0 × NaN hazard in the FIR filter path under loss of lock — reproducible, happy to file it with the capture.</li>
+    <li><b>Open questions</b>: a GR 4 port of the equalizer; whether the MER-dial approach belongs in gr-dtv's DVB/ATSC receivers generally.</li>
+    <li><b>Ask</b>: try it on your market, tell me what the doctor couldn't fix.</li>
+  </ul>
+  <div class="row" style="flex:0;gap:40px;align-items:center;margin-top:10px">
+    <span class="big" style="font-size:40px">github.com/Felbs/Software-TV-Tuner</span>
+    <span class="sub">also: atsc3 (NextGen TV receiver) · GPSTuna (software GPS + Galileo)</span>
+  </div>
+  <div class="foot"><span>6 / 6</span><span>E@felbs.software · felbs.software</span></div>
+  <div class="notes"><b>Say (30 s):</b> For the gr-dtv maintainers: I think three of these belong upstream, and I have one bug I'd like to file properly. The ask is the same as always — install it, point it at your antenna, and tell me where it fails. Thanks.</div>
+</section>
+
+</div>
+<div class="pg" id="pg"></div>
+<script>
+const s=[...document.querySelectorAll('.slide')];let i=0;
+function go(n){i=Math.max(0,Math.min(s.length-1,n));s.forEach((e,k)=>e.classList.toggle('on',k===i));document.getElementById('pg').textContent=(i+1)+' / '+s.length+'   ← → navigate · n notes · p print';location.hash=i+1}
+addEventListener('keydown',e=>{if(['ArrowRight','PageDown',' '].includes(e.key))go(i+1);else if(['ArrowLeft','PageUp'].includes(e.key))go(i-1);else if(e.key==='n')document.body.classList.toggle('show-notes');else if(e.key==='p')print();else if(e.key==='Home')go(0);else if(e.key==='End')go(s.length-1)});
+addEventListener('click',e=>{if(e.target.closest('a'))return;go(e.clientX>innerWidth/2?i+1:i-1)});
+go(parseInt(location.hash.slice(1)||'1')-1);
+</script>
+</body></html>
