@@ -20,7 +20,7 @@ own run-to-run variance band. The Ubuntu live test should be a formality.
 | cmake configure + make -j64 | OK, no errors |
 | sudo make install + ldconfig | OK |
 | `from gnuradio import atscplus` | **21 blocks** (fpll_tight, sync_kalman/soft/fieldlock/slidefs/pathA/tunable, viterbi_soft, rs_decoder_erasure, all equalizers, noise_blanker, adaptive_notch, spectral_smoother, deinterleaver, fs_checker_inst) |
-| stale-module trap check (mempalace `gr_atscplus_build_install_gotcha`) | installed .so mtime 0.4 min old — **fresh, trap avoided** |
+| stale-module trap check (the build-install gotcha) | installed .so mtime 0.4 min old — **fresh, trap avoided** |
 
 ## 2. Byte-compile + import
 
