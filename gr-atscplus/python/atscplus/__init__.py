@@ -28,3 +28,17 @@ except ModuleNotFoundError:
 
 # import any pure python here
 #
+
+# pure-Python blocks (no compiler needed)
+from .tei_scrub import tei_scrub
+from .eq_probe import eq_probe, dd_mer_db
+
+
+def __getattr__(name):
+    # Qt is optional - the receiver runs headless. Import the widgets only when asked for.
+    if name in ("vsb_panel", "video_pane"):
+        import importlib
+        cls = getattr(importlib.import_module("." + name, __name__), name)
+        globals()[name] = cls          # the submodule import bound the MODULE under this name: rebind to the class
+        return cls
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

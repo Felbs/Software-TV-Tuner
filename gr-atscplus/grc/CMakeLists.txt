@@ -6,4 +6,16 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 
-install(FILES DESTINATION share/gnuradio/grc/blocks)
+install(FILES
+    atscplus_atsc_equalizer_long.block.yml
+    atscplus_atsc_fs_checker_inst.block.yml
+    atscplus_atsc_rs_decoder_erasure.block.yml
+    atscplus_atsc_fpll_tight.block.yml
+    atscplus_atsc_sync_soft.block.yml
+    atscplus_atsc_viterbi_soft.block.yml
+    atscplus_atsc_noise_blanker.block.yml
+    atscplus_tei_scrub.block.yml
+    atscplus_eq_probe.block.yml
+    atscplus_vsb_panel.block.yml
+    atscplus_video_pane.block.yml
+    DESTINATION share/gnuradio/grc/blocks)

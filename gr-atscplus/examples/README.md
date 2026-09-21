@@ -1,0 +1,66 @@
+# gr-atscplus in GNU Radio Companion
+
+The STVT receiver has always been a GNU Radio flowgraph - `tools/tv_live.py` builds it in
+Python - but it never had a `.grc` file, a window, or GRC definitions for most of its blocks.
+Now it does. The flowgraphs here are the **production chain, block for block**, with the
+STVT_* defaults the day-to-day tools use (`adaptive-tv/chain_lab.py` BASE_ENV):
+
+```
+ 8 MS/s ─► x25/32 ─► RRC matched filter (1.1 sps) ─► ATSC+ FPLL (tight; DC block + AGC folded in)
+        ─► ATSC+ Sync (soft) ─► ATSC+ FS Checker ─► ATSC+ Equalizer (long) ─► ATSC+ Viterbi (soft)
+        ─► Deinterleaver ─► Reed-Solomon ─► Derandomizer ─► Depad ─► ATSC+ TEI Scrub ─► transport stream
+                                                  │
+                                                  └─► ATSC+ Equalizer Probe: MER dial, eye, echoes
+```
+
+| flowgraph | what it is |
+|---|---|
+| `atsc1_replay.grc` | headless: an 8 MS/s cf32 capture in, transport stream out. The byte-for-byte check against `tools/tv_replay.py`. |
+| `atsc1_live_qt.grc` | a SoapySDR radio in; spectrum, the **8-VSB panel** (eye, echoes, MER, packet health) and **the picture in the window** (mpv drawing into a pane, fed over local UDP). |
+
+![atsc1_live_qt](../docs/img/grc_atsc1_live_qt.png)
+
+`make_grc.py` writes both from one description, so they cannot drift. Nothing about any
+station is in them: channel, antenna port and gain are flowgraph Parameters.
+
+## New blocks
+
+Four pure-Python blocks (no compiler needed) and GRC definitions for the compiled blocks the
+chain uses that had none (`FPLL (tight)`, `Sync (soft)`, `Viterbi (soft)`, `Noise Blanker`):
+
+| block | what it does |
+|---|---|
+| **TEI Scrub** | the `TEIScrub` class from `tv_live.py`, as a block: uncorrectable packets -> NULL packets, counted. Its `liveness` message is a count a dead chain cannot fake. |
+| **Equalizer Probe** | taps the equalizer's output: `dial` = decision-directed MER (dB), `symbols` for an eye display, `taps` = the equalizer's taps (the echoes). Costs almost nothing. |
+| **8-VSB Panel** (Qt) | eye against the eight levels, |taps| in dB, MER trace with the ~15 dB picture cliff marked, packet totals. |
+| **Video Pane** (Qt) | hosts mpv inside the window on the UDP transport stream; respawns it, bounded. |
+
+## Run from the source tree (nothing installed)
+
+```
+set GRC_BLOCKS_PATH=<this tree>\grc
+python examples/make_grc.py
+grcc -o build/grc examples/atsc1_replay.grc examples/atsc1_live_qt.grc
+python examples/run_grc.py build/grc/atsc1_replay.py -- -c capture.cf32 -o out.ts
+python examples/run_grc.py build/grc/atsc1_live_qt.py --seconds 60 --png shot.png -- -f <Hz> -a "<port>" -g 30
+```
+
+`examples/_devpath.py` grafts the Python blocks onto the installed `gnuradio.atscplus`;
+`run_grc.py` honours a site radio lock (RXTUNE_LOCK, see gr-rxtune) and can pass gain
+elements with `--call "src.set_gain(0,'IFGR',46)"`. QA: `python python/atscplus/qa_python_blocks.py`.
+
+## With gr-rxtune
+
+gr-rxtune's `examples/atsc1_native_live.grc` puts its controller **in the loop on this chain,
+live**: the Equalizer Probe's MER is the dial, the TEI Scrub's clean-packet count is the
+liveness, gains go to the Soapy source by message, and the picture keeps playing through every
+gain change. That is the attachment mode a receiver made of GNU Radio blocks makes possible.
+
+## Notes
+
+- `STVT_FPLL_FOLD=1` (DC blocker + AGC inside the FPLL: -42 % CPU, bit-identical) is a
+  process-wide switch the block has no parameter for; the flowgraphs set it with an Import block.
+- The chain was tuned on int16-scale samples: the x32768 after the source is part of the chain.
+- Decision-directed MER is exact while the eye is open and reads HIGH as it closes (wrong
+  decisions look like small errors): treat it as a dial above ~15 dB and a floor below. The
+  field-sync MER in the equalizer's `STVT_EQ_TELEM=1` line is the unbiased one.

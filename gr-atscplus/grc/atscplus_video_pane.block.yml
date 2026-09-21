@@ -1,0 +1,28 @@
+id: atscplus_video_pane
+label: ATSC+ Video Pane
+category: '[ATSC+]'
+flags: [python]
+documentation: |-
+    The television picture inside this window: hosts a player (mpv) drawing into the pane,
+    reading the transport stream the flowgraph sends to a local UDP port (stock UDP Sink,
+    payload 1316 = 7 TS packets). Picture, sound and captions are the player's.
+    Multi-programme stream: Video/Audio track = mpv track numbers (0 = player's choice), or
+    press _ / # in the pane to cycle.
+templates:
+    imports: from gnuradio import atscplus
+    make: |-
+        <%
+            win = '_%s_win' % id
+        %>\
+        ${win} = atscplus.video_pane(url=${url}, player=${player}, vid=${vid}, aid=${aid}, player_args=${player_args}, start_delay_s=${start_delay_s}, parent=self)
+        self.${id} = ${win}
+        ${gui_hint() % win}
+parameters:
+-   {id: url, label: Stream URL, dtype: string, default: 'udp://127.0.0.1:5004?fifo_size=1000000&overrun_nonfatal=1'}
+-   {id: player, label: Player, dtype: string, default: 'mpv'}
+-   {id: vid, label: Video track (0 = auto), dtype: int, default: '0'}
+-   {id: aid, label: Audio track (0 = auto), dtype: int, default: '0'}
+-   {id: player_args, label: Extra player args, dtype: string, default: '', hide: part}
+-   {id: start_delay_s, label: Start after (s), dtype: real, default: '3', hide: part}
+-   {id: gui_hint, label: GUI Hint, dtype: gui_hint, hide: part}
+file_format: 1

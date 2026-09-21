@@ -1,0 +1,29 @@
+id: atscplus_vsb_panel
+label: ATSC+ 8-VSB Panel
+category: '[ATSC+]'
+flags: [python]
+documentation: |-
+    Qt panel: the eye (equalised symbols vs the 8 levels), the echoes (|equalizer taps|),
+    the MER trace with the picture cliff marked, and transport-packet health. Feed it the
+    Equalizer Probe's 'dial' / 'symbols' / 'taps' and the TEI Scrub's 'stats'.
+templates:
+    imports: from gnuradio import atscplus
+    make: |-
+        <%
+            win = '_%s_win' % id
+        %>\
+        ${win} = atscplus.vsb_panel(label=${label}, cliff_db=${cliff_db}, mer_lo=${mer_lo}, mer_hi=${mer_hi}, parent=self)
+        self.${id} = ${win}
+        ${gui_hint() % win}
+parameters:
+-   {id: label, label: Label, dtype: string, default: 'ATSC 1.0 / 8-VSB'}
+-   {id: cliff_db, label: Picture cliff (dB), dtype: real, default: '15.2'}
+-   {id: mer_lo, label: MER axis min, dtype: real, default: '5', hide: part}
+-   {id: mer_hi, label: MER axis max, dtype: real, default: '35', hide: part}
+-   {id: gui_hint, label: GUI Hint, dtype: gui_hint, hide: part}
+inputs:
+-   {domain: message, id: dial, optional: true}
+-   {domain: message, id: symbols, optional: true}
+-   {domain: message, id: taps, optional: true}
+-   {domain: message, id: stats, optional: true}
+file_format: 1

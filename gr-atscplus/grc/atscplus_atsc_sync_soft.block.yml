@@ -1,0 +1,17 @@
+id: atscplus_atsc_sync_soft
+label: ATSC+ Sync (soft)
+category: '[ATSC+]'
+flags: [python]
+documentation: |-
+    Symbol timing recovery for 8-VSB: real baseband at `rate` in; 832-symbol data
+    segments out, at the symbol rate. Soft-decision variant of dtv.atsc_sync.
+templates:
+    imports: from gnuradio import atscplus
+    make: atscplus.atsc_sync_soft(${rate})
+parameters:
+-   {id: rate, label: Sample rate, dtype: real, default: '1.5*10.76238e6'}
+inputs:
+-   {domain: stream, dtype: float}
+outputs:
+-   {domain: stream, dtype: float, vlen: 832}
+file_format: 1

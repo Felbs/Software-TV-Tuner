@@ -1,0 +1,21 @@
+id: atscplus_atsc_fpll_tight
+label: ATSC+ FPLL (tight)
+category: '[ATSC+]'
+flags: [python]
+documentation: |-
+    Pilot-locked frequency/phase-locked loop for 8-VSB with a tighter loop than the stock
+    dtv.atsc_fpll and an AFC. Complex in at the working rate; the real 8-VSB baseband out.
+    STVT_FPLL_FOLD=1 folds the DC blocker and AGC that normally follow it into this block
+    (the production chain's setting: -42 % CPU, bit-identical).
+templates:
+    imports: from gnuradio import atscplus
+    make: atscplus.atsc_fpll_tight(${rate}, ${alpha}, ${afc_tau_us})
+parameters:
+-   {id: rate, label: Sample rate, dtype: real, default: '1.5*10.76238e6'}
+-   {id: alpha, label: Loop alpha, dtype: real, default: '0.001'}
+-   {id: afc_tau_us, label: AFC tau (us), dtype: real, default: '25'}
+inputs:
+-   {domain: stream, dtype: complex}
+outputs:
+-   {domain: stream, dtype: float}
+file_format: 1

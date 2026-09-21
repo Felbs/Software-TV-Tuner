@@ -19,7 +19,8 @@ add_subdirectory(bindings)
 ########################################################################
 # Install python sources
 ########################################################################
-gr_python_install(FILES __init__.py DESTINATION ${GR_PYTHON_DIR}/gnuradio/atscplus)
+gr_python_install(FILES __init__.py tei_scrub.py eq_probe.py vsb_panel.py video_pane.py
+    DESTINATION ${GR_PYTHON_DIR}/gnuradio/atscplus)
 
 ########################################################################
 # Handle the unit tests

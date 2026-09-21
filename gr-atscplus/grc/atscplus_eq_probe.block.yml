@@ -1,0 +1,25 @@
+id: atscplus_eq_probe
+label: ATSC+ Equalizer Probe
+category: '[ATSC+]'
+flags: [python]
+documentation: |-
+    Taps the equalizer's output and publishes: 'dial' = decision-directed MER in dB (for
+    gr-rxtune and the panel), 'symbols' = a few segments for an eye display, 'taps' = the
+    equalizer's taps (the echoes) when "Equalizer block" names an ATSC+ Equalizer (long),
+    e.g. lambda: self.eq
+    Costs almost nothing: only a slice of each buffer is examined, a few times a second.
+templates:
+    imports: from gnuradio import atscplus
+    make: atscplus.eq_probe(rate_hz=${rate_hz}, segments=${segments}, eq_getter=${eq_getter}, name=${name})
+parameters:
+-   {id: rate_hz, label: Updates per second, dtype: real, default: '5'}
+-   {id: segments, label: Segments per update, dtype: int, default: '48', hide: part}
+-   {id: eq_getter, label: Equalizer block (for taps), dtype: raw, default: 'None', hide: part}
+-   {id: name, label: Dial name, dtype: string, default: 'MER', hide: part}
+inputs:
+-   {domain: stream, dtype: float, vlen: 832}
+outputs:
+-   {domain: message, id: dial}
+-   {domain: message, id: symbols, optional: true}
+-   {domain: message, id: taps, optional: true}
+file_format: 1

@@ -1,0 +1,19 @@
+id: atscplus_atsc_noise_blanker
+label: ATSC+ Noise Blanker
+category: '[ATSC+]'
+flags: [python]
+documentation: |-
+    Impulse-noise blanker on the complex stream: samples above `threshold` x the running
+    RMS are zeroed for `blank_samples`. Off in the production chain by default (STVT_NB=0).
+templates:
+    imports: from gnuradio import atscplus
+    make: atscplus.atsc_noise_blanker(${threshold}, ${blank_samples}, ${alpha})
+parameters:
+-   {id: threshold, label: Threshold (x RMS), dtype: real, default: '3.0'}
+-   {id: blank_samples, label: Blank samples, dtype: int, default: '8'}
+-   {id: alpha, label: RMS tracking alpha, dtype: real, default: '1e-4'}
+inputs:
+-   {domain: stream, dtype: complex}
+outputs:
+-   {domain: stream, dtype: complex}
+file_format: 1

@@ -1,0 +1,22 @@
+id: atscplus_tei_scrub
+label: ATSC+ TEI Scrub
+category: '[ATSC+]'
+flags: [python]
+documentation: |-
+    Replaces transport packets the RS decoder could not correct (TEI bit set) with NULL
+    packets so a player skips them instead of choking, and counts them. 'liveness' =
+    cumulative clean packets (cannot be faked by a dead chain); 'stats' about once a second.
+    The block STVT's live chain has always run, now usable from GRC.
+templates:
+    imports: from gnuradio import atscplus
+    make: atscplus.tei_scrub(scrub=${scrub}, report_s=${report_s})
+parameters:
+-   {id: scrub, label: Replace bad packets, dtype: bool, default: 'True'}
+-   {id: report_s, label: Report every (s), dtype: real, default: '1.0', hide: part}
+inputs:
+-   {domain: stream, dtype: byte, vlen: 188}
+outputs:
+-   {domain: stream, dtype: byte, vlen: 188}
+-   {domain: message, id: liveness, optional: true}
+-   {domain: message, id: stats, optional: true}
+file_format: 1

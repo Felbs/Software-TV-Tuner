@@ -1,0 +1,20 @@
+id: atscplus_atsc_viterbi_soft
+label: ATSC+ Viterbi (soft)
+category: '[ATSC+]'
+flags: [python]
+documentation: |-
+    Soft-decision trellis decoder for 8-VSB (12 interleaved 2/3-rate coders). Equalised
+    832-symbol segments + plinfo in; 207-byte RS-encoded packets + plinfo out.
+    Optional third output: a per-byte SOVA reliability plane for the erasure RS decoder
+    (STVT_SOVA=1 in the production chain).
+templates:
+    imports: from gnuradio import atscplus
+    make: atscplus.atsc_viterbi_soft()
+inputs:
+-   {domain: stream, dtype: float, vlen: 832}
+-   {domain: stream, label: plinfo, dtype: short, vlen: 2}
+outputs:
+-   {domain: stream, dtype: byte, vlen: 207}
+-   {domain: stream, label: plinfo, dtype: short, vlen: 2}
+-   {domain: stream, label: reliability, dtype: byte, vlen: 207, optional: true}
+file_format: 1
