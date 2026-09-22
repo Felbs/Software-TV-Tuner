@@ -5,7 +5,7 @@
   atsc1_replay.grc    headless: an 8 MS/s cf32 capture in, transport stream to a file (the
                       byte-for-byte check against tools/tv_live.py / tv_replay.py)
   atsc1_live_qt.grc   Qt: a SoapySDR radio in; spectrum, the 8-VSB panel (eye, echoes, MER),
-                      the picture in the window (mpv); transport stream on UDP and to a file
+                      the picture in the window (mpv); transport stream on UDP (record with atsc1_replay or a File Sink)
 
 THE CHAIN IS THE PRODUCTION CHAIN, block for block: tools/tv_live.py with the STVT_* defaults
 the day-to-day tools use (adaptive-tv/chain_lab.py BASE_ENV): 8 MS/s -> x25/32 -> 6.25 MS/s ->
@@ -109,7 +109,6 @@ def build_live():
         blk("antenna", "parameter", 920, 12, label="Antenna port", type="str", value='""', short_id="a"),
         blk("gain", "parameter", 1080, 12, label="Overall gain (dB)", type="eng_float", value="30", short_id="g",
             comment="or the gain elements, from gr-rxtune"),
-        blk("ts_out", "parameter", 1260, 12, label="Also record the TS to", type="str", value='""', short_id="o"),
         blk("udp_port", "parameter", 1260, 110, label="UDP port for the player", type="intx", value="5004",
             short_id="p"),
         blk("src", "soapy_custom_source", 8, y + 80, driver="driver", type="fc32", nchan=1, dev_args='""',
@@ -125,14 +124,12 @@ def build_live():
             header="0", payloadsize=1316, send_eof="False", vlen=1, comment="7 TS packets per datagram"),
         blk("video", "atscplus_video_pane", 700, y + 560, url='"udp://127.0.0.1:"+str(udp_port)+"?fifo_size=1000000&overrun_nonfatal=1"',
             player='"mpv"', vid=0, aid=0, player_args='""', start_delay_s=4, gui_hint="0,1,2,1"),
-        blk("ts", "blocks_file_sink", 980, y + 740, type="byte", file="ts_out", unbuffered="False", append="False",
-            vlen=1, comment="empty name = no file"),
     ]
     cb, cc = chain(y)
     c = [["src", "0", "scale", "0"], ["src", "0", "spectrum", "0"], ["eq", "0", "probe", "0"],
          ["probe", "dial", "panel", "dial"], ["probe", "symbols", "panel", "symbols"],
          ["probe", "taps", "panel", "taps"], ["tei", "stats", "panel", "stats"],
-         ["v2s", "0", "udp", "0"], ["v2s", "0", "ts", "0"]] + cc
+         ["v2s", "0", "udp", "0"]] + cc
     return {"options": options("atsc1_live_qt", "ATSC 1.0 (8-VSB) television in GNU Radio", True,
                                "The production STVT chain on a radio, with the picture in the window."),
             "blocks": b + cb, "connections": c,

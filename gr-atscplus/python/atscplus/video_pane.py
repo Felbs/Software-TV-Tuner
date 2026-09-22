@@ -54,7 +54,9 @@ class video_pane(gr.basic_block, QtWidgets.QWidget):
         exe = shutil.which(self.player) or self.player
         cmd = [exe, f"--wid={int(self.winId())}", "--no-border", "--no-osc", "--keepaspect=yes",
                "--force-window=yes", "--profile=low-latency", "--cache=yes", "--demuxer-max-bytes=64MiB",
-               "--demuxer-lavf-analyzeduration=3", "--really-quiet"]
+               "--demuxer-lavf-analyzeduration=3", "--idle=yes", "--loop-playlist=inf", "--really-quiet"]
+        # --idle / --loop-playlist: a broken stream (a tuning loop's deaf cells) ends the "file";
+        # instead of exiting, the player reopens the URL and waits for packets
         if self.vid:
             cmd.append(f"--vid={self.vid}")
         if self.aid:
@@ -81,10 +83,17 @@ class video_pane(gr.basic_block, QtWidgets.QWidget):
     def _check(self):
         if self.proc is not None and self.proc.poll() is not None and not self._stopping:
             self.proc = None
-            if time.time() - self._t_start > 60:       # it ran for a while: that was not a start-up failure
+            if time.time() - self._t_start > 20:       # it ran for a while: that was not a start-up failure
                 self.n_starts = 0
             self.note.setText("player exited - restarting")
             QtCore.QTimer.singleShot(2000, self._spawn)
+        elif self.proc is None and not self._stopping and self.n_starts > self.max_restarts:
+            # A tuning loop shatters the stream on purpose (deaf cells); the player gives up, and
+            # the budget must come back once the stream is healthy again - so retry, slowly.
+            if time.time() - self._t_start > 30:
+                self.n_starts = self.max_restarts
+                self._t_start = time.time()
+                self._spawn()
 
     def _kill(self):
         self._stopping = True

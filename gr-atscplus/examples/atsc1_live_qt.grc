@@ -112,22 +112,6 @@ blocks:
     - 12
     rotation: 0
     state: enabled
-- name: ts_out
-  id: parameter
-  parameters:
-    label: Also record the TS to
-    type: str
-    value: '""'
-    short_id: o
-  states:
-    bus_sink: false
-    bus_source: false
-    bus_structure: null
-    coordinate:
-    - 1260
-    - 12
-    rotation: 0
-    state: enabled
 - name: udp_port
   id: parameter
   parameters:
@@ -256,24 +240,6 @@ blocks:
     coordinate:
     - 700
     - 940
-    rotation: 0
-    state: enabled
-- name: ts
-  id: blocks_file_sink
-  parameters:
-    type: byte
-    file: ts_out
-    unbuffered: 'False'
-    append: 'False'
-    vlen: '1'
-    comment: empty name = no file
-  states:
-    bus_sink: false
-    bus_source: false
-    bus_structure: null
-    coordinate:
-    - 980
-    - 1120
     rotation: 0
     state: enabled
 - name: fold
@@ -527,10 +493,6 @@ connections:
 - - v2s
   - '0'
   - udp
-  - '0'
-- - v2s
-  - '0'
-  - ts
   - '0'
 - - scale
   - '0'
