@@ -11,8 +11,11 @@ import argparse, math, os, re, subprocess, time
 from pathlib import Path
 
 PY = sys.executable
-TV_LIVE = Path(r"Z:\src\magic-tv-decoder\tools\tv_live.py")
-LIVE = Path(r"Z:\src\magic-tv-decoder\tools\data\tv_live\live.ts")
+# The repo this file lives in — never a hardcoded dev-box path (on Linux the
+# Z:\ path spawned nothing and every cell reported MER 0.00 / in_rms 0.0).
+ROOT = Path(__file__).resolve().parents[1]
+TV_LIVE = Path(os.environ.get("STVT_TV_LIVE", ROOT / "tools" / "tv_live.py"))
+LIVE = Path(os.environ.get("STVT_LIVE_TS", ROOT / "tools" / "data" / "tv_live" / "live.ts"))
 SDRPLAY_DLL = r"C:\Program Files\SDRplay\API\x64"
 LOG = Path(os.environ.get("TEMP", ".")) / "mer_gain_cal.log"
 
