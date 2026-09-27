@@ -94,6 +94,7 @@ Pick your platform — each guide is a short, copy-paste walkthrough:
 |---|---|
 | 🪟 **Windows** | [docs/install/windows.md](docs/install/windows.md) |
 | 🐧 **Linux** | [docs/install/linux.md](docs/install/linux.md) |
+| 🐧 **Arch / Omarchy** | [docs/install/arch.md](docs/install/arch.md) |
 | 🪟🐧 **WSL** | [docs/install/wsl.md](docs/install/wsl.md) |
 | 🍓 **Raspberry Pi** | [docs/install/raspberry-pi.md](docs/install/raspberry-pi.md) |
 
