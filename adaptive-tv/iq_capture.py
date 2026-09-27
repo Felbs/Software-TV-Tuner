@@ -76,6 +76,17 @@ def main():
     # sample drops that masqueraded as RF damage in every specimen.
     # Buffer the whole capture in RAM (<=60 s ~ 1.9 GB), write ONCE.
     if args.secs <= 60:
+        # RAM guard (2026-09-27): this capture is held whole in memory and then demodulated in
+        # float (~4x the raw size). A 600 s AIS run asked an 8 GB laptop for ~20 GB and
+        # systemd-oomd killed the whole session. Refuse before allocating; the number says how long fits.
+        _need = 2 * n_want * 2 * 4
+        try:
+            _avail = __import__("os").sysconf("SC_AVPHYS_PAGES") * __import__("os").sysconf("SC_PAGE_SIZE")
+        except (ValueError, OSError, AttributeError):
+            _avail = None
+        if _avail and _need > 0.6 * _avail:
+            raise MemoryError(f"capture of {n_want} samples needs ~{_need / 1e9:.1f} GB with {_avail / 1e9:.1f} GB free "
+                              f"- shorten it to about {int(n_want * 0.6 * _avail / _need)} samples ({0.6 * _avail / _need:.0%} of the request)")
         ram = np.empty(2 * n_want, np.int16)
         while got < n_want and time.time() - t0 < args.secs * 3 + 10:
             r = sdr.readStream(st, [buf], 65536, timeoutUs=500000)
