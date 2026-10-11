@@ -87,3 +87,9 @@ cmake .. && make -j"$(nproc)" && sudo make install && sudo ldconfig
   instead — same base, with Pi-specific tips.
 
 Next: [what to run once it's installed →](../../README.md#run)
+
+## Running it well: the live HD recipe
+
+Per-boot CPU tuning, the hands-off `tools/stvt_run.sh` supervisor, the chain + player split,
+the noise-drought health check and every `STVT_*` knob are in
+[linux-live-recipe.md](linux-live-recipe.md).

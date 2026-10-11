@@ -1,392 +1,122 @@
-# Software TV Tuner (STVT) — Linux
+# Software TV Tuner (STVT)
 
-A free and open source software TV tuner. Watch free over-the-air
-television on an SDR (Software Defined Radio). It's built to run
-unattended for hours on marginal indoor antennas — the watchdogs and
-the equalizer's tracking margin keep a watchable picture up where
-off-the-shelf tuners give up.
+A free and open source software TV tuner: watch over-the-air ATSC
+broadcast television on any SoapySDR-supported SDR. A custom GNU Radio
+module (`gr-atscplus`) decodes 8-VSB into a live MPEG-TS; a CLI
+(`tv_tuner.py`) scans, builds a live TV guide from broadcast PSIP/EIT,
+tunes, plays, records to MP4, re-streams to RTMP, and overlays closed
+captions.
 
 📺 **Watch the full Windows install, from clone to live TV, in one take:**
 https://youtu.be/jhsTTnoqGTs
 
-It's also a **DVR**: read the on-air program guide, schedule shows,
-record whole muxes (several subchannels at once), and browse the
-results. A **channel surfer** flips channels right in the player like a
-remote, captions can be **overlaid on the picture**, and a **signal
-meter** helps you aim an antenna. See the sections below.
+📐 **[System architecture](ARCHITECTURE.md)** — the full signal chain from RF to MPEG-TS, rendered as a diagram.
 
-The pipeline runs hours of live TV on marginal indoor antennas
-without manual intervention: three independent watchdogs (decoder,
-ffmpeg, optional player) detect equalizer drift, ffmpeg stalls, and
-SDR dropouts and respawn the affected stage automatically. We've
-watched full sports games, news blocks, and overnight programming
-end-to-end on this stack. If your antenna can lock the carrier, the
-software keeps the picture up.
+New in this release: **`adaptive-tv/` — a universal tuning layer that
+calibrates itself to whatever antenna you plug in.** It will *try*
+any antenna — our lab rig has pulled watchable TV from a discone
+scanner antenna and $10 rabbit ears — but **dedicated TV antennas
+work best**: broadcast TV is horizontally polarized, and TV antennas
+are built to match (a vertical whip gives away real dB to
+cross-polarization before the software ever gets a vote). Whatever
+you have, the tuner measures it honestly. It measures the live MER
+(Modulation Error Ratio) straight out of the decoder's own equalizer,
+grid-searches the gain settings, surveys channels, A/Bs the recovery
+options, and tells you honestly — in dB — whether an antenna can
+decode at your location and what's limiting it if not. See
+[The science](#the-science) for how.
 
-> **Looking for the Windows build?** That lives on the `windows` branch.
-> This README and branch are Linux-only.
+Latest additions (each earned its place through a live A/B):
 
-## Install — three steps
+- **Turbo decoding (stage 2b, "trellis pinning")** — on an RS codeword
+  failure the decoder returns to the post-equalizer soft symbols and
+  re-runs a full-traceback Viterbi over the affected trellis spans
+  with bytes of *successfully decoded* codewords pinned as branch
+  constraints, then retries RS+GMD. Converts 50-70% of failed packets
+  on marginal signals at ~1-4% CPU, zero measured miscorrections. A
+  failure-rate EMA gate stands it down above ~4% channel failure (an
+  expensive per-failure rescue path MUST be rate-gated or it
+  self-amplifies exactly when the channel is worst — we measured the
+  death spiral before adding the gate). `STVT_TURBO=1`, requires the
+  SOVA reliability plane (`STVT_SOVA=1`).
+- **~10-second channel changes** — three cooperating layers: the SDR
+  session persists across retunes (runtime `set_frequency` /
+  `set_antenna` on the Soapy source instead of teardown + vendor
+  re-handshake; command-file protocol with ack and fallback gates);
+  the player tunes from a per-program **PID cache** seeded by every
+  scan (a first visit to any channel starts warm); and channels the
+  quality model knows are healthy skip the cautious decode-margin
+  re-measure. Measured: same-mux hop ~3 s, cross-mux ~9.5 s to
+  flowing video; every fallback lands on the classic path.
+- **The Knob of Time** — a learned model of diurnal variation:
+  per-channel, per-antenna 24-hour quality curves built from the
+  decoder's own telemetry (one row per watched minute plus one per
+  scan dwell), recency-weighted-median estimator with confidence
+  tiers. The math, in three lines: the equalizer's field-sync error is a free MER meter, `MER = 20·log10(5 / fs_err_rms)` (~41 Hz); each hour-bin's estimate is the recency-weighted median with `w = 0.5^(age / 14 days)`; a bin is trusted only with n ≥ 8 samples over ≥ 2 distinct days (single-day bins lie). Full derivations: [`docs/knob_of_time.md`](docs/knob_of_time.md).
+  Optional overnight sweep-trainer, plus a "frontier patrol" that
+  re-tries any (channel, antenna) pair whose estimate sits within
+  ~2 dB of the decode cliff — which is how two written-off antennas
+  got un-written-off (see field results below).
+- **Deep Tune, the channel doctor (panel button)** — for any channel,
+  watchable or not: baseline, antenna race, bounded gain grid (regime
+  and IFGR seed only — the hardware AGC servo owns level tracking),
+  failure-class diagnosis, plain-language verdict. Winning recipes
+  persist per channel and every future tune consults them.
+- **Audited self-knowledge** — the Market Brain card shows how much of
+  the local market is mapped and, critically, *audited* forecast
+  accuracy: each watched minute on a confidently-modeled channel logs
+  a (predicted, measured) MER pair; the card reports the rolling mean
+  absolute error. The model's accuracy is a measurement, not a claim.
+- **Honest quality labels** — guide badges and the status chip are
+  driven by *measured packet loss*, not signal-strength proxies: fast
+  faders alias any MER median (sub-second fades against the ~41 Hz
+  field-sync sampling) and can read "flawless" while losing 10%/min.
+- **Antenna lifecycle controls** — NEW ANTENNA restarts a port's
+  learned history when you physically swap hardware (epoch marker;
+  old rows archived, never deleted); reset-all-learning is the
+  double-confirmed factory reset of every learned artifact.
 
-Tested on **Ubuntu 22.04 / 24.04** (bare-metal). If you're on Windows, see
-"Don't run under WSL2" below before you start.
+Field results from the reference market (same wires, better math): a
+scanner discone with a long "can't do ATSC" record decoded its VHF-hi
+mux nine-for-nine overnight once the modern stack retried it; a
+passive panel antenna with a recorded "SNR-limited, undecodable"
+verdict locked three muxes and played 0.02%-loss video on its first
+modern scan. Moral for fellow experimenters: **re-try condemned
+hardware after every decoder improvement — the cliff moves.**
 
-### 1. Clone and bootstrap (~5 minutes)
+---
 
-```bash
-git clone https://github.com/Felbs/Software-TV-Tuner.git
-cd Software-TV-Tuner
-chmod +x bootstrap.sh && ./bootstrap.sh
-```
+## Install
 
-`bootstrap.sh` apt-installs GNU Radio 3.10 + ffmpeg + SoapySDR + the
-Python bindings, builds and installs the `gr-atscplus` OOT module,
-and pip-installs optional player extras. After it finishes:
+Pick your platform — each guide is a short, copy-paste walkthrough:
 
-```bash
-python3 -c "from gnuradio import atscplus; print('OK')"   # should print: OK
-```
-
-### 2. Install your SDR driver
-
-**SDRplay (RSPdx, RSP1A, RSPduo)** — needs the vendor API *and* a
-SoapySDRPlay3 build with our ring-buffer patch. The patch is the
-single biggest quality fix on Linux; without it you get OsO sample
-overruns several times a second.
-
-```bash
-# 2a. SDRplay API v3 (vendor installer)
-wget https://www.sdrplay.com/software/SDRplay_RSP_API-Linux-3.15.2.run
-chmod +x SDRplay_RSP_API-Linux-3.15.2.run
-sudo ./SDRplay_RSP_API-Linux-3.15.2.run
-sudo systemctl enable --now sdrplay
-
-# 2b. SoapySDRPlay3 with the enlarged ring buffer
-sudo apt-get install -y libsoapysdr-dev
-git clone https://github.com/pothosware/SoapySDRPlay3.git
-
-# IMPORTANT: patch the ring buffer BEFORE building. Bumps 2 MiB / 83 ms
-# of headroom up to 32 MiB / 1.3 s. Re-run after any SoapySDRPlay3
-# upstream pull.
-~/Software-TV-Tuner/tools/patch_soapy_ringbuffer.sh ./SoapySDRPlay3
-
-cd SoapySDRPlay3 && mkdir build && cd build
-cmake .. && make -j"$(nproc)" && sudo make install && sudo ldconfig
-cd ~  # back to home
-```
-
-**RTL-SDR, HackRF, BladeRF, Airspy** — `bootstrap.sh` already pulled
-the SoapySDR module via apt. Nothing more to do.
-
-Verify your SDR is visible:
-
-```bash
-SoapySDRUtil --probe    # should list driver=... + antennas + sample rates
-```
-
-If `--probe` finds nothing, the driver isn't installed correctly —
-check vendor docs and replug the SDR.
-
-### 3. Per-boot CPU tuning (re-run after every reboot)
-
-The 8-VSB matched filter is single-threaded and pinned to one core.
-Linux's default `schedutil` governor + deep C-states starve it,
-causing OsO overruns → picture freezes. One script fixes everything:
-
-```bash
-sudo tools/fix_linux_tuning.sh
-```
-
-It sets the CPU governor to `performance`, disables USB autosuspend
-on the SDRplay, raises the realtime priority limit, and holds CPUs
-out of deep C-states. On a 2017-era CPU this is the difference
-between freezing after ~90 s and running for an hour. On a modern
-CPU it matters less but still helps. **Re-run after every reboot** —
-the governor resets on boot.
-
-### First run
-
-```bash
-python3 tools/tv_tuner.py
-```
-
-The interactive picker shows every channel in your DMA grouped by RF
-frequency, with on-now show titles, ratings, and signal strength
-pulled live from PSIP / EIT after a successful scan. The default
-table covers DC/Baltimore — edit `tools/default_stations.py` for
-your area's RF channels and callsigns.
-
-For a separate window per stream (so the picker stays clean), make
-sure one of `gnome-terminal`, `konsole`, `xfce4-terminal`, or
-`xterm` is installed; the launcher detects whichever is available.
-Headless environments without a terminal emulator just print the
-streaming output inline.
-
-### Don't run under WSL2
-
-The full receive chain (bootstrap → decoder build → SDR enumeration →
-scan → equalizer lock) runs cleanly under WSL2 Ubuntu via the
-Windows-side SDR exposed through SoapyRemote. **However, sustained
-sample-stream integrity over WSL2's NAT loopback is not reliable
-enough for end-to-end MPEG-TS decode** — we measured ~1.8% sample
-loss + ~22k UDP-buffer overflow events per second, which the FS
-checker survives but Reed-Solomon decoding does not. The equalizer
-locks textbook-clean but the TS downstream is corrupted, so ffmpeg
-never sees a valid program.
-
-This is a WSL2 USB / network passthrough limitation, not a project
-limitation. Run it natively: dual-boot Ubuntu, native Linux desktop,
-or any Linux machine with USB plugged directly into the host.
-
-## Watch live HD — the proven recipe
-
-This is the exact two-process setup verified end-to-end on bare-metal
-Ubuntu (SDRplay RSPdx, native Wayland desktop): one process decodes
-the broadcast to a growing `live.ts`, a second plays one program
-from it in mpv.
-
-`tv_tuner.py` (the all-in-one launcher with scan + guide + watchdogs)
-also works, but the two-process split below is the most robust for
-sustained viewing and is what the troubleshooting section assumes.
-
-### Easiest: one command, hands-off (recommended)
-
-```bash
-tools/stvt_run.sh 34 3        # RF channel 34, play program 3 (HD 1080)
-```
-
-`stvt_run.sh` supervises the whole pipeline for you: it starts the
-decoder chain with the lean config, starts the HD player once the
-chain locks, and **auto-recovers**. On a modest CPU the chain
-periodically slips into a "noise drought" (locks the carrier but
-decodes garbage — see Troubleshooting); the supervisor detects it and
-restarts the chain, then brings the player back, with a hard cap on
-restarts so a dead SDR can't spin forever. A drought shows up as a
-~40 s blip (picture freezes, window closes and reopens) instead of a
-permanent freeze. Stop everything with:
-
-```bash
-pkill -f stvt_run.sh; pkill -f tv_live.py; pkill -f stvt_play_hd.sh
-```
-
-The two steps below are what `stvt_run.sh` runs internally — use them
-directly if you want to drive the chain and player by hand.
-
-### 1. Start the decoder chain
-
-```bash
-cd tools
-# Lean real-time config — for modest / older CPUs (e.g. Ryzen 1600X).
-# Trades a little decode margin for throughput so the single-thread
-# matched filter keeps up. This is the config validated for sustained
-# live HD.
-export STVT_RS=stock STVT_VITERBI=hard STVT_EQ=long
-export STVT_SPS=1.1 STVT_RRC_SYMS=4 STVT_TEISCRUB=0
-export STVT_IFGR=59 STVT_RFGAIN_SEL=5 STVT_ANTENNA="Antenna A"
-python3 tv_live.py --rf 34          # writes tools/data/tv_live/live.ts
-```
-
-On a **fast modern CPU** you can run full quality instead — drop the
-lean knobs (`STVT_SPS`, `STVT_RRC_SYMS`, `STVT_TEISCRUB`) and it
-defaults to `SPS=1.5`, 8-symbol RRC, TEI scrub on. Pick your channel
-with `--rf N` (find N by running `python3 tv_tuner.py --scan` once,
-or from your local ATSC channel listings).
-
-### 2. Watch one program in HD
-
-An ATSC channel is a **multiplex of several programs** (often 1–2 HD
-1080 + some SD subchannels). Point a player at the raw multi-program
-stream and it picks a track at random — you may get "Invalid frame
-dimensions 0x0" garbage even though the decode is perfect. The
-supervisor below stream-copies **one** program and feeds it to mpv
-with a buffer cushion, and self-heals if playback freezes:
-
-```bash
-# from the repo root, in a second terminal:
-tools/stvt_play_hd.sh 3        # play program 3 (an HD 1080 feed)
-```
-
-List the programs to choose one whose video is `1920x1080`:
-
-```bash
-ffprobe -show_programs tools/data/tv_live/live.ts
-```
-
-`tools/stvt_play_hd.sh [program] [tailMB]` runs `tail -c | ffmpeg
--map 0:p:N -c copy | mpv` with all the flags that took this project
-a while to get right (`-flush_packets`, last-N-bytes tail, software
-decode, a cache cushion), plus a bounded watchdog that relaunches
-the player — never the chain — if it freezes.
-
-### 3. Verify it's actually working
-
-```bash
-cd tools/data/tv_live
-
-# OsO (sample-overflow) count should stay LOW and not climb ~1/s:
-grep -c OsO tv_tuner.tv_live.log
-
-# The single most useful health check — is the chain emitting real TV
-# or noise? A healthy mux has ~20-40 unique PIDs. Hundreds/thousands =
-# the chain locked the carrier but is decoding NOISE (a "drought");
-# restart the chain.
-tail -c 2000000 live.ts | python3 -c '
-import sys; d=sys.stdin.buffer.read(); s=set(); i=d.find(b"\x47")
-while i+188<=len(d):
-    if d[i]==0x47: s.add(((d[i+1]&0x1f)<<8)|d[i+2])
-    i+=188 if d[i]==0x47 else 1
-print(len(s), "unique PIDs")'
-```
-
-### Environment / config reference
-
-All knobs are env vars read by `tv_live.py` (defaults in parentheses):
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `STVT_RS` | `stock` | Reed-Solomon decoder: `stock` or `erasure` |
-| `STVT_VITERBI` | `hard` | Viterbi: `hard` (fast) or `soft` (heavier) |
-| `STVT_EQ` | `long` | Equalizer variant |
-| `STVT_SPS` | `1.5` | Internal samples/symbol. `1.1` = lean (less CPU); `1.0` breaks timing |
-| `STVT_RRC_SYMS` | `8` | Matched-filter RRC half-span. `4` = lean (fewer taps) |
-| `STVT_TEISCRUB` | `1` | Rewrite RS-failed packets to NULL. `0` = lean (skip, saves CPU) |
-| `STVT_IFGR` | `59` | SDRplay IF gain reduction (20–59 dB) |
-| `STVT_RFGAIN_SEL` | `5` | SDRplay LNA stage selector |
-| `STVT_ANTENNA` | `Antenna A` | SDRplay antenna port |
-| `STVT_FPLL_FOLD` | `0` | Fold the DC-blocker + AGC into the FPLL's output loop (one pass instead of three blocks). Bit-exact; ~6% less CPU. `stvt_run.sh` sets `1`. |
-| `STVT_FPLL_BLOCK_NCO` | `0` | Block-wise carrier loop in the FPLL — generate the NCO mixer by complex recurrence and run the loop filter once per block instead of per sample. Decode-identical; ~6–8% less CPU on top of the fold. `stvt_run.sh` sets `1`. |
-| `STVT_RXF_FUSED` | `0` | Fuse the resampler + matched filter into one fixed-ratio stage — replaces the CPU-heavy arbitrary polyphase resampler. ~+4% real-time on a CPU-bound box; locks clean. See [`docs/smooth-live-recipe.md`](docs/smooth-live-recipe.md). |
-| `STVT_CC` | `0` | Closed captions. `1` = extract the video's embedded EIA-608 (`mpv --sub-create-cc-track`) and show them. |
-
-> **Performance defaults.** `tools/stvt_run.sh` — the recommended way to watch —
-> enables `STVT_FPLL_FOLD=1` and `STVT_FPLL_BLOCK_NCO=1` by default. Together they
-> cut roughly **12–14% off the live decode CPU** with **no change to picture
-> quality** (the fold is bit-exact; block-NCO is decode-identical to within RS
-> noise). Both were validated by a deterministic A/B, a live soak, and a 10-hour
-> all-channel endurance run — see [`docs/cpu-optimization.md`](docs/cpu-optimization.md).
-> To A/B or revert, set either to `0`.
-
-## Configure for your SDR + antenna
-
-The defaults assume an **SDRplay RSPdx with the TV antenna on
-"Antenna A"**. If you have a different SDR or your feed is on a
-different physical port, edit a few constants in `tools/config.py`.
-
-### What SDRs work
-
-This project talks to the SDR through **SoapySDR**, so in principle any
-SoapySDR-supported device works. In practice we develop and test against
-the **SDRplay** family — that's the only hardware verified end-to-end. The
-others are SoapySDR-supported and *should* work, but are **untested
-in-house**; the notes below are from their published specs, not our bench.
-
-| SDR | Status | Notes |
-|---|---|---|
-| **SDRplay RSPdx** | **reference (tested)** | 8 MS/s, 14-bit, three antenna ports |
-| **SDRplay RSP1A / RSPduo** | same driver | one antenna port (RSP1A) or two (RSPduo); same SoapySDRPlay3 path as the RSPdx |
-| **HackRF One** | untested | 8 MS/s available (enough for ATSC); gain stages are LNA + VGA, no IFGR |
-| **Airspy R2 / Mini** | untested | 10 MS/s; different gain ladder names |
-| **BladeRF** | untested | wide bandwidth + good SNR on paper |
-| **RTL-SDR (R820T2 dongle)** | **not viable** | maxes out ~2.4–2.88 MS/s. ATSC occupies ~5.4 MHz and needs >6 MS/s to sample, so an RTL-SDR physically can't capture a full 6 MHz channel — don't expect ATSC decode regardless of signal strength |
+| Platform | Guide |
+|---|---|
+| 🪟 **Windows** | [docs/install/windows.md](docs/install/windows.md) |
+| 🐧 **Linux** | [docs/install/linux.md](docs/install/linux.md) |
+| 🐧 **Arch / Omarchy** | [docs/install/arch.md](docs/install/arch.md) |
+| 🪟🐧 **WSL** | [docs/install/wsl.md](docs/install/wsl.md) |
+| 🍓 **Raspberry Pi** | [docs/install/raspberry-pi.md](docs/install/raspberry-pi.md) |
 
 All three run the same tuner — the only difference is how you install the
 dependencies and build the decoder module.
 
-```bash
-SoapySDRUtil --probe
-```
-
-That should print at minimum a `driver=...` line and list of antennas
-+ sample-rate ranges. If it prints nothing or "No supported devices
-found", your SoapySDR drivers aren't installed for that SDR — see
-your SDR vendor's docs (e.g. SoapySDRPlay3 for SDRplay,
-SoapyHackRF for HackRF).
-
-For deep diagnostics, we ship two helper scripts:
-
-```bash
-python3 tools/probe_sdr.py            # antennas, sample-rate, gain elements
-python3 tools/probe_throughput.py     # streaming sustained-rate test
-```
-
-### Pick the right antenna port
-
-In `tools/config.py`:
-
-```python
-ATSC_ANTENNA = "Antenna A"   # SDRplay RSPdx port label
-```
-
-The string must match what your SDR's driver advertises. Run
-`tools/probe_sdr.py` to see the exact names. Examples:
-
-- **SDRplay RSPdx**: `Antenna A`, `Antenna B`, `Antenna C`, or `HiZ`
-- **SDRplay RSP1A**: just `RX` (single port)
-- **HackRF**: `TX/RX` (single port)
-- **RTL-SDR**: `RX` (single port)
-
-If your SDR has only one port, the value doesn't matter much — but
-it does have to be a string the driver recognizes, or the call
-fails silently. If `tools/probe_sdr.py` prints `('A', 'B', 'C')`
-instead of `('Antenna A', 'Antenna B', 'Antenna C')`, use the
-short-form names.
-
-### Gain settings
-
-The two knobs in `tools/config.py`:
-
-```python
-ATSC_IF_GAIN_REDUCTION = 59   # SDRplay-specific; range 20-59 dB
-ATSC_RFGAIN_SEL        = 5    # SDRplay-specific; LNA stage selector
-```
-
-Both are SDRplay terminology. Other SDRs use different names:
-
-- **HackRF**: replace with `LNA` (0–40 dB, 8 dB steps) and `VGA`
-  (0–62 dB, 2 dB steps).
-- **RTL-SDR**: a single `TUNER` gain (0–49 dB), and AGC bool.
-- **Airspy**: `LNA`, `MIX`, `VGA` (0–15 each), or `linearity` /
-  `sensitivity` presets.
-
-Rule of thumb: **start with a strong UHF station (RF 14–36)**, set
-gain so the raw signal sits at about 60–80% of the ADC's range, and
-verify lock. Too high → clipping → equalizer fails. Too low →
-quantization noise → no lock. The included `tools/probe_sdr.py`
-prints the device's full gain range so you can pick a starting
-point.
-
-### Configure for non-DC markets
-
-Edit `tools/default_stations.py` to match your area's RF channels +
-callsigns. The format is documented in the file. The first scan
-(`python3 tools/tv_tuner.py --scan`) populates real PSIP data for any
-channel that locks, but the static table is what shows up in the
-picker before that.
 
 ## Run
 
-```bash
-# Interactive: banner, channel picker, live channel-changer
+```sh
+# Linux / Mint / Pi shown; on Windows use:  python tools\tv_tuner.py
+# Interactive: guide, channel picker, live channel-changer
 python3 tools/tv_tuner.py
 
-# Direct: tune RF36 (Fox 5 DC) and play locally
+# Direct tune + play
 python3 tools/tv_tuner.py --rf 36
 
-# Pick a subchannel (4.1 NBC = --program 1, 4.4 Oxygen = --program 4)
+# Subchannel select / record / stream / captions
 python3 tools/tv_tuner.py --rf 34 --program 1
-
-# Record to MP4 (no playback window)
-python3 tools/tv_tuner.py --rf 36 --no-play --record fox5_news.mp4
-
-# Stream live to Twitch / YouTube / any RTMP destination
-python3 tools/tv_tuner.py --config-set twitch rtmp://live.twitch.tv/app/YOUR_KEY
+python3 tools/tv_tuner.py --rf 36 --no-play --record news.mp4
 python3 tools/tv_tuner.py --rf 36 --stream twitch
-
-# Closed captions on (English by default, --cc-channel 2 for Spanish)
 python3 tools/tv_tuner.py --rf 36 --cc
-
-# Dry-run: print the planned subprocess commands without spawning
-python3 tools/tv_tuner.py --rf 36 --dry-run
 ```
 
 At the interactive prompt: row number or `5.1` tunes, `g` refreshes
@@ -446,109 +176,130 @@ straight off the decoder:
   **🧠 MARKET BRAIN** (market coverage + audited forecast accuracy,
   with the reset-all-learning control).
 
-- **`ccextractor`** if installed on PATH — handles both CEA-608 and
-  CEA-708. `sudo apt install ccextractor` to add. Recommended.
-- **Bundled pure-Python decoder** (`tools/atsc_cc.py`) — CEA-608
-  only, no external deps. Always available. Implements:
-  full TS demux (PAT → PMT → video PID), MPEG-2 picture
-  reorder by `temporal_reference` so B-frame captions arrive
-  in display order, CC1/CC2 channel demux, doubled-control-code
-  suppression, and pop-on / roll-up / paint-on mode buffering.
+The panel also runs a **chain doctor**: if the vendor SDR service
+crashes mid-watch (it happens), the doctor notices the silent chain
+death within ~40 s and retunes automatically, with honest banners and
+a heal-rate cap.
 
-With `tv_tuner.py --cc`, captions appear in their own console window
-beside the TV. To overlay them **on the picture** (like a real TV),
-use the dedicated mpv launcher:
+Everything the panel reports is measured on *your* signal, at *your*
+location — nothing is hardcoded to a market.
 
-```bash
-# captions burned onto the mpv video via its OSD (program 3, CC1 English)
-tools/stvt_watch_cc_osd.sh 3 1
-# CC2 (often Spanish on bilingual stations):
-tools/stvt_watch_cc_osd.sh 3 2
-# tune timing if captions lead/lag the picture:
-STVT_CC_DELAY=4.5 tools/stvt_watch_cc_osd.sh 3 1
+## Tune ANY antenna — the universal layer (`adaptive-tv/`)
+
+The core problem with SDR TV is that every antenna + amp + cable
+combination needs different settings, and the difference between
+"perfect TV" and "nothing at all" is a ~15.2 dB SNR cliff you
+couldn't see... until now. These tools read the decoder's own
+equalizer error as a live **MER meter** and calibrate around it:
+
+```powershell
+# THE one command: sweep -> classify every carrier -> calibrate gain ->
+# judge real decoded quality -> honest verdict + saved antenna profile
+python adaptive-tv\tune_antenna.py --name my-antenna
+python adaptive-tv\tune_antenna.py --antenna "Antenna B" --biast   # LNA port
+
+# Live MER dashboard on one channel: are we above the 15.2 dB cliff?
+python adaptive-tv\mer_meter.py --rf 31
+
+# Aim-by-ear: continuous tone, pitch = MER (880 Hz = decodable).
+# Bluetooth-headphone safe. Rotate the antenna for the highest pitch.
+python adaptive-tv\mer_meter.py --rf 31 --tone
+
+# Which channels does this antenna see? (per-port carrier scan)
+python adaptive-tv\ch_scan.py --antenna "Antenna A"
+
+# Find the optimal gain for THIS antenna chain (grid search on MER)
+python adaptive-tv\mer_gain_cal.py --rf 31
+
+# Squeeze a marginal signal: A/B the recovery configs, judged by
+# actual decoded fps + error rate
+python adaptive-tv\config_shootout.py --rf 31 --ifgr 36 --rfgain 2
+
+# Powering a bias-tee LNA? add --biast to any of the above
+# (RSPdx: bias-tee output is on Antenna B only)
 ```
 
-It decodes CEA-608 from the program with `atsc_cc.py` and pushes each
-line into the running mpv over its JSON IPC socket. (Verified live on
-native Linux — clean real-time English/Spanish captions.) The video
-uses mpv's `gpu` VO by default; override with `STVT_MPV_VO` if needed.
+Supporting diagnostics: `quality_judge.py` (0–100 decode score via
+ffmpeg null-decode), `gain_sweep.py` (flat header-count vs gain ⇒
+SNR-limited, rising ⇒ gain-starved, falling ⇒ overload),
+`lna_probe.py` (per-port signal + is-the-LNA-actually-powered),
+`stress_test.py` (quality time-series + telemetry correlation),
+`play_marginal.py` (error-concealment player for cliff-edge signals).
 
-If captions don't show, the broadcaster may simply not be transmitting
-them on that subchannel (rare for major networks, common for
-secondary subchannels and shopping channels).
+**Read the verdicts honestly.** If calibration tops out at MER 10 dB,
+that antenna is 5 dB short at that location and no software setting
+will fix it — the tools tell you whether the wall is aperture,
+overload, multipath, impulse noise, or plumbing, so you fix the right
+thing. `tune_antenna.py` classifies every carrier automatically:
+**CLEAN** (decodes), **IMPULSE** (good MER but bursty interference —
+often the PC itself; move the antenna away from electronics),
+**BELOW-CLIFF** (honest dB deficit), **PHANTOM** (a strong shelf that
+never field-syncs is not ATSC — don't chase it). Hot amplified/LNA
+chains that overload the whole normal gain range are rescued
+automatically by extending the search deep into attenuation.
 
-## DVR — guide, schedule & record
+## Antenna fingerprinting — the 🪪 scan
 
-A full set-top-box loop: read the on-air program guide, schedule
-shows, record them, and browse the results.
+Every antenna+cable system is a filter with transfer function H(f).
+What the receiver measures across the market's channel grid is
 
-```bash
-# Electronic Program Guide — a printable grid from the broadcast EIT
-# (run a scan first: python3 tools/tv_tuner.py --scan)
-python3 tools/stvt_epg.py                 # next few hours, all channels
-python3 tools/stvt_epg.py --rf 34 --hours 6
-python3 tools/stvt_epg.py --watch         # live-refreshing grid
+    R_dB(f) = |H_ant(f) · H_cable(f) · H_port(f)| · S(f) · G(t)
 
-# Schedule recordings, then run the daemon that fires them on time
-python3 tools/stvt_schedule.py tv         # pick shows from the guide
-python3 tools/stvt_schedule.py list       # show the queue
-python3 tools/stvt_schedule.py run        # daemon: records each show at its start time
+where S(f) is the broadcast spectrum and G(t) is diurnal propagation
+drift (measured ±3–7 dB over a day). Absolute levels therefore belong
+to the *hour* — but the SHAPE belongs to the hardware. So the
+fingerprint stores only self-referenced shape:
 
-# Record one mux right now (all programs share the 6 MHz channel, so
-# you can grab several subchannels at once for the price of one tune)
-python3 tools/stvt_multirec.py --rf 34 --duration 1800 --programs 3,4,5
+    r(f) = R_dB(f) − floor_dB        (level above the sweep's own noise floor)
 
-# Browse / play / dedupe what you recorded
-python3 tools/stvt_recordings.py          # interactive browser
-python3 tools/stvt_dvr_play.py 3          # play a recorded program
-```
+and two sweeps are compared by the median absolute deviation of their
+difference — a statistic blind to any constant offset, which is
+exactly what an inline amplifier adds:
 
-The scheduler persists its queue to `~/.tv_tuner/schedule.json`, so a
-daemon restart keeps your timers. Recordings are stream-copied (no
-re-encode), auto-named from PSIP (e.g. `mux_p3_4_1_WRC-HD_*.ts`).
-Because all programs in one mux ride shared transport-stream PIDs,
-`stvt_multirec.py` records every program you list from a **single**
-SDR tune — you can't, however, record two different RF channels at
-once with one SDR. The scheduler defers conflicting cross-mux timers
-rather than dropping them.
+    spread = MAD( r_a(f) − r_b(f) )          [dB]
+    s_level = 1 / (1 + (spread / 2.0 dB)²)   (0.5 exactly at the knee)
 
-## Channel surfer
+with parallel components for pilot-SNR shape (knee 4 dB) and a
+continuous "carrierness" overlap, blended into one score s ∈ [0,1].
+Calibrated on real sweeps: the same antenna re-scanned scores ≈ 0.9;
+different antennas ≤ 0.5. Verdict ladder:
 
-Change channels right in the mpv window like a TV remote — PageUp /
-PageDown or the mouse wheel — with captions carried across channels:
+| score | verdict |
+|---|---|
+| ≥ 0.75 vs a known print | **RECOGNIZED** (or **SWAP DETECTED** if it lived on another port — its learned history follows it) |
+| runner-up within 0.07 of the winner | **ASK** — near-twin antennas exist; never auto-decide |
+| 0.55–0.75 vs the port's resident | **CHANGED** — same family, drifted (new cable? re-aimed?) — asks |
+| beats everything incl. the port's *vacant print* | **NEW** — auto-enrolled, fresh learning epoch |
+| matches the port's vacant print best | **EMPTY SOCKET** — a disconnected port hears leakage, and that face is enrollable too |
 
-```bash
-tools/stvt_surf.sh        # PgUp/PgDn or scroll to change channel; Ctrl-C to stop
-```
+Identity is assigned from the math itself: the enrollment shape,
+quantized to 2 dB, is hashed into a permanent callsign
+(`HF-` + base32(SHA-1)₅) — drift updates the signature, never the
+identity. Nicknames are the human's, optional, changeable (✏️ button).
+Every full channel scan takes the print for free; the 🪪 button does a
+dedicated ~60 s Welch sweep. Field law worth knowing: **amplified
+antennas port-hop recognizably** (the amp's output stage buffers the
+face — measured 92–97% across sockets), while **raw passive antennas
+interact with each port's input network** and may need to be met once
+per port (per-port signature passports are on the roadmap).
 
-Channels come from your last scan (`~/.tv_tuner/scan.json`), sorted by
-virtual channel. Switching to a subchannel in the **same** mux is
-instant (no retune); changing mux retunes the SDR (a few seconds, like
-any OTA tuner).
+## What SDRs work
 
-## Signal meter (antenna aiming)
+| SDR | Notes |
+|---|---|
+| **SDRplay RSPdx** | reference. 8 MS/s, 14-bit, 3 antenna ports, bias-T on port B |
+| **SDRplay RSP1A / RSPduo** | works |
+| **RTL-SDR** | strong stations only (max ~2.4 MS/s < ATSC bandwidth) |
+| **HackRF One** | works; gain knobs are LNA+VGA instead of IFGR |
+| **Airspy R2 / Mini** | works |
+| **BladeRF** | works |
 
-A real-time signal-strength readout for pointing an antenna:
-
-```bash
-python3 tools/stvt_signal.py --rf 34          # live bars for one channel
-python3 tools/stvt_signal.py --scan-band      # sweep the whole UHF band
-```
-
-It sniffs the RF every few seconds and renders pilot SNR / VSB lock /
-RMS so you can rotate the antenna for the strongest reading before
-committing to a watch.
+`SoapySDRUtil --probe` must list your device before anything else will
+work. Configure port/gain defaults in `tools/config.py`
+(`tools/probe_sdr.py` prints your device's exact antenna names and
+gain ranges).
 
 ## Troubleshooting
-
-**Reception suddenly bad on a Raspberry Pi?** Check for a rival process
-before you touch the antenna. The Pi has one SDR and one may use it: a
-running (or merely boot-*enabled*) `stvt-panel` / `stvt-hdhr` starves a
-direct chain badly enough to look like a reception fault — measured 1416
-kB/s with the panel up vs 2384 with it stopped, same signal. Run
-`python3 tools/doctor.py`, which checks this and prints the fix, and see
-[docs/PI_ARCHITECTURE.md](docs/PI_ARCHITECTURE.md#one-radio-one-consumer--the-rule-that-costs-the-most-to-learn).
-
 
 | Symptom | Cause / fix |
 |---|---|
@@ -566,10 +317,12 @@ kB/s with the panel up vs 2384 with it stopped, same signal. Run
 
 ## The science
 
-- **SDRplay**: API v3 from sdrplay.com + SoapySDRPlay3 from source
-  (see install step 2 above).
-- **HackRF**: `sudo apt install soapysdr-module-hackrf`
-- **RTL-SDR**: `sudo apt install soapysdr-module-rtlsdr`
+[`docs/science.md`](docs/science.md) explains every step for readers
+without an RF background: 8-VSB, the Hilbert transform, FPLL carrier
+recovery, LMS equalization, soft-decision Viterbi, Reed-Solomon, the
+field-sync validation fix — and (new) **section 12.5: MER**, the
+equalizer-derived signal-quality dial that powers the universal tuning
+algorithm, plus the field-measured antenna/LNA/gain lessons behind it.
 
 [`docs/proven_capture_recipe.md`](docs/proven_capture_recipe.md) has
 the reference capture settings.
@@ -577,190 +330,35 @@ the reference capture settings.
 Three field lessons that shaped this project, offered to anyone
 building live SDR pipelines:
 
-Same root cause: SoapySDR can't open the device. Verify with
-`SoapySDRUtil --probe` first; if that works but the scan still
-fails, another process is holding the SDR open (a stray `tv_live`
-or another SoapySDR app — `pkill -f tv_live.py` to clear).
-
-### Scan finds carriers but every channel says "no live.ts growth"
-
-The decoder pipeline started but didn't produce output. Check the
-log at `tools/data/tv_live/tv_tuner.tv_live.log` for errors. Common cause:
-the antenna port in `config.py` doesn't match what your physical
-feed is connected to (silent failure — driver accepts the antenna
-name but the port has no signal).
-
-### Carriers found but lock fails ("PAT=0 in 5MB")
-
-Equalizer convergence is probabilistic on weak signals. Try:
-1. Re-aim the antenna (point at the transmitter; horizontal-V for
-   indoor rabbit ears).
-2. Run `python3 tools/tv_tuner.py --rf <strongest_channel>` and let
-   it retry up to 6 times — convergence sometimes needs multiple
-   cold-starts.
-3. Set `STVT_CONVERGENCE_SEC=30` and `STVT_MIN_PAT=3` env vars to
-   give weaker signals more time + lower the lock threshold.
-
-### Video stutters / picture freezes briefly
-
-This is normal on marginal signals. The three watchdogs (decoder,
-ffmpeg, optional player) auto-respawn the failing stage. If freezes
-last more than 10s and don't recover, your SNR is too low — better
-antenna or closer to the transmitter.
-
-### Picture froze but `live.ts` is still growing and OsO is low
-
-The **player** starved, not the decoder. This happens if you point
-mpv straight at the live edge with no buffer, or feed it through a
-pipe that stalls. Use `tools/stvt_play_hd.sh` (above) — it keeps a
-buffer cushion and self-heals. Tell-tale: in mpv's status line the
-playback clock (1st number) stops advancing while `tail -c live.ts`
-shows the file still growing. The chain is fine; restart only the
-player.
-
-### Video turned into garbage / random blocks after running a while
-
-The chain fell into a **noise drought**: it still locks the carrier
-(FPLL fine, `live.ts` growing, ~0% NULL) but is decoding noise — the
-live edge shows hundreds or thousands of unique PIDs instead of
-~20-40 (run the PID-count check above). This is usually OsO
-accumulation after a long uptime, **not** RF. Fix: restart the
-decoder chain.
-
-**`tools/stvt_run.sh` does this automatically** — it watches the live
-edge and restarts the chain on a drought, so you rarely need to do it
-by hand. To restart manually:
-
-```bash
-pkill -f tv_live.py
-rm tools/data/tv_live/live.ts            # start a fresh capture
-# then relaunch the chain (step 1 above); stvt_play_hd.sh will pick
-# it back up
-```
-
-If it droughts again quickly, make sure `sudo tools/fix_linux_tuning.sh`
-was run this boot and that the SoapySDRPlay3 ring-buffer patch is
-applied — both directly reduce OsO. Avoid running other CPU-heavy work
-(the matched filter needs a full core); even frequent `ffprobe`/PID
-sampling can tip a marginal CPU into more droughts.
-
-### "Unknown codec / PID 0x30" when piping live.ts to ffmpeg
-
-You're either reading the file before the equalizer converged
-(wait ~30 seconds after `tv_live` starts), or sample loss in the
-SDR-to-decoder path is breaking RS decoding (WSL2 caveat — see the
-install section above).
-
-### No window pops up
-
-You need a display server. Ubuntu Desktop has one by default;
-Ubuntu Server doesn't. If you're SSH'd in, run `ssh -Y` from your
-local machine (X11 forwarding) or install a desktop environment on
-the server.
-
-## Watchdogs
-
-Three layers keep playback alive on marginal signals:
-
-- **Decoder watchdog** — periodically samples PAT count from the live
-  TS. When the equalizer drifts (PAT drops below threshold), kills and
-  respawns `tv_live` for a fresh equalizer convergence.
-- **Pipeline watchdog** — when ffmpeg blocks on bad input, the watchdog
-  detects no-bytes-forwarded-while-data-flowing and respawns ffmpeg
-  while keeping `tv_live` alive.
-- **`tv_player.py`** — optional Python video player with decoupled
-  audio/video clocks. When the SDR briefly produces corrupt video PES,
-  video holds the last good frame while audio keeps decoding from its
-  own PID — a more honest diagnostic than ffplay's all-or-nothing
-  freeze. Toggle with `--player magic`.
-
-## How does this actually work?
-
-[`docs/science.md`](docs/science.md) is a long-form explainer of every
-signal-processing step, written for readers without an RF engineering
-background: 8-VSB modulation, the Hilbert transform, the FPLL carrier-
-lock loop, the LMS equalizer, soft-decision Viterbi, Reed-Solomon, the
-field-sync spacing-validation fix that finally made it watch a baseball
-game, and how to read `atsc_fs_checker_inst`'s output to find which
-step is broken when something goes wrong.
-
-[`docs/proven_capture_recipe.md`](docs/proven_capture_recipe.md)
-documents the SDRplay gain settings, antenna polarization, and capture
-parameters that produce the best lock.
-
-## Antennas — what works
-
-**You can use this on antennas that weren't designed to receive TV
-signals.** Our test rig regularly locks ATSC broadcasts on a vertical
-ham-radio whip — exactly the kind of antenna conventional wisdom says
-shouldn't work for TV. With a strong-enough station, a clean front
-end, and the watchdogs respawning the decoder when it drifts, the
-software pulls a watchable picture out of antennas that off-the-shelf
-HDHomeRun-style tuners would give up on.
-
-But — what *does* polarization mean, and why do TV antennas help?
-
-Radio waves carry their energy in an electric field that oscillates
-in some direction perpendicular to the direction the wave is
-traveling. The orientation of that oscillation is the wave's
-**polarization**. ATSC broadcast TV in North America is transmitted
-**horizontally polarized**: the field oscillates left-to-right.
-
-For maximum reception, the receiving antenna's element should be
-oriented in the *same plane* as the transmitted wave. A vertically-
-mounted whip catches a horizontally-polarized wave at maybe
-10–20% of the energy of a properly-oriented horizontal antenna —
-roughly **10–15 dB of signal loss**. That's a lot. For a marginal
-station it can be the difference between a clean picture and no
-lock at all.
-
-So a **proper TV antenna helps** — and "proper" here means two
-things:
-
-- **Horizontally polarized** (the elements run side-to-side, not
-  up-and-down). Indoor rabbit-ears bent into a horizontal "V" work
-  surprisingly well; a purpose-built UHF Yagi or log-periodic gives
-  the best SNR margin.
-- **Connected with proper coax**, ideally short, ideally low-loss
-  (RG-6 or LMR-style) with the right F-connector or N-connector
-  matching for your SDR. Long thin coax + bad connectors throws
-  away signal you can't get back.
-
-Both of these make the receive side easier. **Neither is required
-to use this program** — if your station is loud enough at your
-location, a "wrong" antenna often still works. The watchdogs and
-the equalizer's tracking margin cover a lot of sins.
+1. **Offline tests cannot validate live DSP.** A feature that wins big
+   on recorded signals can still ruin live decode by missing the
+   real-time deadline — the driver drops samples, and a dropped sample
+   looks like interference in every downstream instrument. Gate every
+   live promotion on the source-overflow count, not on replay quality.
+   (We learned this the hard way: our best-measuring equalizer upgrade
+   was also our mystery glitch.)
+2. **The pixels are a measurement layer.** Transport-stream metrics
+   can be perfect while the *player's* error-concealment flags smear
+   the picture. If viewers say it looks worse and your TS metrics
+   disagree, audit the presentation pipeline before the decoder.
+3. **Failed-packet rescue rate is a diagnostic.** Turbo decoding
+   converts ~70% of impulse-storm failures, ~20% of fading failures,
+   and ~0% of sample-loss failures — so the conversion percentage
+   tells you *which disease* a channel has before you pick a cure.
 
 ## Repo layout
 
 ```
-gr-atscplus/                  GNU Radio OOT module (custom C++ blocks)
-tools/
-  tv_tuner.py                 Channel picker, player, recorder, streamer,
-                              and live channel changer all in one CLI
-  tv_live.py                  Continuous SDR → MPEG-TS pipeline
-  tv_live_softvit.py          Same pipeline, soft-Viterbi variant
-  stvt_run.sh                 Hands-off watcher (chain+player, auto-recovers)
-  stvt_play_hd.sh             Single-program HD playback supervisor
-  stvt_surf.sh                Channel surfer (PgUp/PgDn / wheel to change)
-  stvt_watch_cc_osd.sh        Player with captions overlaid on the picture
-  atsc_cc.py                  Pure-Python CEA-608 caption decoder
-  stvt_epg.py                 Electronic Program Guide grid (from EIT)
-  stvt_schedule.py            DVR scheduler + daemon (queue of timers)
-  stvt_multirec.py            Multi-program recorder (whole mux at once)
-  stvt_recordings.py          Browse / play / dedupe recordings
-  stvt_signal.py              Real-time signal meter for antenna aiming
-  sdr_sweep.py                Fast carrier-presence pre-scanner
-  atsc_psip.py                PSIP parser (virtual channels + EIT)
-  default_stations.py         Sample channel table (edit for your DMA)
-  config.py                   Default tuner/antenna/gain config
-  tv_player.py                Resilient video player (decoupled A/V clocks)
-  fix_linux_tuning.sh         Per-boot CPU governor + USB tuning
-  patch_soapy_ringbuffer.sh   SoapySDRPlay3 USB ring-buffer enlargement
-  tests/                      Unit tests (DVR, EPG, scheduler, signal, …)
-docs/                         Science explainer, capture recipe, CPU-optimization
-                              writeup, drought investigation, Pi + USB-3.0 setup notes
-bootstrap.sh                  Linux setup + build + install
+gr-atscplus/            GNU Radio OOT module (custom C++ ATSC blocks)
+tools/                  tuner CLI, live chain, DVR suite, PSIP/EPG,
+                        players, watchdogs  (tv_tuner.py is the entry)
+adaptive-tv/            universal antenna calibration + diagnostics
+                        (mer_meter, mer_gain_cal, ch_scan, config_
+                        shootout, quality_judge, auto_tv, ...) plus
+                        tv_tuna_panel.py (web UI) and time_knob.py
+                        (learned per-channel hour curves)
+docs/                   install guides, science explainer, capture recipe
+bootstrap.sh            Linux one-shot setup
 ```
 
 ## Development history
