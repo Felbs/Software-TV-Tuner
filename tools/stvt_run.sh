@@ -79,9 +79,24 @@ export STVT_FPLL_FOLD="${STVT_FPLL_FOLD:-1}"
 # read inside the C++ work(), so it also applies to tv_replay/DVR with no wiring.
 export STVT_FPLL_BLOCK_NCO="${STVT_FPLL_BLOCK_NCO:-1}"
 export STVT_RS=stock STVT_VITERBI=hard STVT_EQ=long
-<<<<<<< pi-port-radiopi2
-export STVT_SPS="${STVT_SPS:-1.1}" STVT_RRC_SYMS="${STVT_RRC_SYMS:-4}" STVT_TEISCRUB="${STVT_TEISCRUB:-0}"
-# ── PER-ANTENNA GAIN PROFILE ────────────────────────────────────────────────
+# SPS: 1.3 on x86, 1.1 on the Pi. On the Ryzen box SPS 1.3 is markedly more
+# robust on marginal signal than the old lean 1.1 — validated on a real RF36
+# capture pushed to the decode cliff (tools/native_sps_11v13.py): at cliff-edge
+# noise 1000, TEI-bad 5.6% @1.3 vs 11.8% @1.1 (2x fewer RS fails), and 1.3 beat
+# 1.1 at every level tested. 1.3 is less front-end work than tv_live's own 1.5
+# default, which live-decodes real-time there with margin. The 4-core Pi keeps
+# the lean 1.1 (measured: it needs the headroom). STVT_SPS overrides either.
+if [ "$(uname -m)" = "aarch64" ]; then _sps=1.1; else _sps=1.3; fi
+export STVT_SPS="${STVT_SPS:-$_sps}" STVT_RRC_SYMS="${STVT_RRC_SYMS:-4}" STVT_TEISCRUB="${STVT_TEISCRUB:-0}"
+# Calibrated gain first: stvt_autocal.py writes ~/.stvt_autocal.env (STVT_IFGR
+# + eq knobs) — source it here so a calibrated box "just works". Only load it when
+# the user hasn't set STVT_IFGR explicitly, so an inline override still wins. This
+# is the intended autocal hookup (the writer says "an env file the run-scripts
+# source"); without it a passive antenna never locks at the active-antenna default.
+if [ -z "${STVT_IFGR:-}" ] && [ -f "$HOME/.stvt_autocal.env" ]; then
+  set -a; . "$HOME/.stvt_autocal.env"; set +a
+fi
+# ── PER-ANTENNA GAIN PROFILE (fallback when nothing above set the gain) ──────
 # This script used to hardcode IFGR=40 / rfgain_sel=3 for every antenna. Those
 # are Antenna B (the UHF yagi) numbers, and they are not merely suboptimal
 # elsewhere -- they are the difference between a channel and no channel.
@@ -99,11 +114,16 @@ export STVT_SPS="${STVT_SPS:-1.1}" STVT_RRC_SYMS="${STVT_RRC_SYMS:-4}" STVT_TEIS
 # An explicit STVT_IFGR / STVT_RFGAIN_SEL in the environment always wins, so
 # the tuners and lab harnesses that set them are unaffected.
 #
-# Honest limits of this table: Antenna A at UHF does not decode at any gain
-# tried (best was IFGR=32 rfsel=2, still ~900 CC errors/s) -- the loop is
-# simply not a UHF antenna, and no gain fixes that. Antenna B at VHF is deaf
-# for the mirror-image reason (in_rms 24 at IFGR=50, 147 at IFGR=40, never
-# locks). Antenna C is not characterised here; see docs/ANTENNA_PORTS.
+# Honest limits of this table: it describes the Pi's antennas. Port letters
+# are per box (another machine's "Antenna A" is a different aerial), so on any
+# other box set the gain explicitly or run stvt_autocal.py; the config.py
+# defaults (IFGR 59 / rfgain_sel 5) were measured starving a UHF yagi on the
+# Ryzen box on 2026-10-10 (sync 11-64%; 40 / 4 held 99.99%).
+# Antenna A at UHF does not decode at any gain tried on the Pi (best was
+# IFGR=32 rfsel=2, still ~900 CC errors/s) -- the loop is simply not a UHF
+# antenna, and no gain fixes that. Antenna B at VHF is deaf for the
+# mirror-image reason (in_rms 24 at IFGR=50, 147 at IFGR=40, never locks).
+# Antenna C is not characterised here; see docs/ANTENNA_PORTS.
 STVT_ANTENNA="${STVT_ANTENNA:-Antenna B}"
 if [ "$RF" -le 13 ]; then _band=vhf; else _band=uhf; fi
 case "$STVT_ANTENNA/$_band" in
@@ -146,27 +166,7 @@ mkdir -p "$STVT_EQ_TAP_CACHE" 2>/dev/null || true
 if [ "$(uname -m)" = "aarch64" ]; then
   export STVT_EQ_S16="${STVT_EQ_S16:-1}"
   export STVT_MIN_BUF_BYTES="${STVT_MIN_BUF_BYTES:-8388608}"
-  export STVT_FPLL_FOLD="${STVT_FPLL_FOLD:-1}"
 fi
-=======
-# SPS default bumped 1.1 -> 1.3: on this box (Ryzen 1600X, native RSPdx) SPS 1.3
-# is markedly more robust on marginal signal than the old lean 1.1 — validated
-# on a real RF36 capture pushed to the decode cliff (tools/native_sps_11v13.py):
-# at cliff-edge noise 1000, TEI-bad 5.6% @1.3 vs 11.8% @1.1 (2x fewer RS fails),
-# and 1.3 beat 1.1 at every level tested. 1.3 is less front-end work than tv_live's
-# own 1.5 default, which live-decodes real-time here with margin, so 1.3 is safe
-# real-time. STVT_SPS=1.1 reverts the lean profile on a slower CPU.
-export STVT_SPS="${STVT_SPS:-1.3}" STVT_RRC_SYMS="${STVT_RRC_SYMS:-4}" STVT_TEISCRUB="${STVT_TEISCRUB:-0}"
-# Per-antenna gain profile: stvt_autocal.py writes ~/.stvt_autocal.env (STVT_IFGR
-# + eq knobs) — source it here so a calibrated box "just works". Only load it when
-# the user hasn't set STVT_IFGR explicitly, so an inline override still wins. This
-# is the intended autocal hookup (the writer says "an env file the run-scripts
-# source"); without it a passive antenna never locks at the active-antenna default.
-if [ -z "${STVT_IFGR:-}" ] && [ -f "$HOME/.stvt_autocal.env" ]; then
-  set -a; . "$HOME/.stvt_autocal.env"; set +a
-fi
-export STVT_IFGR="${STVT_IFGR:-59}" STVT_RFGAIN_SEL="${STVT_RFGAIN_SEL:-5}" STVT_ANTENNA="${STVT_ANTENNA:-Antenna A}"
->>>>>>> rig/test-merge
 
 log(){ echo "$(printf '%(%H:%M:%S)T' -1) $*" | tee -a "$RUNLOG" ; }
 
@@ -197,23 +197,18 @@ player_up(){ pgrep -f '^bash [^ ]*stvt_play_hd\.sh' >/dev/null; }
 start_chain(){
   rm -f "$TS"
   [ -f "$CLOG" ] && mv "$CLOG" "$CLOG.$(printf '%(%H%M%S)T' -1)" 2>/dev/null
-<<<<<<< pi-port-radiopi2
-  ( cd "$HERE" && setsid python3 tv_live.py --rf "$RF" > "$CLOG" 2>&1 < /dev/null 9>&- & )
-  # Pi: chain outranks the nice+10 player stack (passwordless sudo; no-op if absent)
-  if [ "$(uname -m)" = "aarch64" ]; then
-    snooze 1
-    sudo -n renice -n -10 -p "$(pgrep -f "[t]v_live.py" | head -1)" >/dev/null 2>&1 || true
-  fi
-  log "started chain (RF$RF, lean config)"
-=======
   # exec 9>&- closes the inherited single-instance lock fd so the detached
   # chain (and its descendants) don't hold the lock after THIS supervisor exits.
   # --rotate-gb 16 (was tv_live's 1GB default): each rotation costs one
   # deterministic ~10s player relaunch (stvt_play_hd rotation-relaunch).
   # 16GB ≈ 1h50m of TV between blips; ~16GB of SD is cheap (100GB free).
   ( exec 9>&- 2>/dev/null; cd "$HERE" && setsid $TSET_CHAIN python3 tv_live.py --rf "$RF" --rotate-gb "${STVT_ROTATE_GB:-16}" > "$CLOG" 2>&1 < /dev/null & )
+  # Pi: chain outranks the nice+10 player stack (passwordless sudo; no-op if absent)
+  if [ "$(uname -m)" = "aarch64" ]; then
+    snooze 1
+    sudo -n renice -n -10 -p "$(pgrep -f "[t]v_live.py" | head -1)" >/dev/null 2>&1 || true
+  fi
   log "started chain (RF$RF, lean config${TSET_CHAIN:+, cpus $ISO_CHAIN_CPUS})"
->>>>>>> rig/test-merge
 }
 
 # The radio is single-tenant: a replacement chain must never be started while
@@ -231,13 +226,9 @@ stop_chain(){
 }
 
 start_player(){
-<<<<<<< pi-port-radiopi2
-  ( setsid "$HERE/stvt_play_hd.sh" "$PROG" 25 >/dev/null 2>&1 < /dev/null 9>&- & )
-=======
   # close the inherited lock fd (see start_chain) so the detached player tree
   # (stvt_play_hd.sh -> tail|ffmpeg|mpv) doesn't keep the lock held.
   ( exec 9>&- 2>/dev/null; setsid $TSET_OTHER "$HERE/stvt_play_hd.sh" "$PROG" 25 >/dev/null 2>&1 < /dev/null & )
->>>>>>> rig/test-merge
   log "started player supervisor (prog $PROG)"
 }
 
@@ -251,21 +242,6 @@ while i>=0 and i+188<=len(d):
     else: i+=1
 print(len(s))' 2>/dev/null || echo 0
 }
-
-# Single-instance guard. Two supervisors fight: when one restarts the chain on
-# a drought, the other sees the gap as a fresh drought and restarts too, and
-# they cascade into a restart storm (observed contaminating a stress run). Take
-# an exclusive lock; a second invocation refuses rather than dueling.
-LOCK="/tmp/stvt_run.lock"
-exec 9>"$LOCK" || { echo "cannot open lock $LOCK" >&2; exit 3; }
-# -w 15: a freshly-killed instance releases its lock asynchronously
-# (measured: up to ~10s) — wait briefly instead of refusing a restart;
-# a genuinely-running duplicate still gets refused after the wait.
-if ! flock -w 15 9; then
-  echo "stvt_run.sh is already running (lock $LOCK held). Refusing a 2nd instance." >&2
-  echo "Stop the existing one first: pkill -f stvt_run.sh" >&2
-  exit 3
-fi
 
 restarts=0
 drought_loops=0          # consecutive checks the output has been a confirmed drought
@@ -287,12 +263,8 @@ while true; do
     restarts=$((restarts+1))
     [ "$restarts" -gt "$MAX_CHAIN_RESTARTS" ] && { log "MAX_CHAIN_RESTARTS hit — giving up (check the SDR)"; exit 1; }
     log "chain DOWN — restart #$restarts"
-<<<<<<< pi-port-radiopi2
-    snooze "$COOLDOWN"; start_chain; snooze 10; continue
-=======
     clean_streak=0
-    sleep "$COOLDOWN"; start_chain; sleep 10; last_size=0; stall_loops=0; continue
->>>>>>> rig/test-merge
+    snooze "$COOLDOWN"; start_chain; snooze 10; last_size=0; stall_loops=0; continue
   fi
 
   # 1b. chain WEDGED? Alive but live.ts not growing. A healthy chain writes
@@ -309,7 +281,7 @@ while true; do
       restarts=$((restarts+1))
       [ "$restarts" -gt "$MAX_CHAIN_RESTARTS" ] && { log "MAX_CHAIN_RESTARTS hit — giving up (check the SDR)"; exit 1; }
       log "chain WEDGED — live.ts hasn't grown in ~$((stall_loops*20))s (size $cur_size) — restart #$restarts"
-      pkill -f '[t]v_live.py'; sleep "$COOLDOWN"; start_chain; sleep 10
+      stop_chain; snooze "$COOLDOWN"; start_chain; snooze 10
       last_size=0; stall_loops=0; clean_streak=0; continue
     fi
   else
@@ -322,40 +294,19 @@ while true; do
   #    11/12 chains killed by the old single-sample check were at 99.8-99.99%
   #    segs_aligned (perfect decode). A REAL drought stays high across repeated
   #    samples; a transient clears within seconds. Require DROUGHT_STRIKES hits.
+  #    The detector reads the last 2 MB of live.ts, which at the full mux rate is
+  #    only ~0.85 s of stream, and the residual errors on a healthy channel are
+  #    BURSTY (measured 2026-07-31: 94% of one-second bins completely clean,
+  #    Fano factor 24), so one ordinary RF burst can spike the count while the
+  #    chain is perfectly healthy. Re-sampling can only make the supervisor
+  #    restart LESS eagerly; a real drought persists for many seconds and still
+  #    trips it.
   if [ -f "$TS" ] && [ "$(stat -c%s "$TS" 2>/dev/null || echo 0)" -gt 3000000 ]; then
     u=$(unique_pids)
     if [ "$u" -gt "$DROUGHT_PIDS" ]; then
-<<<<<<< pi-port-radiopi2
-      # DROUGHT CONFIRMATION (2026-07-31). The detector reads the last 2 MB of
-      # live.ts, which at the full mux rate is only ~0.85 s of stream. The
-      # residual errors on a healthy channel are BURSTY, not a steady drip
-      # (measured: 94% of one-second bins completely clean, Fano factor 24),
-      # so a single ordinary RF burst can spike the unique-PID count in that
-      # short window while the chain is perfectly healthy. Restarting on one
-      # sample therefore costs a ~10 s black screen for nothing.
-      #
-      # Evidence from the 2026-07-31 soak: a once-a-minute sampler recorded
-      # 231 unique PIDs at minute 19 and the stream carried on healthily with
-      # no restart, while the supervisor read 233 at minute 46 and restarted.
-      # Same magnitude, opposite outcome — decided purely by poll timing.
-      #
-      # So re-sample before spending a restart. A REAL drought (the chain
-      # locked onto noise) persists for many seconds and still trips this;
-      # only the single-burst false positive is filtered out. This can only
-      # ever make the supervisor restart LESS eagerly.
-      snooze 3
-      u2=$(unique_pids)
-      if [ "$u2" -le "$DROUGHT_PIDS" ]; then
-        log "drought reading ($u PIDs) NOT confirmed ($u2 on re-sample) — no restart"
-      else
-        restarts=$((restarts+1))
-        [ "$restarts" -gt "$MAX_CHAIN_RESTARTS" ] && { log "MAX_CHAIN_RESTARTS hit — giving up"; exit 1; }
-        log "NOISE DROUGHT ($u PIDs, confirmed $u2) — restart chain #$restarts"
-        stop_chain; start_chain; snooze 10; continue
-=======
       hits=1
       for _ in $(seq 2 "$DROUGHT_STRIKES"); do
-        sleep 2; v=$(unique_pids); [ "${v:-0}" -gt "$DROUGHT_PIDS" ] && hits=$((hits+1))
+        snooze 2; v=$(unique_pids); [ "${v:-0}" -gt "$DROUGHT_PIDS" ] && hits=$((hits+1))
       done
       if [ "$hits" -ge "$DROUGHT_STRIKES" ]; then
         drought_loops=$((drought_loops+1))
@@ -363,7 +314,7 @@ while true; do
           restarts=$((restarts+1))
           [ "$restarts" -gt "$MAX_CHAIN_RESTARTS" ] && { log "MAX_CHAIN_RESTARTS hit — giving up"; exit 1; }
           log "NOISE DROUGHT persisted ${drought_loops} checks (~$((drought_loops*20))s, ${u}+ PIDs) — in-chain re-acquire didn't recover; restart #$restarts"
-          pkill -f '[t]v_live.py'; sleep "$COOLDOWN"; start_chain; sleep 10; drought_loops=0; clean_streak=0; last_size=0; stall_loops=0; continue
+          stop_chain; snooze "$COOLDOWN"; start_chain; snooze 10; drought_loops=0; clean_streak=0; last_size=0; stall_loops=0; continue
         else
           log "drought (check ${drought_loops}/${DROUGHT_GRACE_LOOPS}, ${u} PIDs) — letting the chain's re-acquire self-heal first"
         fi
@@ -377,7 +328,6 @@ while true; do
       if [ "$restarts" -gt 0 ] && [ "$clean_streak" -ge "$RESTART_BUDGET_RESET" ]; then
         log "chain stable ${clean_streak} checks (~$((clean_streak*20))s clean) — resetting restart budget (was $restarts/$MAX_CHAIN_RESTARTS)"
         restarts=0; clean_streak=0
->>>>>>> rig/test-merge
       fi
     fi
   fi

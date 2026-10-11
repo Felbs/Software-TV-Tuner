@@ -31,16 +31,11 @@
 #     "reason": "human" }
 
 set -u
-<<<<<<< pi-port-radiopi2
-STATE=/tmp/quality_state.json
-LIVE_TS=/home/user/Software-TV-Tuner/tools/data/tv_live/live.ts
-=======
 STATE="${STVT_QUALITY_STATE:-/tmp/quality_state.json}"
 # Repo-relative by default (this script lives in tools/), override with
 # STVT_LIVE_TS. Was hardcoded to /home/felbs — broke on every other box.
 _HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIVE_TS="${STVT_LIVE_TS:-$_HERE/data/tv_live/live.ts}"
->>>>>>> rig/test-merge
 WINDOW=15
 LOOP=0
 PROGRAM="${STVT_PROGRAM:-3}"

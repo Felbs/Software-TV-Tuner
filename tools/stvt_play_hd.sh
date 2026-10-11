@@ -35,17 +35,13 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
 log(){ echo "$(printf '%(%H:%M:%S)T' -1) $*" >> "$SUPLOG"; }
 
-<<<<<<< pi-port-radiopi2
-# Pi/ARM player trade (June Pi lineage): half-res mpeg2 decode (lavc lowres=1)
-# halves mpv decode CPU and memory bandwidth — on a 4-core Pi the player was
-# measurably corrupting the DECODER CHAIN via bandwidth contention (cc-errors
-# in live.ts that vanish with the player off). Default ON for aarch64;
-# export STVT_PLAY_FULLRES=1 for full resolution. x86 unchanged.
-MPV_EXTRA="${STVT_MPV_EXTRA:-}"
-if [ "$(uname -m)" = "aarch64" ] && [ -z "${STVT_PLAY_FULLRES:-}" ]; then
-  MPV_EXTRA="$MPV_EXTRA --vd-lavc-o=lowres=1"
-fi
-=======
+# Pi/ARM player trade (June Pi lineage): on a 4-core Pi the full-res player was
+# measurably corrupting the DECODER CHAIN via memory-bandwidth contention
+# (cc-errors in live.ts that vanish with the player off), so aarch64 defaults
+# to the half-res deint mode below; export STVT_DEINT=auto for full resolution.
+if [ "$(uname -m)" = "aarch64" ] && [ -z "${STVT_DEINT:-}" ]; then STVT_DEINT=lowdeint; fi
+# player stack at nice +10 on the Pi (PI_ARCHITECTURE law): the chain owns the CPU
+PLAYER_NICE=""; [ "$(uname -m)" = "aarch64" ] && PLAYER_NICE="nice -n 10"
 
 # Deinterlace mode (STVT_DEINT) — NBC & friends broadcast 1080i; without
 # deinterlacing, moving edges show combing ("wavy lines on outlines",
@@ -86,22 +82,12 @@ case "${STVT_DEINT:-auto}" in
   frame)     DEINT_FLAG="--vf=lavfi=[yadif=mode=send_frame:deint=interlaced]";;
   *)         DEINT_FLAG="--deinterlace=no";;
 esac
->>>>>>> rig/test-merge
 
 launch(){
   # last-N-bytes form (tail -c N) — NOT absolute offset (tail -c +OFF), which
   # stalls seeking into a multi-GB growing file.
   local bytes=$(( BACKMB*1000000 ))
   : > "$MPVLOG"
-<<<<<<< pi-port-radiopi2
-  # player stack at nice +10 (PI_ARCHITECTURE law): the decoder chain owns the CPU
-  setsid nice -n 10 bash -c "tail -c $bytes -F '$F' | \
-    ffmpeg -hide_banner -loglevel warning -fflags nobuffer+flush_packets \
-      -flags low_delay -probesize 3M -analyzeduration 3M -err_detect ignore_err \
-      -i - -map 0:p:$PROG -c copy -flush_packets 1 -f mpegts - | \
-    mpv - --hwdec=no $MPV_EXTRA --cache=yes --cache-secs=30 --demuxer-max-bytes=200MiB \
-      --demuxer-readahead-secs=20 --cache-pause=no --cache-pause-initial=no \
-=======
 
   # Resolution-aware deint + window fit (the SD-aware logic ported from the Pi).
   # On an SD subchannel (e.g. 704x480 4:3 TeleXitos) a 4:3 stream opens as a
@@ -201,7 +187,7 @@ launch(){
     ff_fflags="+genpts+igndts${_dc}+flush_packets"; ff_lowdelay=""
     vsync="desync"
   fi
-  setsid bash -c "tail -c $bytes -F '$F' | \
+  setsid $PLAYER_NICE bash -c "tail -c $bytes -F '$F' | \
     ffmpeg -hide_banner -loglevel warning -fflags $ff_fflags \
       $ff_lowdelay -probesize 5M -analyzeduration 5M -err_detect ignore_err \
       -f mpegts -i - -map 0:p:$PROG:0 -map 0:p:$PROG:1? -map 0:p:$PROG:2? -map 0:p:$PROG:3? \
@@ -213,7 +199,6 @@ launch(){
       --alang=${STVT_ALANG:-eng,en} \
       $fit \
       --mute=${STVT_MPV_MUTE:-no} \
->>>>>>> rig/test-merge
       --title='STVT Live (prog $PROG)' --force-seekable=no \
       --input-ipc-server=/tmp/stvt-mpv.sock \
       --msg-level=all=status" >> "$MPVLOG" 2>&1 < /dev/null &
