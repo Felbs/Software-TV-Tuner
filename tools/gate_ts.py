@@ -34,10 +34,27 @@ def tei(pkt):
 
 
 def describe(packets):
+    """Count, TEI, nulls, PIDs and continuity-counter errors. The CC errors are the decode-quality
+    number: a real mux carries plenty of NULL packets of its own, so the null count alone says
+    little (it misled a first reading of a lever sweep), while every RS-uncorrectable packet
+    that tei_scrub turned into a NULL leaves a hole in its PID's counter."""
     n = len(packets)
     bad = sum(1 for p in packets if tei(p))
-    nulls = sum(1 for p in packets if ((p[1] & 0x1F) << 8 | p[2]) == 0x1FFF)
-    return f"{n} packets, {bad} with TEI, {nulls} null"
+    nulls = 0
+    last = {}
+    cc_err = 0
+    for p in packets:
+        pid = (p[1] & 0x1F) << 8 | p[2]
+        if pid == 0x1FFF:
+            nulls += 1
+            continue
+        if not (p[3] & 0x10):                      # no payload: counter does not advance
+            continue
+        cc = p[3] & 0x0F
+        if pid in last and (last[pid] + 1) & 0x0F != cc:
+            cc_err += 1
+        last[pid] = cc
+    return f"{n} packets, {bad} with TEI, {nulls} null, {len(last)} PIDs, {cc_err} CC errors"
 
 
 def main():
