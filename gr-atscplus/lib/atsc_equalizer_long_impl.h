@@ -34,6 +34,7 @@ private:
 #endif
     static constexpr int NPRETAPS = (int)(NTAPS * 0.2);
 
+
     static constexpr int KNOWN_FIELD_SYNC_LENGTH = 4 + 511 + 3 * 63;
 
     float training_sequence1[KNOWN_FIELD_SYNC_LENGTH];

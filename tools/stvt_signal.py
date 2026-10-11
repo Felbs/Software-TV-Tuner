@@ -362,6 +362,118 @@ def scan_band(refresh_per_rf_sec: float, antenna: str,
     return 0
 
 
+def _bar_with_peak(frac: float, peak_frac: float) -> str:
+    """Like _bar() but overlays a '>' marker at the peak-hold position so
+    you can see each channel's best level while you rotate the antenna."""
+    frac = max(0.0, min(1.0, frac))
+    peak_frac = max(0.0, min(1.0, peak_frac))
+    filled = int(round(frac * BAR_WIDTH))
+    cells = list("#" * filled + "-" * (BAR_WIDTH - filled))
+    pk = min(BAR_WIDTH - 1, int(round(peak_frac * BAR_WIDTH)))
+    # Only show the marker when the peak is ahead of the current fill, so it
+    # reads as "best so far" rather than cluttering a live-at-peak bar.
+    if pk > filled:
+        cells[pk] = ">"
+    return "".join(cells)
+
+
+def watch_band(refresh_sec: float, antenna: str, ifgr: float,
+               rfgain_sel: int, dwell_sec: float,
+               rf_list: list[int]) -> int:
+    """LIVE all-channel strength dashboard: sweep the whole channel list
+    over and over, redrawing every bar in place. Built for antenna aiming
+    — watch every channel respond at once as you rotate, with a peak-hold
+    '>' marker showing each channel's best level so far."""
+    if sdr_sweep is None:
+        print(f"[signal] cannot import sdr_sweep: {SWEEP_IMPORT_ERR}",
+              file=sys.stderr)
+        return 2
+
+    freqs = [(rf, int(rf_to_freq_mhz(rf) * 1e6))
+             for rf in rf_list if rf_to_freq_mhz(rf) > 0]
+    if not freqs:
+        print("[signal] no valid RFs to watch", file=sys.stderr)
+        return 1
+
+    stop = False
+
+    def on_int(_sig, _frame):
+        nonlocal stop
+        stop = True
+    try:
+        signal_mod.signal(signal_mod.SIGINT, on_int)
+    except (ValueError, OSError):
+        pass
+
+    peak = {rf: float("-inf") for rf, _ in freqs}
+    tty = _is_tty()
+    first = True
+    # Frame is a constant number of lines so we can cursor-up over it.
+    frame_lines = 2 + len(freqs) + 1
+    passes = 0
+
+    while not stop:
+        try:
+            results = sdr_sweep.sweep(
+                [f for _, f in freqs],
+                sample_rate=8_000_000,
+                dwell_sec=dwell_sec,
+                settle_sec=0.04,
+                mode="atsc",
+                antenna=antenna,
+                ifgr=ifgr,
+                rfgain_sel=rfgain_sel,
+                progress=None,
+            )
+        except Exception as exc:
+            print(f"[signal] sweep failed: {exc}", file=sys.stderr)
+            return 1
+        passes += 1
+
+        # Current strongest channel, flagged with a star to draw the eye.
+        best_rf, best_snr = None, float("-inf")
+        for (rf, _f), m in zip(freqs, results):
+            snr = m.get("pilot_snr_db", float("-inf"))
+            if snr > best_snr:
+                best_rf, best_snr = rf, snr
+
+        lines = [
+            f"LIVE band meter - {antenna}, IFGR={ifgr:.0f}  "
+            f"(pass {passes}, Ctrl+C to stop)",
+            f"{'RF':>3} {'MHz':>6} {'pilot_snr':>9}  "
+            f"{'bar (> = peak so far)':<{BAR_WIDTH}}  label",
+        ]
+        for (rf, _f), m in zip(freqs, results):
+            snr = m.get("pilot_snr_db", float("-inf"))
+            if snr > peak[rf]:
+                peak[rf] = snr
+            snr_str = f"{snr:+5.1f}dB" if snr != float("-inf") else "  --  "
+            bar = _bar_with_peak(snr / 50.0, peak[rf] / 50.0)
+            label = _label_pilot_snr(snr)
+            star = "*" if rf == best_rf and snr > 5 else " "
+            lines.append(f"{rf:>3} {rf_to_freq_mhz(rf):>6.1f} {snr_str:>9}  "
+                         f"{bar}  {label:<6}{star}")
+        lines.append("  -- rotate slowly; longest bar / * = strongest --")
+        frame = "\n".join(lines)
+
+        if tty and not first:
+            sys.stdout.write(ANSI_CURSOR_UP * frame_lines)
+            for line in frame.splitlines():
+                sys.stdout.write(ANSI_CLEAR_LINE + line + "\n")
+        else:
+            print(frame)
+        sys.stdout.flush()
+        first = False
+
+        elapsed = 0.0
+        while elapsed < refresh_sec and not stop:
+            time.sleep(min(0.1, refresh_sec - elapsed))
+            elapsed += 0.1
+
+    print("\n[signal] stopped.")
+    return 0
+
+
 # ── CLI ──────────────────────────────────────────────────────────────
 
 
@@ -396,6 +508,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--scan-band", action="store_true",
                     help="One-shot sniff of every NA ATSC RF (2..36) with "
                          "a one-line bar per channel.")
+    ap.add_argument("--watch-band", action="store_true",
+                    help="LIVE all-channel dashboard: refresh every channel "
+                         "in place, forever, for antenna aiming. Shows a "
+                         "peak-hold '>' marker per channel.")
+    ap.add_argument("--rf-list", default=None,
+                    help="Comma-separated RFs to watch with --watch-band "
+                         "(e.g. '7,9,21,31,34,36'). Fewer channels = faster "
+                         "refresh. Default: full NA band 2..36.")
     args = ap.parse_args(argv)
 
     if hasattr(sys.stdout, "reconfigure"):
@@ -408,8 +528,19 @@ def main(argv: list[str] | None = None) -> int:
         return scan_band(args.refresh, args.antenna, args.ifgr,
                           args.rfgain_sel, args.dwell_sec)
 
+    if args.watch_band:
+        if args.rf_list:
+            try:
+                rf_list = [int(x) for x in args.rf_list.split(",") if x.strip()]
+            except ValueError:
+                ap.error("--rf-list must be comma-separated integers")
+        else:
+            rf_list = list(range(2, 37))
+        return watch_band(args.refresh, args.antenna, args.ifgr,
+                          args.rfgain_sel, args.dwell_sec, rf_list)
+
     if args.rf is None:
-        ap.error("either --rf <N> or --scan-band is required")
+        ap.error("one of --rf <N>, --scan-band, or --watch-band is required")
 
     return monitor_one(args.rf, args.refresh, args.antenna,
                         args.ifgr, args.rfgain_sel, args.bars,

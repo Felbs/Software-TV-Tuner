@@ -523,6 +523,14 @@ void atsc_equalizer_long_impl::filterN_dd(const float* input_samples,
     }
 }
 
+// Compile the DFE hot loop for AVX2+FMA on x86 so the fused dot/update loops
+// use 256-bit vectors and fused multiply-add (the global build is only -O3 =
+// SSE2). Guarded so non-x86 targets (e.g. the Raspberry Pi / ARM) keep the
+// portable default codegen. All of the user's x86 boxes (Zen1 1600X, Zen2
+// Threadripper) have AVX2+FMA.
+#if defined(__x86_64__) || defined(__i386__)
+__attribute__((target("avx2,fma")))
+#endif
 void atsc_equalizer_long_impl::adaptN(const float* input_samples,
                                  const float* training_pattern,
                                  float* output_samples,
@@ -1561,9 +1569,11 @@ int atsc_equalizer_long_impl::general_work(int noutput_items,
                 adaptN(data_mem, training_sequence1, data_mem2, KNOWN_FIELD_SYNC_LENGTH);
             }
         } else {
-            // Continuous decision-directed tracking on data segments (no-op
-            // passive filter when STVT_EQ_DD_MU is unset/0).
-            filterN_dd(data_mem, data_mem2, ATSC_DATA_SEGMENT_LENGTH);
+            // Data segment: continuous decision-directed tracking (main's
+// DFE lives inside filterN_dd, gated by STVT_EQ_DFE_MU_FB).
+            // otherwise the continuous DD tracker (no-op passive filter when
+            // STVT_EQ_DD_MU is unset/0).
+                filterN_dd(data_mem, data_mem2, ATSC_DATA_SEGMENT_LENGTH);
 
             // ── MOD-12 GUARD (2026-07-07, the convicted mechanism's true
             // fix) ── each field = 312 data segments (26x12), so at every

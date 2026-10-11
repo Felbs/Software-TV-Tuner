@@ -63,6 +63,7 @@ tools/scan_temp/
 
 # Overnight report from the cleanup branch (review artifact, not source)
 OVERNIGHT_REPORT.md
+iq_captures/
 
 # --- dev lab & internal notes (full history preserved on the lab-archive branch) ---
 handoff/

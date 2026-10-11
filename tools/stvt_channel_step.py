@@ -37,7 +37,7 @@ if sys.platform == "win32":
 CHAIN_DEFAULTS = {
     "STVT_EQ":          "long",
     "STVT_RS":          "stock",
-    "STVT_VITERBI":     "soft",
+    "STVT_VITERBI":     "hard",  # ported from Pi: bare/winning config on x86 too
     "STVT_SPS":         "1.1",
     "STVT_RRC_SYMS":    "8",
     "STVT_TEISCRUB":    "1",

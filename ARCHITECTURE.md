@@ -49,7 +49,7 @@ flowchart TB
     %% ---------------------------------------------------------------- DSP CHAIN
     subgraph CHAIN["ATSC decode chain — tv_live.py  (GNU Radio top_block · gr-atscplus OOT module)"]
         direction TB
-        SRC["soapy.source<br/>8 MS/s · fc32 · retry-on-busy<br/>persistent runtime set_frequency/set_antenna"]
+        SRC["soapy.source<br/>8 MS/s · fc32 · retry-on-busy<br/>persistent runtime set_frequency/set_antenna<br/><i>self-heal on a wedged API: restart the vendor service<br/>(Windows: SDRplayAPIService · Linux: systemctl sdrplay)</i>"]
         SCALE["multiply_const_cc x32768<br/><i>match offline int16 scaling</i>"]
         NB{{"atsc_noise_blanker<br/><i>opt STVT_NB</i>"}}
         RESAMP["rational_resampler 25/32<br/>8M -> 6.25 MS/s"]
@@ -87,16 +87,19 @@ flowchart TB
         LIVETS[("live.ts<br/>data/tv_live/<br/>rotates at ~20 GB")]
         TAIL["TailWorker (CLI)<br/>tail + 188-byte realign<br/>NULL-packet heartbeat"]
         FFMPEG["ffmpeg<br/>program select · transcode/copy<br/>tee fan-out"]
+        WATCH["tv_watch.py<br/><i>panel playback supervisor</i><br/>growth-proved extraction · extractor rebuild on repeat death<br/>resync-storm breaker · 608 flush on every seek/reload<br/><b>reads the dir the chain writes — STVT_LIVE_DIR</b>"]
         PLAYER["Player window<br/>ffplay · mpv · vlc · tv_player.py<br/>(panel: tv_watch.py / harvest_player.py)"]
         REC["MP4 recording<br/>recordings/*.mp4"]
         STREAM["RTMP stream<br/>Twitch/YouTube (flv)"]
         CC["Closed captions<br/>atsc_cc.py (CEA-608) / ccextractor"]
 
         LIVETS --> TAIL --> FFMPEG
+        LIVETS --> WATCH --> FFMPEG
         FFMPEG --> PLAYER
         FFMPEG --> REC
         FFMPEG --> STREAM
         LIVETS -.-> CC
+        WATCH -.->|flush| CC
     end
 
     %% ---------------------------------------------------------------- PSIP/EPG
@@ -150,6 +153,7 @@ flowchart TB
     %% ---------------------------------------------------------------- CONTROL PLANE
     RETUNE{{"Persistent-retune protocol<br/>retune.cmd -> ack<br/><i>~10 s channel change, no chain teardown</i>"}}
     DOCTOR["chain_doctor (panel)<br/>psutil watch · ~40 s silent-death detect<br/>auto-retune · heal-rate cap"]
+    DVR["stvt_schedule.py<br/><i>DVR controller — &quot;stvt_schedule.py tv&quot; is the headline UI</i><br/>guide -> queue -> multirec · stale/blown jobs expire on read<br/><i>one mux at a time: the daemon SKIPS, never stacks</i>"]
 
     %% ================================================================ CROSS-EDGES
     %% front-ends -> chain
@@ -194,6 +198,14 @@ flowchart TB
     DOCTOR -.->|monitors| SRC
     DOCTOR -.->|re-tune| PANEL
 
+    %% playback contract — the panel's chain and the watcher must agree on the dir
+    PANEL -.->|"STVT_LIVE_DIR (pins watcher to this chain)"| WATCH
+
+    %% DVR
+    DVR -.->|read| EPG
+    DVR ==>|"spawn chain + multirec"| SRC
+    DVR --> REC
+
     %% SDR feeds the chain source
     SOAPY ==> SRC
 
@@ -210,13 +222,13 @@ flowchart TB
 
     class CLI,PANEL,BROWSER ui;
     class ANT,RADIO,SOAPY,COMPAT,CONFIG,PROBE hw;
-    class SRC,SCALE,RESAMP,RXF,FPLL,DCR,AGC,SYNC,FSCHK,EQ,VIT,DEINT,RS,DERAND,DEPAD,TEI,FSINK dsp;
+    class SRC,SCALE,RESAMP,RXF,FPLL,DCR,AGC,SYNC,FSCHK,EQ,WLF,EQWL,VIT,DEINT,RS,DERAND,DEPAD,TEI,FSINK dsp;
     class NB,NOTCH,SMOOTH opt;
-    class LIVETS,TAIL,FFMPEG,PLAYER,REC,STREAM,CC out;
+    class LIVETS,TAIL,FFMPEG,WATCH,PLAYER,REC,STREAM,CC out;
     class PSIP,EPG,STATIONS guide;
     class MERMETER,TUNEANT,MERGAIN,CHSCAN,QJUDGE,DEEPTUNE,TIMEKNOB,ANTID,PLANNER,SWEEP,E7,CHAINLOG adaptive;
     class SCANJSON,PIDCACHE,QHIST,RECIPES,FINGER,TAPS,ORACLE file;
-    class RETUNE,DOCTOR ctrl;
+    class RETUNE,DOCTOR,DVR ctrl;
 ```
 
 ## Telemetry — the dials and the contract behind them
