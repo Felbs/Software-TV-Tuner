@@ -346,7 +346,13 @@ class LiveTVTopBlock(gr.top_block):
             if v is not None:
                 try:
                     src.write_setting(soapy_key, "true" if v == "1" else "false")
-                    LOG.info(f"soapy: {soapy_key}={'true' if v == '1' else 'false'} ({env_key})")
+                    # Read it back: a write that was not read back may not have happened
+                    # (the RSPdx bias-T in particular does not survive a replug).
+                    try:
+                        _rb = src.read_setting(soapy_key)
+                    except Exception as _exc:
+                        _rb = f"readback failed ({_exc!r})"
+                    LOG.info(f"soapy: {soapy_key}={'true' if v == '1' else 'false'} ({env_key}) readback={_rb}")
                 except Exception as exc:
                     LOG.info(f"soapy: {soapy_key} write failed ({exc!r})")
 
