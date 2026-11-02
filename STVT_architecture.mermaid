@@ -5,10 +5,20 @@ flowchart TB
 %%
 %%  Read top-to-bottom as the signal's journey:
 %%    RF photons -> SDR -> GNU Radio DSP decode chain -> MPEG-TS (live.ts)
-%%    -> player / record / stream.  Two front-ends drive it (CLI + web panel);
-%%    a telemetry + learning layer reads the decoder's own equalizer error to
-%%    tune any antenna.  Boxes are modules/blocks; solid arrows = data/signal
-%%    flow, dashed arrows = control / telemetry / file I/O.
+%%    -> player / record / stream.  Three ways to drive it: the supervisor
+%%    (stvt_run.sh — THE way to watch TV on a Linux rig), the CLI and the web
+%%    panel; a telemetry + learning layer reads the decoder's own equalizer
+%%    error to tune any antenna; a set of offline instruments replays captures
+%%    through the SAME chain so a change can be gated byte-for-byte.
+%%    Boxes are modules/blocks; solid arrows = data/signal flow, dashed arrows
+%%    = control / telemetry / file I/O.
+%%
+%%  2026-11-01 revision (Linux/Omarchy rig, Ryzen 1600X + RSPdx): added the
+%%  supervisor + HD player path, the per-antenna calibration file, the FOLD /
+%%  WL front end (fpll_tight -> wl_frontend -> equalizer_wl), the fused RX
+%%  filter, bias-T + setting read-backs, the IQ ring, and the instruments
+%%  (tv_replay / chain_replay / gate_ts / tv_live_filesrc / profile_chain /
+%%  doctor / lna_probe / probe_throughput / sigmf_export).
 %%
 %%  This file is a living reference: keep it in sync when the chain changes.
 %% ============================================================================
@@ -16,72 +26,111 @@ flowchart TB
     %% ---------------------------------------------------------------- FRONT ENDS
     subgraph UI["User front-ends"]
         direction LR
+        RUN["<b>tools/stvt_run.sh [rf] [program]</b><br/><i>THE launcher on a Linux rig</i><br/>flock: ONE supervisor at a time<br/>sources ~/.stvt_autocal.env when STVT_IFGR is unset<br/>spawns tv_live.py, then the HD player<br/>drought watch: unique-PID count > 150 for<br/>DROUGHT_STRIKES samples, after DROUGHT_GRACE_LOOPS<br/>bounded: MAX_CHAIN_RESTARTS + COOLDOWN<br/>log /tmp/stvt_run.log"]
         CLI["tv_tuner.py<br/><i>CLI orchestrator</i><br/>scan · guide · tune · play<br/>record · stream · captions<br/>interactive channel surf"]
         PANEL["tv_tuna_panel.py<br/><i>web UI · http.server :8642</i><br/>Guide tab · NERD tab · Signal Finder<br/>class H / Panel(ThreadingHTTPServer)"]
         BROWSER(["Browser<br/>localhost:8642"])
         BROWSER --- PANEL
     end
 
+    %% ---------------------------------------------------------------- CALIBRATION
+    subgraph CAL["Per-antenna calibration (the gain is a property of the ANTENNA, measured)"]
+        direction LR
+        AUTOCAL["stvt_autocal.py<br/>decode-%-scored gain sweep per antenna<br/>writes ~/.stvt_autocal.env"]
+        ENVFILE[("~/.stvt_autocal.env<br/>STVT_IFGR · STVT_RFGAIN_SEL · STVT_ANTENNA<br/>STVT_BIAST (LNA on Antenna B) · STVT_RXF_FUSED(_GAIN)<br/>STVT_SPS · STVT_RRC_SYMS · STVT_CACHE_SECS<br/>STVT_MPV_HWDEC · STVT_CC<br/><i>2026-11-01: IFGR 40 / rfgain 4 / bias-T on = in_rms ~106, TEI 0.0-0.1 %</i>")]
+        LNAPROBE["lna_probe.py<br/>which port has signal,<br/>is the LNA actually powered?"]
+        AUTOCAL -.->|write| ENVFILE
+        LNAPROBE -.-> ENVFILE
+    end
+
     %% ---------------------------------------------------------------- SDR LAYER
     subgraph SDR["SDR hardware + access layer"]
         direction LR
-        ANT>"Antenna<br/>TV yagi · discone · rabbit-ears"]
+        ANT>"Antennas<br/>A Philips flat · B yagi + LNA (bias-T) · C discone"]
         RADIO["SDR device<br/>SDRplay RSPdx/RSP1A · PlutoSDR<br/>RTL-SDR · HackRF · Airspy · BladeRF"]
-        SOAPY["SoapySDR<br/>vendor driver + SoapyRemote"]
-        COMPAT["sdr_compat.py<br/>resolve_soapy_args() · gain/antenna xlate<br/><i>issue #2: any radio, not just sdrplay</i>"]
+        SOAPY["SoapySDR + gr-soapy<br/>vendor driver (SoapySDRPlay3) · SoapyRemote"]
+        COMPAT["sdr_compat.py<br/>resolve_soapy_args() · gain/antenna xlate<br/><i>any radio, not just sdrplay</i>"]
         CONFIG["config.py<br/>antenna/gain recipes · rates · geo · ports"]
-        PROBE["probe_sdr.py<br/>enumerate · antennas · rates diagnostic"]
+        PROBE["probe_sdr.py · probe_throughput.py<br/>enumerate · antennas · rates · stream rate vs wall clock"]
+        DOCTOR2["doctor.py<br/>is this machine ready to decode TV?<br/>one command, every dependency"]
         ANT --> RADIO --> SOAPY
         COMPAT -.-> SOAPY
         CONFIG -.-> COMPAT
         PROBE -.-> SOAPY
+        DOCTOR2 -.-> SOAPY
     end
 
     %% ---------------------------------------------------------------- DSP CHAIN
     subgraph CHAIN["ATSC decode chain — tv_live.py  (GNU Radio top_block · gr-atscplus OOT module)"]
         direction TB
-        SRC["soapy.source<br/>8 MS/s · fc32 · retry-on-busy<br/>persistent runtime set_frequency/set_antenna"]
+        SRC["soapy.source<br/>8 MS/s · fc32 · retry-on-busy<br/>AGC OFF then IFGR + rfgain_sel + antenna<br/><b>every write_setting read back</b> (bias-T, notches, IQ corr)<br/>persistent runtime set_frequency/set_antenna"]
         SCALE["multiply_const_cc x32768<br/><i>match offline int16 scaling</i>"]
+        IQRING[("IQ ring (opt STVT_IQ_RING)<br/>cs16 capture of the live input<br/>for replay-heal + gates")]
         NB{{"atsc_noise_blanker<br/><i>opt STVT_NB</i>"}}
-        RESAMP["rational_resampler 25/32<br/>8M -> 6.25 MS/s"]
+        RESAMP["rational_resampler 25/32<br/>8M -> 6.25 MS/s<br/><i>skipped when STVT_SKIP_RESAMP</i>"]
         NOTCH{{"atsc_adaptive_notch<br/><i>opt STVT_NOTCH</i>"}}
         SMOOTH{{"atsc_spectral_smoother<br/><i>opt STVT_SPECTRAL</i>"}}
-        RXF["atsc_rx_filter<br/>RRC matched filter -> ~16.14 MS/s<br/><i>or fused resampler+MF STVT_RXF_FUSED</i>"]
-        FPLL["atsc_fpll_tight<br/>carrier recovery · alpha=0.001 · AFC tau"]
-        DCR["dc_blocker_ff"]
-        AGC["agc_ff"]
-        SYNC["atsc_sync_soft<br/>symbol timing recovery"]
-        FSCHK["atsc_fs_checker_inst<br/>field-sync (PN511/PN63) detect + validate"]
-        EQ["atsc_equalizer_long<br/>LMS equalizer<br/><b>emits fs_err_rms telemetry = MER</b>"]
-        VIT["atsc_viterbi_soft / dtv.atsc_viterbi_decoder<br/>12-way trellis decode<br/><i>port2 = SOVA reliability (STVT_SOVA)</i>"]
-        DEINT["atsc_deinterleaver<br/>convolutional de-interleave"]
-        RS["atsc_rs_decoder_erasure / stock<br/>Reed-Solomon (207,187) FEC<br/><i>TURBO 2b trellis-pin retry STVT_TURBO</i>"]
+        RXF["atsc_rx_filter (RRC, STVT_RRC_SYMS taps, STVT_SPS)<br/><b>or FUSED resampler + matched filter</b> STVT_RXF_FUSED<br/>(+STVT_RXF_FUSED_GAIN; -6 % CPU, bit-identical decode)"]
+        FPLL["atsc_fpll_tight<br/>carrier recovery · alpha · AFC tau · BLOCK_NCO<br/><b>FOLD mode (STVT_FPLL_FOLD=1, default): dc_blocker + agc<br/>run inside the fpll thread</b>"]
+        DCR{{"dc_blocker_ff + agc_ff<br/><i>separate blocks only when FOLD=0</i>"}}
+        SYNC["atsc_sync_soft<br/>symbol timing recovery<br/>(siblings: sync_fieldlock · kalman · pathA · slidefs · tunable)"]
+        FSCHK["atsc_fs_checker_inst<br/>field-sync (PN511/PN63) detect + validate<br/><b>in-chain re-acquire = self-healing droughts</b>"]
+        WLF["atsc_wl_frontend  <i>STVT_WL_FUSED</i><br/>ONE inlined 8-tap interpolation kernel<br/>real AND imag symbols in a single pass<br/>(the whole WL real-time deficit)"]
+        EQ["equalizer — STVT_EQ selects:<br/>atsc_equalizer_long (LMS, LKG tap hold) · cma<br/>pilot · pilot_dd · pilot_dd_soft · pilot_multifs(_dd)<br/>atsc_equalizer_wl (widely-linear, real+imag in)<br/><b>emits fs_err_rms telemetry = MER</b> · tapcache warm start"]
+        VIT["atsc_viterbi_soft / dtv.atsc_viterbi_decoder<br/>12-way trellis decode (STVT_VITERBI soft|hard)<br/><i>port2 = SOVA reliability (STVT_SOVA)</i>"]
+        DEINT["atsc_deinterleaver<br/>convolutional de-interleave (+ reliability lane)"]
+        RS["atsc_rs_decoder_erasure / stock (STVT_RS)<br/>Reed-Solomon (207,187) FEC · STVT_RS_ERASURES<br/><i>TURBO 2b trellis-pin retry STVT_TURBO</i>"]
         DERAND["atsc_derandomizer<br/>energy de-whiten"]
         DEPAD["atsc_depad<br/>-> 188-byte MPEG-TS packets"]
-        TEI["TEIScrub<br/>RS-uncorrectable packet -> NULL PID 0x1FFF<br/><i>preserves continuity counters</i>"]
-        FSINK["file_sink (unbuffered)<br/>-> live.ts"]
+        TEI["TEIScrub (STVT_TEISCRUB)<br/>RS-uncorrectable packet -> NULL PID 0x1FFF<br/><i>preserves continuity counters</i>"]
+        FSINK["file_sink (unbuffered)<br/>-> live.ts (rotates at STVT_ROTATE_GB)"]
+        DIAG[/"STVT_DIAG taps<br/>eq_in/eq_out · dei · rs · derand · depad<br/>-> STVT_DIAG_DIR"/]
 
-        SRC --> SCALE --> NB --> RESAMP --> NOTCH --> SMOOTH --> RXF
-        RXF --> FPLL --> DCR --> AGC --> SYNC --> FSCHK --> EQ
+        SRC --> SCALE --> NB --> RESAMP --> NOTCH --> SMOOTH --> RXF --> FPLL
+        SCALE -.-> IQRING
+        FPLL -.->|"FOLD=0"| DCR -.-> SYNC
+        FPLL -->|"classic path"| SYNC --> FSCHK --> EQ
+        FPLL -->|"WL path (real + imag)"| WLF --> EQ
         EQ --> VIT --> DEINT --> RS --> DERAND --> DEPAD --> TEI --> FSINK
+        EQ -.-> DIAG
+        RS -.-> DIAG
     end
 
     %% ---------------------------------------------------------------- OUTPUT
     subgraph OUT["Presentation — live.ts consumers"]
         direction LR
-        LIVETS[("live.ts<br/>data/tv_live/<br/>rotates at ~20 GB")]
+        LIVETS[("live.ts<br/>data/tv_live/<br/>rotates at ~16-20 GB")]
+        HDPLAY["<b>stvt_play_hd.sh [program]</b> (spawned by stvt_run.sh)<br/>tail -c N -F live.ts -> ffmpeg (program select, -c copy,<br/>+genpts +igndts) -> mpv --vo=gpu --hwdec=auto<br/>cache STVT_CACHE_SECS · yadif/bwdif deinterlace by field order<br/>error_concealment=3 (STVT_MPV_EC) · alimiter · CC track (STVT_CC)<br/>self-supervises mpv; exits when the chain dies"]
         TAIL["TailWorker (CLI)<br/>tail + 188-byte realign<br/>NULL-packet heartbeat"]
         FFMPEG["ffmpeg<br/>program select · transcode/copy<br/>tee fan-out"]
         PLAYER["Player window<br/>ffplay · mpv · vlc · tv_player.py<br/>(panel: tv_watch.py / harvest_player.py)"]
         REC["MP4 recording<br/>recordings/*.mp4"]
         STREAM["RTMP stream<br/>Twitch/YouTube (flv)"]
-        CC["Closed captions<br/>atsc_cc.py (CEA-608) / ccextractor"]
+        CC["Closed captions<br/>atsc_cc.py (CEA-608) / ccextractor<br/>or mpv's own CC track from the video"]
 
+        LIVETS ==> HDPLAY
         LIVETS --> TAIL --> FFMPEG
         FFMPEG --> PLAYER
         FFMPEG --> REC
         FFMPEG --> STREAM
         LIVETS -.-> CC
+    end
+
+    %% ---------------------------------------------------------------- INSTRUMENTS
+    subgraph INSTR["Offline instruments — the SAME chain on a capture (deterministic, no radio)"]
+        direction LR
+        TVREPLAY["tv_replay.py<br/>byte-faithful replica of tv_live's flowgraph<br/>file_source (cf32 / cs16) instead of the radio<br/>honours every STVT_* lever · diag taps"]
+        CHAINREPLAY["chain_replay.py<br/>tv_live's chain on a .cs16/.cf32 capture<br/>-> TS as 188-byte packets"]
+        GATETS["gate_ts.py<br/>capture -> TS vs an ORACLE TS<br/>exit 0 = identical bytes · reports TEI,<br/>nulls, CC errors; --make-oracle"]
+        FILESRC["tv_live_filesrc.py<br/>diagnostic sibling of tv_live.py"]
+        PROFILE["profile_chain.py<br/>per-block CPU profile of the live chain"]
+        SIGMF["sigmf_export.py<br/>SigMF sidecars for cs16 captures"]
+        CAPS[("captures<br/>stvt_cap/*.cs16 · iq_captures/*.cf32<br/><i>never in the repo</i>")]
+        CAPS --> TVREPLAY
+        CAPS --> CHAINREPLAY --> GATETS
+        CAPS --> FILESRC
+        CAPS -.-> SIGMF
+        TVREPLAY -.-> PROFILE
     end
 
     %% ---------------------------------------------------------------- PSIP/EPG
@@ -97,7 +146,7 @@ flowchart TB
     %% ------------------------------------------------- ADAPTIVE / LEARNING LAYER
     subgraph ADAPT["Universal tuning + telemetry layer  (adaptive-tv/)"]
         direction TB
-        CHAINLOG[/"chain log<br/>fs_err_rms · FPLL · RS loss · CIR echoes"/]
+        CHAINLOG[/"chain log<br/>fs_err_rms · FPLL · in_rms / max|x| (gain health)<br/>RS loss · CIR echoes · setting read-backs"/]
         MERMETER["mer_meter.py<br/>live MER dashboard · aim-by-ear tone"]
         TUNEANT["tune_antenna.py<br/>sweep -> classify -> calibrate -> verdict<br/>CLEAN/IMPULSE/BELOW-CLIFF/PHANTOM"]
         MERGAIN["mer_gain_cal.py · gain_sweep.py<br/>gain grid search on MER"]
@@ -138,6 +187,10 @@ flowchart TB
 
     %% ================================================================ CROSS-EDGES
     %% front-ends -> chain
+    RUN ==>|"spawn tv_live.py --rf N"| SRC
+    RUN ==>|"spawn, restart when the chain is healthy"| HDPLAY
+    ENVFILE -.->|"sourced"| RUN
+    ENVFILE -.->|"STVT_* levers"| SRC
     CLI ==>|"spawn --rf N"| SRC
     PANEL ==>|"spawn tv_live.py"| SRC
     PANEL -.->|write| RETUNE
@@ -148,6 +201,10 @@ flowchart TB
     %% chain -> outputs
     FSINK ==> LIVETS
     EQ -.->|stderr| CHAINLOG
+    SRC -.->|"gain knobs · readbacks"| CHAINLOG
+    CHAINLOG -.->|"unique-PID / drought watch"| RUN
+    IQRING -.-> CAPS
+    IQRING -.-> E7
 
     %% front-ends read guide + telemetry
     CLI -.-> PSIP
@@ -181,6 +238,8 @@ flowchart TB
 
     %% SDR feeds the chain source
     SOAPY ==> SRC
+    AUTOCAL -.-> SOAPY
+    LNAPROBE -.-> SOAPY
 
     %% ---------------------------------------------------------------- STYLING
     classDef ui       fill:#1e3a5f,stroke:#4a90d9,color:#eaf2fb,stroke-width:2px;
@@ -192,13 +251,17 @@ flowchart TB
     classDef file     fill:#222,stroke:#888,color:#ddd,stroke-width:1px;
     classDef ctrl     fill:#4a1e1e,stroke:#d95a5a,color:#f8e6e6,stroke-width:2px;
     classDef guide    fill:#1f3a3a,stroke:#3fb8b8,color:#e6f7f7,stroke-width:1px;
+    classDef instr    fill:#2a2a3d,stroke:#8a8ad9,color:#ececfb,stroke-width:1px;
+    classDef cal      fill:#3a2f1a,stroke:#d9a53a,color:#fbf3e6,stroke-width:2px;
 
-    class CLI,PANEL,BROWSER ui;
-    class ANT,RADIO,SOAPY,COMPAT,CONFIG,PROBE hw;
-    class SRC,SCALE,RESAMP,RXF,FPLL,DCR,AGC,SYNC,FSCHK,EQ,VIT,DEINT,RS,DERAND,DEPAD,TEI,FSINK dsp;
-    class NB,NOTCH,SMOOTH opt;
-    class LIVETS,TAIL,FFMPEG,PLAYER,REC,STREAM,CC out;
+    class RUN,CLI,PANEL,BROWSER ui;
+    class ANT,RADIO,SOAPY,COMPAT,CONFIG,PROBE,DOCTOR2 hw;
+    class SRC,SCALE,RESAMP,RXF,FPLL,SYNC,FSCHK,WLF,EQ,VIT,DEINT,RS,DERAND,DEPAD,TEI,FSINK dsp;
+    class NB,NOTCH,SMOOTH,DCR opt;
+    class LIVETS,HDPLAY,TAIL,FFMPEG,PLAYER,REC,STREAM,CC out;
     class PSIP,EPG,STATIONS guide;
     class MERMETER,TUNEANT,MERGAIN,CHSCAN,QJUDGE,DEEPTUNE,TIMEKNOB,ANTID,PLANNER,SWEEP,E7,CHAINLOG adaptive;
-    class SCANJSON,PIDCACHE,QHIST,RECIPES,FINGER,TAPS,ORACLE file;
+    class SCANJSON,PIDCACHE,QHIST,RECIPES,FINGER,TAPS,ORACLE,IQRING,CAPS,DIAG file;
     class RETUNE,DOCTOR ctrl;
+    class TVREPLAY,CHAINREPLAY,GATETS,FILESRC,PROFILE,SIGMF instr;
+    class AUTOCAL,ENVFILE,LNAPROBE cal;
