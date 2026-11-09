@@ -873,14 +873,22 @@ class LiveTVTopBlock(gr.top_block):
         src = self._src
         t0 = time.time()
         ant = cmd.get("antenna")
+        # Same channel, same antenna = a GAIN-ONLY change: the stream and
+        # live.ts are kept -- no frequency write, no rotation, no EQ
+        # save/warm.  (2026-11-09: with the full path, same-RF retunes
+        # stalled the TS output intermittently and then for good while the
+        # equalizer still reported lock at 19 dB; a channel change and back
+        # revived it.  A gain step needs none of the channel-change work.)
+        same_channel = (rf == self._rf) and not ant
         LOG.info(f"PERSIST-RETUNE: rf {self._rf} -> {rf} "
                  f"({freq/1e6:.3f} MHz) antenna={ant} "
                  f"rfgain_sel={cmd.get('rfgain_sel')} ifgr={cmd.get('ifgr')} "
-                 f"dabnotch={cmd.get('dabnotch')}")
+                 f"dabnotch={cmd.get('dabnotch')}"
+                 f"{' [gain-only: same channel]' if same_channel else ''}")
         # ── STEP 0: persist the OUTGOING channel's taps BEFORE the radio
         # moves, while d_taps_lkg still describes this channel's multipath.
         # One field sync (~24.2 ms) is the command port's polling period.
-        new_cache = self._eq_cache_path(rf, ant)
+        new_cache = None if same_channel else self._eq_cache_path(rf, ant)
         if new_cache and self._eq_cmd("save"):
             time.sleep(float(os.environ.get("STVT_RETUNE_EQ_SAVE_MS", "40"))
                        / 1000.0)
@@ -888,7 +896,8 @@ class LiveTVTopBlock(gr.top_block):
         # hard-fails we raise so the panel's classic respawn takes over.
         if ant:
             src.set_antenna(0, ant)
-        src.set_frequency(0, freq)
+        if not same_channel:
+            src.set_frequency(0, freq)
         if cmd.get("ifgr") is not None:
             try:
                 src.set_gain(0, "IFGR", float(cmd["ifgr"]))
@@ -914,8 +923,9 @@ class LiveTVTopBlock(gr.top_block):
         # file_sink.open() reopens the same path truncated at offset 0,
         # the exact mechanism the size-rotation watchdog already uses
         # (never a bare truncate(0): sparse-file trap, see main()).
-        self._ts_sink.open(str(self._ts_path))
-        self._ts_sink.set_unbuffered(True)
+        if not same_channel:
+            self._ts_sink.open(str(self._ts_path))
+            self._ts_sink.set_unbuffered(True)
         self._rf = rf
         # ── STEP 1: rebind the cache to the INCOMING channel and warm-load.
         # Deliberately AFTER the radio has been re-pointed: the RSPdx's AGC
@@ -941,8 +951,13 @@ class LiveTVTopBlock(gr.top_block):
                     {"rf": rf, "antenna": ant or self._iq_ring.meta.get("antenna")})
             except Exception:
                 pass
-        LOG.info(f"PERSIST-RETUNE: applied in {time.time()-t0:.2f}s — "
-                 "chain re-acquiring (FPLL hunt -> fs sync -> EQ retrain)")
+        if same_channel:
+            LOG.info(f"PERSIST-RETUNE: gain-only change applied in "
+                     f"{time.time()-t0:.2f}s — same channel, stream and "
+                     f"live.ts kept")
+        else:
+            LOG.info(f"PERSIST-RETUNE: applied in {time.time()-t0:.2f}s — "
+                     "chain re-acquiring (FPLL hunt -> fs sync -> EQ retrain)")
 
 
 def main():
