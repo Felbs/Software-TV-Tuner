@@ -53,7 +53,12 @@ atsc_sync_soft_impl::atsc_sync_soft_impl(float rate)
     // Defaults tuned on sdr_RF36.cf32 (89.66% segment alignment, vs
     // 71.6% from gr-dtv atsc_sync). See ATSC_SYNC_SOFT_* env vars and
     // ~/overnight/SYNC_BUILD_RESULT.md for the tuning sweep.
-    d_alpha = 0.40f;
+    // d_alpha was 0.40 until 2026-11-10. On a 10-minute recording of a strong channel
+    // that speed re-locked 1528 times (10 times at 0.10) and re-locks dropped packets.
+    // On air: 60 continuity errors a minute at 0.40 against 0 at 0.10 (MER 19 dB), and
+    // 2107 against 158 on a marginal signal (MER 16.2 dB). The sweep above scored
+    // segment alignment on one recording, not packets lost.
+    d_alpha = 0.10f;
     d_lock_threshold = 4.0f;
     d_unlock_threshold = 2.0f;
     d_sticky_fraction = 0.95f;

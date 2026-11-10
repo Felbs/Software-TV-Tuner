@@ -495,6 +495,13 @@ class LiveTVTopBlock(gr.top_block):
         _agc_ref   = float(os.environ.get("STVT_AGC_REFERENCE", "4.0"))
         agc  = analog.agc_ff(_agc_alpha, _agc_ref)
         LOG.info(f"agc: alpha={_agc_alpha} ref={_agc_ref}  dc_blocker_taps={_dcr_taps}")
+        # Segment-sync integrator speed. At the old 0.40 the block kept re-locking and
+        # re-locks dropped packets; 0.10 holds. On air RF 34, 2026-11-10: strong
+        # signal (MER 19 dB) 60 continuity errors a minute at 0.40, 0 at 0.10; marginal
+        # signal (MER 16.2 dB) 2107 a minute at 0.40, 158 at 0.10. Set here as well as in
+        # the block so an installed build from before the change gets it; an
+        # ATSC_SYNC_SOFT_ALPHA already in the environment still wins.
+        os.environ.setdefault("ATSC_SYNC_SOFT_ALPHA", "0.10")
         sync = atscplus.atsc_sync_soft(output_rate)
         fs_check = atscplus.atsc_fs_checker_inst()
         # Equalizer selected by STVT_EQ env var. Menu in run_ab.sh.
