@@ -40,8 +40,54 @@ atsc_fpll_tight_impl::atsc_fpll_tight_impl(float rate, float alpha, float afc_ta
     d_beta = alpha * alpha / 4.0f;
     d_rate = rate;
     d_afc.set_taps(1.0 - exp(-1.0 / rate / (afc_tau_us * 1e-6)));
-    d_nco.set_freq((-3e6 + 0.309e6) / rate * 2 * GR_M_PI);
+    d_nominal_freq = (-3e6 + 0.309e6) / rate * 2 * GR_M_PI;
+    d_nco.set_freq(d_nominal_freq);
     d_nco.set_phase(0.0);
+
+    // STVT_FPLL_FREQ_LIMIT_HZ (default 50000; 0 = off, the loop as it was).
+    // With no pilot in its bandwidth the loop integrates noise and its frequency
+    // walks away, and nothing brought it back: the phase detector sees only a
+    // beat note far outside the AFC filter, so a returning signal is never
+    // re-acquired.  Found on air 2026-11-10 on a weak channel: a gain search's
+    // first cell overloaded the front end for 20 s, the carrier walked 110 kHz in
+    // the first 10 s and 450 kHz in five minutes, and every later cell (among
+    // them gains that decode cleanly from a fresh start) read "no signal".
+    // A real carrier is within a few kHz of nominal (tuner error), so a loop
+    // further out than the limit is lost, not tracking: put it back on the
+    // nominal pilot, the state every fresh start acquires from.  While the loop
+    // stays inside the limit nothing changes and the output is bit-identical.
+    {
+        double limit_hz = 50000.0;
+        if (const char* p = std::getenv("STVT_FPLL_FREQ_LIMIT_HZ")) {
+            limit_hz = std::atof(p);
+        }
+        d_freq_limit = (limit_hz > 0.0) ? limit_hz / rate * 2 * GR_M_PI : 0.0;
+    }
+
+    // STVT_FPLL_RETURN_HZ (default 2000; 0 = off).  The limit above stops the
+    // walk but is wide (it has to admit any tuner's error), and from tens of kHz
+    // out the loop takes tens of seconds to pull back in: the low-level gate
+    // that freezes it through a signal loss also freezes it off frequency
+    // (measured on a replay: 35 s of clean signal to come back from 46 kHz).
+    // So remember where the carrier sat while the loop was locked, and when it
+    // is lost and has moved further than this from there, put it back there.
+    // "Locked" is measured, not assumed: the AFC-filtered sample is the pilot at
+    // DC when the loop tracks (a steady vector) and a zero-mean beat or noise
+    // when it does not.  coherence = |mean|^2 / mean(|.|^2) over 2^18 samples
+    // (33 ms at 8 MS/s): locked reads near 1, lost reads near 0 whatever the
+    // input level.  A lost loop that has stayed within the range (a plain signal
+    // loss, where the gate holds it) is left alone, and a loop that has never
+    // locked has no memory to return to (only the wide limit applies), so a
+    // carrier far from nominal can still be acquired as before.  While the loop
+    // tracks, nothing changes and the output is bit-identical.
+    {
+        double ret_hz = 2000.0;
+        if (const char* p = std::getenv("STVT_FPLL_RETURN_HZ")) {
+            ret_hz = std::atof(p);
+        }
+        d_return_limit = (ret_hz > 0.0) ? ret_hz / rate * 2 * GR_M_PI : 0.0;
+        d_locked_freq = d_nominal_freq;
+    }
     d_t0 = std::chrono::steady_clock::now();
     d_total_samples = 0;
     d_window_sum_abs_x = 0.0;
@@ -212,6 +258,11 @@ int atsc_fpll_tight_impl::work(int noutput_items,
             // (most-recently AFC-smoothed) sample; same degenerate-sample gate
             // as the per-sample path. Correction scaled by B to hold loop gain.
             x = gr::fast_atan2f(last_filtered.imag(), last_filtered.real());
+            d_lock_re += last_filtered.real();
+            d_lock_im += last_filtered.imag();
+            d_lock_pwr += (double)last_filtered.real() * last_filtered.real()
+                        + (double)last_filtered.imag() * last_filtered.imag();
+            d_lock_m++;
             float mag2 = last_filtered.real() * last_filtered.real()
                        + last_filtered.imag() * last_filtered.imag();
             bool degenerate = (mag2 < mag2_min) || (x >= XGATE) || (x <= -XGATE);
@@ -273,6 +324,11 @@ int atsc_fpll_tight_impl::work(int noutput_items,
 
         filtered = d_afc.filter(result);
         x = gr::fast_atan2f(filtered.imag(), filtered.real());
+        d_lock_re += filtered.real();
+        d_lock_im += filtered.imag();
+        d_lock_pwr += (double)filtered.real() * filtered.real()
+                    + (double)filtered.imag() * filtered.imag();
+        d_lock_m++;
 
         // Degenerate-sample freeze (FIX #1 2026-05-23 + 2026-05-30 phase gate);
         // SAT_MODE / MAG_MIN_RMS / XGATE / mag2_min are read once at the top of
@@ -310,6 +366,63 @@ int atsc_fpll_tight_impl::work(int noutput_items,
     d_total_samples += noutput_items;
 
 telemetry:
+    // The carrier may not wander (see the constructor).  Once per work() call
+    // (a few thousand samples) is far finer than the walk is fast.
+    if (d_freq_limit > 0.0) {
+        const double off = d_nco.get_freq() - d_nominal_freq;
+        if (off > d_freq_limit || off < -d_freq_limit) {
+            d_nco.set_freq(d_nominal_freq);
+            d_freq_resets++;
+            if (d_freq_resets <= 5 || d_freq_resets % 50 == 0) {
+                std::fprintf(stderr,
+                             "[fpll] carrier %+.0f Hz off the nominal pilot: lost, not tracking; "
+                             "back to the pilot (reset %llu)\n",
+                             off * d_rate / (2.0 * GR_M_PI),
+                             (unsigned long long)d_freq_resets);
+                std::fflush(stderr);
+            }
+        }
+    }
+
+    // Lock memory (see the constructor): one verdict per 2^18 samples.
+    d_lock_samples += (uint64_t)noutput_items;
+    if (d_lock_samples >= (1u << 18) && d_lock_m > 0) {
+        const double coh = (d_lock_pwr > 0.0)
+            ? (d_lock_re * d_lock_re + d_lock_im * d_lock_im) / ((double)d_lock_m * d_lock_pwr)
+            : 0.0;
+        d_lock_re = d_lock_im = d_lock_pwr = 0.0;
+        d_lock_m = 0;
+        d_lock_samples = 0;
+        if (coh < d_coh_min) d_coh_min = coh;
+        if (coh >= 0.5) {
+            d_lost_windows = 0;
+            if (++d_locked_windows >= 8) {          // a quarter of a second of steady pilot
+                d_locked_freq = d_nco.get_freq();
+                d_ever_locked = true;
+            }
+        } else {
+            d_locked_windows = 0;
+            if (coh < 0.1) d_lost_windows++; else d_lost_windows = 0;
+        }
+        if (d_return_limit > 0.0 && d_ever_locked && d_lost_windows >= 4) {
+            const double off = d_nco.get_freq() - d_locked_freq;
+            if (off > d_return_limit || off < -d_return_limit) {
+                d_nco.set_freq(d_locked_freq);
+                d_lost_windows = 0;
+                d_returns++;
+                if (d_returns <= 5 || d_returns % 50 == 0) {
+                    std::fprintf(stderr,
+                                 "[fpll] carrier lost and %+.0f Hz from where it last locked: "
+                                 "back to %+.1f Hz (return %llu)\n",
+                                 off * d_rate / (2.0 * GR_M_PI),
+                                 d_locked_freq * d_rate / (2.0 * GR_M_PI),
+                                 (unsigned long long)d_returns);
+                    std::fflush(stderr);
+                }
+            }
+        }
+    }
+
     // Print every ~LOG_EVERY samples (~1.5M @ 16.14MS/s -> ~93ms).  Choose a
     // value that yields ~5 prints/sec to keep correlation with t=30-45s easy.
     constexpr uint64_t LOG_EVERY = 1u << 21; // 2,097,152 samples ≈ 130 ms
@@ -325,9 +438,10 @@ telemetry:
         double out_rms    = std::sqrt(d_window_out_pwr / (double)d_window_count);
         std::fprintf(stderr,
                      "[fpll t=%6.2fs] nco_freq_hz=%+.1f mean|x|=%.5f rms_x=%.5f "
-                     "max|x|=%.4f in_rms=%.1f out_rms=%.1f\n",
+                     "max|x|=%.4f in_rms=%.1f out_rms=%.1f coh=%.3f\n",
                      t, freq_hz, mean_abs_x, rms_x, d_window_max_abs_x,
-                     in_rms, out_rms);
+                     in_rms, out_rms, d_coh_min);
+        d_coh_min = 1.0;
         std::fflush(stderr);
         d_window_sum_abs_x = 0.0;
         d_window_sum_x2 = 0.0;

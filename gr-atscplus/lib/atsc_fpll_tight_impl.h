@@ -87,6 +87,23 @@ private:
     double   d_window_out_pwr;
     float    d_rate;
 
+    // The carrier may not wander: see the constructor (STVT_FPLL_FREQ_LIMIT_HZ).
+    double   d_nominal_freq = 0.0;   // rad/sample, the pilot where the tuner puts it
+    double   d_freq_limit = 0.0;     // rad/sample either side of it; 0 = no limit (the loop as it was)
+    uint64_t d_freq_resets = 0;
+
+    // Lock memory: see the constructor (STVT_FPLL_RETURN_HZ).
+    double   d_return_limit = 0.0;   // rad/sample either side of the last lock; 0 = off
+    double   d_locked_freq = 0.0;    // rad/sample, where the carrier last sat while locked
+    bool     d_ever_locked = false;
+    int      d_locked_windows = 0;
+    int      d_lost_windows = 0;
+    uint64_t d_returns = 0;
+    double   d_lock_re = 0.0, d_lock_im = 0.0, d_lock_pwr = 0.0;  // sums of the AFC-filtered pilot
+    uint64_t d_lock_m = 0;           // entries in those sums
+    uint64_t d_lock_samples = 0;     // samples the sums cover
+    double   d_coh_min = 1.0;        // lowest pilot coherence in the telemetry window
+
 public:
     atsc_fpll_tight_impl(float rate, float alpha, float afc_tau_us); float d_alpha; float d_beta;
     ~atsc_fpll_tight_impl() override;
