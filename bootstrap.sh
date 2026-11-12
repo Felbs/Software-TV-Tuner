@@ -95,7 +95,8 @@ if [[ " $* " == *" --sdrplay "* ]] || [[ " $* " == *" --sdrplay-rebuild "* ]]; t
         "$HERE/tools/patch_soapy_ringbuffer.sh" "$SPTMP/sp3"
         mkdir -p "$SPTMP/sp3/build"
         cd "$SPTMP/sp3/build"
-        cmake .. && make -j"$JOBS" && sudo make install && sudo ldconfig
+        cmake .. && make -j"$JOBS" && sudo make install && sudo ldconfig \
+          || { echo "[bootstrap] SoapySDRPlay3 build FAILED -- stopping"; exit 1; }
         cd "$HERE"
         echo "[bootstrap] probe:"
         SoapySDRUtil --probe 2>/dev/null | head -6 || true

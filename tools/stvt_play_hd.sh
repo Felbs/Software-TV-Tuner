@@ -26,13 +26,16 @@ MPVLOG="/tmp/stvt_mpv.log"
 SUPLOG="/tmp/stvt_play_hd.sup.log"
 MAX_RESTARTS=40
 COOLDOWN=3
-LOWCACHE_LIMIT=4          # ~60s of sustained low cache before a refresh
 
 # Auto-detect the graphical session (works under a normal desktop login).
 export DISPLAY="${DISPLAY:-:0}"
 export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
+# The single-instance lock lives on fd 9 (taken below).  A child that inherits it keeps the
+# lock after this script is gone, and the next supervisor is refused: never bare `sleep`.
+snooze(){ sleep "$1" 9>&- ; }
+PLAYER_PGID=""            # process group of OUR tail|ffmpeg|mpv pipeline (setsid makes it one)
 log(){ echo "$(printf '%(%H:%M:%S)T' -1) $*" >> "$SUPLOG"; }
 
 # Pi/ARM player trade (June Pi lineage): on a 4-core Pi the full-res player was
@@ -201,17 +204,30 @@ launch(){
       --mute=${STVT_MPV_MUTE:-no} \
       --title='STVT Live (prog $PROG)' --force-seekable=no \
       --input-ipc-server=/tmp/stvt-mpv.sock \
-      --msg-level=all=status" >> "$MPVLOG" 2>&1 < /dev/null &
+      --msg-level=all=status" >> "$MPVLOG" 2>&1 < /dev/null 9>&- &
+  PLAYER_PGID=$!
   log "launched player prog=$PROG tail=${BACKMB}MB"
 }
 
+# Our own pipeline is killed as a process group: an ffmpeg that is recording, or somebody's
+# mpv, is not ours to kill.  Only the first start, with no group on record yet, sweeps for a
+# pipeline an earlier supervisor left behind (it reads live.ts through `tail -c ... -F`).
 kill_player(){
-  for p in $(pgrep -x mpv); do kill "$p" 2>/dev/null; done
-  for p in $(pgrep -x ffmpeg); do kill "$p" 2>/dev/null; done
-  for p in $(pgrep -f "tail -c .*live.ts"); do kill "$p" 2>/dev/null; done
-  sleep 1
-  for p in $(pgrep -x mpv) $(pgrep -x ffmpeg); do kill -9 "$p" 2>/dev/null; done
+  if [ -n "$PLAYER_PGID" ]; then
+    kill -- "-$PLAYER_PGID" 2>/dev/null
+    snooze 1
+    kill -9 -- "-$PLAYER_PGID" 2>/dev/null
+    PLAYER_PGID=""
+    return 0
+  fi
+  local g
+  for p in $(pgrep -f "tail -c .*live.ts"); do
+    g=$(ps -o pgid= -p "$p" 2>/dev/null | tr -d ' ')
+    [ -n "$g" ] && [ "$g" != "$(ps -o pgid= -p $$ | tr -d ' ')" ] && kill -- "-$g" 2>/dev/null
+  done
+  snooze 1
 }
+player_alive(){ [ -n "$PLAYER_PGID" ] && pgrep -g "$PLAYER_PGID" -x mpv >/dev/null; }
 
 # Current playback position (1st AV number) in whole seconds, "" if none yet.
 av_pos(){ grep -oE '^AV: [0-9:]+' "$MPVLOG" | tail -1 | grep -oE '[0-9:]+$' \
@@ -224,11 +240,11 @@ started_ok(){
   local n=0 p0 p1
   while [ "$n" -lt 12 ]; do
     p0=$(av_pos); [ -n "$p0" ] && break
-    pgrep -x mpv >/dev/null || return 1
-    sleep 1; n=$((n+1))
+    player_alive || return 1
+    snooze 1; n=$((n+1))
   done
   [ -n "$p0" ] || return 1
-  sleep 4; p1=$(av_pos)
+  snooze 4; p1=$(av_pos)
   [ -n "$p1" ] && [ "$p1" -gt "$p0" ] && return 0
   return 1
 }
@@ -276,7 +292,7 @@ relaunch(){
     restarts=$((restarts+1))
     [ "$restarts" -gt "$MAX_RESTARTS" ] && { log "MAX_RESTARTS hit — giving up"; return 1; }
     log "relaunch #$restarts ($1)"
-    kill_player; sleep "$COOLDOWN"; launch
+    kill_player; snooze "$COOLDOWN"; launch
     started_ok && { log "playing"; return 0; }
     log "  start hung (rough patch) — retrying"
   done
@@ -301,14 +317,19 @@ if ! flock -n 9; then
   exit 1
 fi
 
+# The pipeline runs in its own session, so nothing that stops this script reaches it: stop it
+# here, on every way out (chain down, restart cap, a signal).
+trap kill_player EXIT
+trap 'exit 0' INT TERM
+
 restarts=0
 relaunch "initial" || exit 1
-last=$(av_pos); stuck=0
+last=$(av_pos); stuck=0; good=0
 fsz_prev=$(stat -c %s "$F" 2>/dev/null || echo 0)
 while true; do
-  sleep 10
+  snooze 10
   if ! pgrep -f '^python3 [^ ]*tv_live\.py' >/dev/null; then log "chain DOWN — supervisor exiting"; exit 0; fi
-  if ! pgrep -x mpv >/dev/null; then relaunch "mpv died" || exit 1; last=$(av_pos); stuck=0; continue; fi
+  if ! player_alive; then relaunch "mpv died" || exit 1; last=$(av_pos); stuck=0; continue; fi
   # Proactive rotation relaunch (STVT_ROTATE_RELAUNCH=0 disables): when the
   # chain recycles live.ts the size shrinks; tail -F follows the truncation
   # but drags an MPEG-TS timestamp discontinuity through ffmpeg/mpv — it
@@ -320,7 +341,7 @@ while true; do
   fsz=$(stat -c %s "$F" 2>/dev/null || echo 0)
   if [ "${STVT_ROTATE_RELAUNCH:-1}" = 1 ] && [ "$fsz" -lt $((fsz_prev - 100000000)) ]; then
     log "rotation detected ($((fsz_prev/1000000))MB -> $((fsz/1000000))MB) — proactive relaunch"
-    sleep 3   # let the fresh file accumulate a few MB for ffmpeg's probe
+    snooze 3   # let the fresh file accumulate a few MB for ffmpeg's probe
     relaunch "rotation" || exit 1
     last=$(av_pos); stuck=0; fsz_prev=$(stat -c %s "$F" 2>/dev/null || echo 0)
     continue
@@ -330,9 +351,13 @@ while true; do
   # advancing at the live edge is fine — not a freeze).
   pos=$(av_pos)
   if [ -n "$pos" ] && [ -n "$last" ] && [ "$pos" -le "$last" ]; then
-    stuck=$((stuck+1))
+    stuck=$((stuck+1)); good=0
   else
     stuck=0
+    # MAX_RESTARTS guards against a relaunch storm; it is not a lifetime budget (a rotation
+    # relaunch every couple of hours would spend it in days).  Three minutes of a moving
+    # picture clears it, as stvt_run.sh does for the chain.
+    good=$((good+1)); [ "$good" -ge 18 ] && restarts=0
   fi
   last=$pos
   if [ "$stuck" -ge 3 ]; then   # ~30s with no progress

@@ -16,7 +16,9 @@
 #   rf      : ATSC RF channel (default 34)
 #   program : MPEG-TS program to play, 1080 HD (default 3)
 #
-# Stop everything:  pkill -f stvt_run.sh ; pkill -f tv_live.py ; pkill -f stvt_play_hd.sh
+# Stop everything:  pkill -f '^bash [^ ]*stvt_run\.sh' ; pkill -f '^bash [^ ]*stvt_play_hd\.sh' ; pkill -INT -f '^python3 [^ ]*tv_live\.py'
+#   (the chain takes SIGINT, never TERM or KILL: those wedge the sdrplay API; the player
+#    supervisor stops its own tail|ffmpeg|mpv pipeline on the way out)
 set -u
 
 # ONE SUPERVISOR AT A TIME (docs/PI_ARCHITECTURE.md law): two stvt_run
@@ -37,6 +39,10 @@ flock -w 15 9 || { echo "another stvt_run.sh holds /tmp/stvt_run.lock — refusi
 
 # Sleep without handing the lock fd to the child. Use this, never bare `sleep`.
 snooze(){ sleep "$1" 9>&- ; }
+
+# What the caller set on the command line, kept so that it wins over the defaults below AND
+# over the autocal file (`STVT_ANTENNA="Antenna A" stvt_run.sh 9` must tune Antenna A).
+_STVT_CALLER_ENV=$(export -p | grep -E '^declare -x STVT_' || true)
 
 RF="${1:-34}"
 PROG="${2:-3}"
@@ -78,7 +84,7 @@ export STVT_FPLL_FOLD="${STVT_FPLL_FOLD:-1}"
 # the drought-recovery watchdog below catches any rare regression. The flag is
 # read inside the C++ work(), so it also applies to tv_replay/DVR with no wiring.
 export STVT_FPLL_BLOCK_NCO="${STVT_FPLL_BLOCK_NCO:-1}"
-export STVT_RS=stock STVT_VITERBI=hard STVT_EQ=long
+export STVT_RS="${STVT_RS:-stock}" STVT_VITERBI="${STVT_VITERBI:-hard}" STVT_EQ="${STVT_EQ:-long}"
 # SPS: 1.3 on x86, 1.1 on the Pi. On the Ryzen box SPS 1.3 is markedly more
 # robust on marginal signal than the old lean 1.1 — validated on a real RF36
 # capture pushed to the decode cliff (tools/native_sps_11v13.py): at cliff-edge
@@ -89,12 +95,13 @@ export STVT_RS=stock STVT_VITERBI=hard STVT_EQ=long
 if [ "$(uname -m)" = "aarch64" ]; then _sps=1.1; else _sps=1.3; fi
 export STVT_SPS="${STVT_SPS:-$_sps}" STVT_RRC_SYMS="${STVT_RRC_SYMS:-4}" STVT_TEISCRUB="${STVT_TEISCRUB:-0}"
 # Calibrated gain first: stvt_autocal.py writes ~/.stvt_autocal.env (STVT_IFGR
-# + eq knobs) — source it here so a calibrated box "just works". Only load it when
-# the user hasn't set STVT_IFGR explicitly, so an inline override still wins. This
+# + eq knobs) — source it here so a calibrated box "just works". Anything the caller
+# set inline is put back afterwards, variable by variable, so an inline override still wins. This
 # is the intended autocal hookup (the writer says "an env file the run-scripts
 # source"); without it a passive antenna never locks at the active-antenna default.
-if [ -z "${STVT_IFGR:-}" ] && [ -f "$HOME/.stvt_autocal.env" ]; then
+if [ -f "$HOME/.stvt_autocal.env" ]; then
   set -a; . "$HOME/.stvt_autocal.env"; set +a
+  eval "$_STVT_CALLER_ENV"      # each inline setting still wins, one variable at a time
 fi
 # ── PER-ANTENNA GAIN PROFILE (fallback when nothing above set the gain) ──────
 # This script used to hardcode IFGR=40 / rfgain_sel=3 for every antenna. Those
@@ -206,7 +213,7 @@ start_chain(){
   # Pi: chain outranks the nice+10 player stack (passwordless sudo; no-op if absent)
   if [ "$(uname -m)" = "aarch64" ]; then
     snooze 1
-    sudo -n renice -n -10 -p "$(pgrep -f "[t]v_live.py" | head -1)" >/dev/null 2>&1 || true
+    sudo -n renice -n -10 -p "$(pgrep -f '^python3 [^ ]*tv_live\.py' | head -1)" >/dev/null 2>&1 || true
   fi
   log "started chain (RF$RF, lean config${TSET_CHAIN:+, cpus $ISO_CHAIN_CPUS})"
 }
@@ -216,7 +223,7 @@ start_chain(){
 # the sdrplay API) and then WAIT for the process to be gone. Measured teardown
 # on this Pi is ~2 s; the 30 s bound is pure insurance.
 stop_chain(){
-  pkill -INT -f '[t]v_live.py' 2>/dev/null
+  pkill -INT -f '^python3 [^ ]*tv_live\.py' 2>/dev/null
   for _i in $(seq 1 30); do
     chain_up || { log "chain stopped in ${_i}s"; return 0; }
     snooze 1
@@ -281,7 +288,9 @@ while true; do
       restarts=$((restarts+1))
       [ "$restarts" -gt "$MAX_CHAIN_RESTARTS" ] && { log "MAX_CHAIN_RESTARTS hit — giving up (check the SDR)"; exit 1; }
       log "chain WEDGED — live.ts hasn't grown in ~$((stall_loops*20))s (size $cur_size) — restart #$restarts"
-      stop_chain; snooze "$COOLDOWN"; start_chain; snooze 10
+      # a chain that will not stop still holds the radio: never start a second one on top of it
+      if ! stop_chain; then snooze 20; continue; fi
+      snooze "$COOLDOWN"; start_chain; snooze 10
       last_size=0; stall_loops=0; clean_streak=0; continue
     fi
   else
@@ -314,7 +323,8 @@ while true; do
           restarts=$((restarts+1))
           [ "$restarts" -gt "$MAX_CHAIN_RESTARTS" ] && { log "MAX_CHAIN_RESTARTS hit — giving up"; exit 1; }
           log "NOISE DROUGHT persisted ${drought_loops} checks (~$((drought_loops*20))s, ${u}+ PIDs) — in-chain re-acquire didn't recover; restart #$restarts"
-          stop_chain; snooze "$COOLDOWN"; start_chain; snooze 10; drought_loops=0; clean_streak=0; last_size=0; stall_loops=0; continue
+          if ! stop_chain; then snooze 20; continue; fi
+          snooze "$COOLDOWN"; start_chain; snooze 10; drought_loops=0; clean_streak=0; last_size=0; stall_loops=0; continue
         else
           log "drought (check ${drought_loops}/${DROUGHT_GRACE_LOOPS}, ${u} PIDs) — letting the chain's re-acquire self-heal first"
         fi
